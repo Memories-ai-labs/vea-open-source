@@ -63,4 +63,30 @@
 
 .cancel-button:hover {
   background-color: #da190b;
+}
+
+.email-input-container {
+  margin: 20px 0;
+}
+
+.email-input {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 16px;
+  margin-bottom: 10px;
+}
+
+.email-input:focus {
+  outline: none;
+  border-color: #4CAF50;
+  box-shadow: 0 0 5px rgba(76, 175, 80, 0.2);
+}
+
+.error-message {
+  color: #f44336;
+  font-size: 14px;
+  margin-top: 5px;
+  margin-bottom: 10px;
 } 

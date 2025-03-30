@@ -14,10 +14,9 @@ const MovieCard = ({ movie }) => {
     setShowModal(true);
   };
 
-  const handleConfirm = async () => {
+  const handleConfirm = async (email) => {
     setShowModal(false);
     
-    // Show the AI editing notification
     toast.info('AI is editing your movie...', {
       position: "top-center",
       autoClose: 3000,
@@ -34,12 +33,18 @@ const MovieCard = ({ movie }) => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          title: movie.title
+          title: movie.title,
+          email: email
         }),
       });
       
       const data = await response.json();
       console.log('Backend response:', data);
+      
+      toast.success('We will email you when the editing is complete!', {
+        position: "top-center",
+        autoClose: 4000,
+      });
       
     } catch (error) {
       console.error('Error sending movie click:', error);
