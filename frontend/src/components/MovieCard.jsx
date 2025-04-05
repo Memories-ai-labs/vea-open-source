@@ -14,7 +14,7 @@ const MovieCard = ({ movie }) => {
     setShowModal(true);
   };
 
-  const handleConfirm = async (email) => {
+  const handleConfirm = async (email, youtubeUrl) => {
     setShowModal(false);
     
     toast.info('AI is editing your movie...', {
@@ -34,7 +34,8 @@ const MovieCard = ({ movie }) => {
         },
         body: JSON.stringify({
           title: movie.title,
-          email: email
+          email: email,
+          youtubeUrl: youtubeUrl
         }),
       });
       

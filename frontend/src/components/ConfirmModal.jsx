@@ -4,7 +4,9 @@ import './ConfirmModal.css';
 const ConfirmModal = ({ isOpen, onConfirm, onCancel, movieTitle }) => {
   const [showEmailInput, setShowEmailInput] = useState(false);
   const [email, setEmail] = useState('');
+  const [youtubeUrl, setYoutubeUrl] = useState('');
   const [emailError, setEmailError] = useState('');
+  const [youtubeError, setYoutubeError] = useState('');
 
   if (!isOpen) return null;
 
@@ -12,23 +14,35 @@ const ConfirmModal = ({ isOpen, onConfirm, onCancel, movieTitle }) => {
     setShowEmailInput(true);
   };
 
-  const handleEmailSubmit = () => {
+  const handleSubmit = () => {
     // Basic email validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
       setEmailError('Please enter a valid email address');
       return;
     }
-    onConfirm(email);
+
+    // YouTube URL validation
+    const youtubeRegex = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/;
+    if (!youtubeRegex.test(youtubeUrl)) {
+      setYoutubeError('Please enter a valid YouTube URL');
+      return;
+    }
+
+    onConfirm(email, youtubeUrl);
     setShowEmailInput(false);
     setEmail('');
+    setYoutubeUrl('');
     setEmailError('');
+    setYoutubeError('');
   };
 
   const handleClose = () => {
     setShowEmailInput(false);
     setEmail('');
+    setYoutubeUrl('');
     setEmailError('');
+    setYoutubeError('');
     onCancel();
   };
 
@@ -50,9 +64,9 @@ const ConfirmModal = ({ isOpen, onConfirm, onCancel, movieTitle }) => {
           </>
         ) : (
           <>
-            <h3>Enter Your Email</h3>
+            <h3>Enter Your Details</h3>
             <p>We'll notify you when the AI editing is complete</p>
-            <div className="email-input-container">
+            <div className="input-container">
               <input
                 type="email"
                 value={email}
@@ -61,14 +75,26 @@ const ConfirmModal = ({ isOpen, onConfirm, onCancel, movieTitle }) => {
                   setEmailError('');
                 }}
                 placeholder="Enter your email address"
-                className="email-input"
+                className="form-input"
               />
               {emailError && <p className="error-message">{emailError}</p>}
+              
+              <input
+                type="url"
+                value={youtubeUrl}
+                onChange={(e) => {
+                  setYoutubeUrl(e.target.value);
+                  setYoutubeError('');
+                }}
+                placeholder="Enter YouTube URL of the movie"
+                className="form-input"
+              />
+              {youtubeError && <p className="error-message">{youtubeError}</p>}
             </div>
             <div className="modal-buttons">
               <button 
                 className="confirm-button" 
-                onClick={handleEmailSubmit}
+                onClick={handleSubmit}
               >
                 Submit
               </button>
