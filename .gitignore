@@ -1,7 +1,6 @@
 # Node dependencies
 node_modules/
-/frontend/node_modules/
-/frontend/build
+build/
 .DS_Store
 .env.local
 .env.development.local
@@ -32,7 +31,6 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
-.env
 .venv
 venv/
 ENV/
@@ -42,3 +40,5 @@ ENV/
 .vscode/
 *.swp
 *.swo 
+test_data/
+config/
