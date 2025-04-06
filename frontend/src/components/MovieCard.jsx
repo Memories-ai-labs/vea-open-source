@@ -27,7 +27,7 @@ const MovieCard = ({ movie }) => {
     });
 
     try {
-      const response = await fetch('http://localhost:8000/api/movie-clicked', {
+      const response = await fetch('http://35.188.211.190:80/api/movie-clicked', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
