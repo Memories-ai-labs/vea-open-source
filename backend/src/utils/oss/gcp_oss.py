@@ -1,11 +1,12 @@
 from datetime import timedelta
 from typing import List, Sequence
 import logging
-
+import os
 from google.api_core.exceptions import NotFound
 from google.cloud import storage
 from google.cloud.storage import transfer_manager
 from google.cloud.storage.transfer_manager import THREAD
+from tqdm import tqdm
 
 from src.utils.oss.oss import OSSDataMapping, OSSPathMapping
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -62,6 +63,25 @@ class GoogleCloudStorage:
         bucket = self.client.bucket(bucket_name)
         blob = bucket.blob(blob_path)
         blob.download_to_filename(local_path)
+    
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True
+    )
+    async def download_to_file_with_progress(self, bucket_name, blob_path, local_path) -> None:
+        bucket = self.client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        
+        # Get the total size of the file
+        blob.reload()
+        
+        with open(local_path, 'wb') as f:
+            with tqdm.wrapattr(f, "write", total=blob.size) as file_obj:
+                # blob.download_to_file is deprecated
+                self.client.download_blob_to_file(blob, file_obj)
+        logger.info(f"Downloaded {blob_path} to {local_path}")
+
 
     @retry(
         stop=stop_after_attempt(3),
@@ -90,9 +110,9 @@ class GoogleCloudStorage:
         )
         for name, result in zip(new_blob_map, results):
             if isinstance(result, Exception):
-                print("Failed to upload {} due to exception: {}".format(name, result))
+                logger.error(f"Failed to upload {name} due to exception: {result}")
             else:
-                print("Uploaded {} to {}.".format(name, bucket.name))
+                logger.info(f"Uploaded {name} to {bucket.name}.")
 
     @retry(
         stop=stop_after_attempt(3),
@@ -109,9 +129,9 @@ class GoogleCloudStorage:
         )
         for name, result in zip(new_blob_map, results):
             if isinstance(result, Exception):
-                print("Failed to upload {} due to exception: {}".format(name, result))
+                logger.error(f"Failed to upload {name} due to exception: {result}")
             else:
-                print("Uploaded {} to {}.".format(name, bucket.name))
+                logger.info(f"Uploaded {name} to {bucket.name}.")
 
     def get_public_download_url(
         self, bucket_name: str, blob_path: str, expired_in_hour=1
@@ -121,6 +141,18 @@ class GoogleCloudStorage:
         expiration = timedelta(hours=expired_in_hour)
         signed_url = blob.generate_signed_url(expiration=expiration)
         return signed_url
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True
+    )
+    def list_folder(
+        self, bucket, blob_path: str
+    ) -> List[str]:
+        bucket = self.client.bucket(bucket)
+        blobs = bucket.list_blobs(prefix=blob_path)
+        return [(os.path.basename(blob.name).split('.')[0], blob.name) for blob in blobs if blob.name != blob_path]
 
     @retry(
         stop=stop_after_attempt(3),

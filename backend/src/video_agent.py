@@ -22,7 +22,7 @@ class VideoAgentPipeline:
         self,
         movie_name: str = "",
         initial_prompt: str = "",
-        long_interval_seconds: int = 1200,
+        long_interval_seconds: int = 900,
         short_interval_seconds: int = 300,
         bgm_path: str = None,
         debug_dir: str = None,
@@ -102,12 +102,16 @@ class VideoAgentPipeline:
             except Exception as e:
                 logger.error(f"Failed to trim clip ID {clip.get('id', '?')}: {e}")
 
-    async def run(self, youtube_url: str = None, video_path: str = None):
+    async def run(self, gcs_path: str = None, youtube_url: str = None, video_path: str = None):
         """Runs the full movie recap pipeline."""
         logger.info("Starting Movie Recap Pipeline...")
         
         try:
-            if youtube_url is not None:
+            if gcs_path is not None:
+                logger.info(f"Downloading video from GCS: {gcs_path}")
+                video_path = os.path.join(self.work_dir, "source_video.mp4")
+                await self.oss_client.download_to_file_with_progress(self.bucket, gcs_path, video_path)
+            elif youtube_url is not None:
                 # Download YouTube video
                 logger.info(f"Downloading video from YouTube: {youtube_url}")
                 video_path = os.path.join(self.work_dir, "source_video.mp4")
@@ -180,7 +184,7 @@ class VideoAgentPipeline:
 
         except Exception as e:
             logger.error(f"Pipeline failed: {str(e)}")
-            if not self.work_dir:
+            if self.work_dir:
                 shutil.rmtree(self.work_dir)
             await self.genai_client.delete_all_files(self.files_tracker)
             raise e
@@ -189,7 +193,7 @@ class VideoAgentPipeline:
 if __name__ == "__main__":
     try:
         video_path = "E:/OpenInterX Code Source/vea-playground/test_data/wusha2.mp4"
-        youtube_url = "https://www.youtube.com/watch?v=D5hmCf_HIJg"
+        youtube_url = "https://www.youtube.com/watch?v=EPFAGQNnayQ&t"
         debug_dir = "E:/OpenInterX Code Source/vea-playground/test_data/debug"
         va = VideoAgentPipeline(
             movie_name="test_video",

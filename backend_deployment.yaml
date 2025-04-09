@@ -21,9 +21,9 @@ spec:
         - containerPort: 8000
         resources:
           requests:
-            cpu: "2"
+            cpu: "7"
           limits:
-            cpu: "2"
+            cpu: "8"
 ---
 apiVersion: v1
 kind: Service
@@ -56,4 +56,4 @@ spec:
       name: cpu
       target:
         type: Utilization
-        averageUtilization: 75
+        averageUtilization: 100
