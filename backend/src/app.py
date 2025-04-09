@@ -3,6 +3,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, HttpUrl
 from src.video_agent import VideoAgentPipeline
+from src.utils.oss.gcp_oss import GoogleCloudStorage
 import aiosmtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -10,6 +11,8 @@ import os
 from dotenv import load_dotenv
 from jinja2 import Environment, FileSystemLoader
 from pathlib import Path
+from typing import List
+from src.utils.oss.auth import credentials_from_file
 
 # Load environment variables
 load_dotenv()
@@ -22,7 +25,7 @@ app = FastAPI()
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://34.123.184.43"],  # Your React app URL
+    allow_origins=["http://34.123.184.43", "http://localhost"],  # Your React app URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -33,18 +36,45 @@ env = Environment(
     loader=FileSystemLoader('templates')
 )
 
+# Initialize GCP OSS client
+CREDENTIAL_PATH = Path(__file__).resolve().parent.parent / "config" / "gen-lang-client-0057517563-0319d78ed5fe.json"
+gcp_oss = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
+BUCKET = "openinterx-vea"
+MOVIE_LIBRARY_PATH = "movie_library"
 
 class MovieClick(BaseModel):
     title: str
     email: EmailStr
-    youtubeUrl: HttpUrl
-
+    youtube_url: str | None = None
+    blob_path: str
 
 class MovieResponse(BaseModel):
     message: str
     email: EmailStr
-    youtubeUrl: str
+    youtube_url: str | None = None
     status: str
+
+class MovieFile(BaseModel):
+    name: str
+    blob_path: str
+
+
+@app.get("/api/movies", response_model=List[MovieFile])
+async def get_available_movies():
+    """Get list of available movie recaps from GCS."""
+    try:
+        logger.info("Fetching list of available movies from GCS")
+        blobs = gcp_oss.list_folder(BUCKET, f"{MOVIE_LIBRARY_PATH}/")
+        
+        movies = []
+        for blob in blobs:
+            movies.append(MovieFile(name=blob[0], blob_path=blob[1]))
+        
+        logger.info(f"Found {len(movies)} available movies")
+        return movies
+    except Exception as e:
+        logger.error(f"Error fetching movies from GCS: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 async def send_email(to_email: str, movie_title: str, download_url: str):
@@ -108,7 +138,7 @@ async def movie_clicked(movie: MovieClick):
     try:
         logger.info(f"Received movie click: {movie.title}")
         logger.info(f"User email: {movie.email}")
-        logger.info(f"YouTube URL: {movie.youtubeUrl}")
+        logger.info(f"YouTube URL: {movie.youtube_url}")
 
         BASE_DIR = Path(__file__).resolve().parent.parent  # Go up one level from src to backend
         BGM_PATH = BASE_DIR / "templates" / "audio" / "Else - Paris.mp3"
@@ -120,7 +150,7 @@ async def movie_clicked(movie: MovieClick):
         )
 
         # Run the pipeline and get the download URL
-        download_url = await pipeline.run(str(movie.youtubeUrl))
+        download_url = await pipeline.run(gcs_path=movie.blob_path, youtube_url=movie.youtube_url)
 
         # Send email with download URL
         email_sent = await send_email(movie.email, movie.title, download_url)
@@ -135,7 +165,7 @@ async def movie_clicked(movie: MovieClick):
         return MovieResponse(
             message=f"Successfully processed movie: {movie.title} and sent download link to your email",
             email=movie.email,
-            youtubeUrl=str(movie.youtubeUrl),
+            youtube_url=str(movie.youtube_url),
             status="completed"
         )
     except Exception as e:
