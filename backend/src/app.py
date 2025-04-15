@@ -25,7 +25,7 @@ app = FastAPI()
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://34.123.184.43", "http://localhost"],  # Your React app URL
+    allow_origins=["http://34.123.184.43", "http://localhost:3000"],  # Your React app URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -150,7 +150,7 @@ async def movie_clicked(movie: MovieClick):
         )
 
         # Run the pipeline and get the download URL
-        download_url = await pipeline.run(gcs_path=movie.blob_path, youtube_url=movie.youtube_url)
+        download_url = await pipeline.run(gcs_path=movie.blob_path)
 
         # Send email with download URL
         email_sent = await send_email(movie.email, movie.title, download_url)

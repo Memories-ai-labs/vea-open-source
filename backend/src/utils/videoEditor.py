@@ -2,6 +2,7 @@ import os
 import subprocess
 from pydub.utils import mediainfo
 from tempfile import TemporaryDirectory
+from .file_utils import get_file_extension
 
 
 def get_audio_duration(audio_path):
@@ -98,22 +99,25 @@ async def create_final_video(
     chosen_videos_dir,
     narration_dir,
     background_music_path,
-    output_path="final_recap.mp4"
+    final_video_output_path
 ):
     try:
         final_recap_dir = os.path.join(work_dir, "final_recap")
         os.makedirs(final_recap_dir, exist_ok=True)
         concat_list_file = os.path.join(final_recap_dir, "concat.txt")
         final_clips = []
+        video_ext = get_file_extension(final_video_output_path)
+        print(video_ext)
+        print(final_video_output_path)
 
         # Process each clip
         for clip in sorted(clips, key=lambda c: int(c["id"])):
             clip_id = clip["id"]
-            video_path = os.path.join(chosen_videos_dir, f"{clip_id}.mp4")
+            video_path = os.path.join(chosen_videos_dir, f"{clip_id}{video_ext}")
             audio_path = os.path.join(narration_dir, f"{clip_id}.mp3")
 
-            trimmed_video = os.path.join(final_recap_dir, f"{clip_id}_trimmed.mp4")
-            replaced_audio = os.path.join(final_recap_dir, f"{clip_id}_narrated.mp4")
+            trimmed_video = os.path.join(final_recap_dir, f"{clip_id}_trimmed{video_ext}")
+            replaced_audio = os.path.join(final_recap_dir, f"{clip_id}_narrated{video_ext}")
 
             audio_duration = get_audio_duration(audio_path)
 
@@ -127,8 +131,8 @@ async def create_final_video(
             for clip_path in final_clips:
                 f.write(f"file '{clip_path}'\n")
 
-            # Concatenate all narrated clips
-        intermediate_output = os.path.join(final_recap_dir, "combined_narrated.mp4")
+        # Concatenate all narrated clips
+        intermediate_output = os.path.join(final_recap_dir, f"combined_narrated{video_ext}")
         subprocess.run([
             "ffmpeg", "-y",
             "-f", "concat",
@@ -140,9 +144,7 @@ async def create_final_video(
         ], check=True)
 
             # Mix with background music
-        mix_music_with_audio(intermediate_output, background_music_path, output_path)
-        print(f"[INFO] Final recap video created: {output_path}")
+        mix_music_with_audio(intermediate_output, background_music_path, final_video_output_path)
+        print(f"[INFO] Final recap video created: {final_video_output_path}")
     except Exception as e:
         print(f"[ERROR] Failed to create final recap video: {e}")
-        print(audio_path)
-        print(video_path)
