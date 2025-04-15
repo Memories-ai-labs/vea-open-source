@@ -6,6 +6,7 @@ from src.utils.parse import timestamp_to_seconds, seconds_to_timestamp
 # Set up logging
 logger = logging.getLogger(__name__)
 
+
 class MovieRecap:
     def __init__(self, llm):
         self.llm = llm
@@ -85,15 +86,32 @@ class MovieRecap:
 
                 prompt = f"""{plot_and_characters_text}
 
-                        You are provided with a segment of a movie, including a textual recap of its plot and a list of characters. Your task is to describe the scene in detail at 30-second intervals throughout the entire segment. For each interval, specify the characters involved and their actions, using the character names as presented in the plot recap. Ensure that the entire segment is covered. Ensuring the response does not exceed 800 tokens.
+You are given a segment of a movie, including a textual recap of its plot and a list of characters. Your task is to describe the scene in detail at 30-second intervals, covering the entire segment.
 
-                        Format each scene description as a JSON object with the following keys:
-                        - "start_timestamp": string, formatted as "HH:MM:SS"
-                        - "end_timestamp": string, formatted as "HH:MM:SS"
-                        - "description": string
+For each interval:
+- Identify the characters present and describe their actions, using character names exactly as provided in the recap.
+- Focus on key events, interactions, emotions, and movement.
+- Avoid repetition and remove duplicate or redundant descriptions.
 
-                        Please output a JSON array containing these objects, each representing a 30-second scene description. 
-                        """
+Output Requirements:
+- Format each entry as a JSON object with the following keys:
+    - "start_timestamp": string, format "HH:MM:SS"
+    - "end_timestamp": string, format "HH:MM:SS"
+    - "description": string, a detailed narrative of the scene in this interval
+- Return a single JSON array of these objects.
+- Ensure that the final output is valid JSON and does not exceed 8000 tokens. If necessary, truncate the output cleanly and return only as many intervals as will fit within the limit, maintaining JSON validity (no trailing commas, unclosed brackets, etc.).
+
+Example:
+[
+  {{
+    "start_timestamp": "00:00:00",
+    "end_timestamp": "00:00:30",
+    "description": "..."
+  }},
+  ...
+]
+"""
+
                 response = await self.llm.generate_response(
                     contents=[video_file, prompt],
                     params={

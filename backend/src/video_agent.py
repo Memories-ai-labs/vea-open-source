@@ -12,6 +12,7 @@ from src.utils.videoEditor import create_final_video
 import tempfile
 from src.utils.oss.gcp_oss import GoogleCloudStorage
 from src.utils.oss.auth import credentials_from_file
+from src.utils.file_utils import get_file_extension
 from pathlib import Path
 
 # Set up logging
@@ -36,6 +37,7 @@ class VideoAgentPipeline:
         self.genai_client = LLMService()
         self.movie_recap_agent = MovieRecap(self.genai_client)
         self.bucket = "openinterx-vea"
+        self.debug_dir = debug_dir
         
         # Fix the credential path to point to the correct location
         BASE_DIR = Path(__file__).resolve().parent.parent  # Go up one level from src to backend
@@ -44,12 +46,12 @@ class VideoAgentPipeline:
         self.oss_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
         self.files_tracker = []
 
-        self.setup_work_directory(debug_dir=debug_dir)
+        self.setup_work_directory()
 
-    def setup_work_directory(self, debug_dir: str = None):
+    def setup_work_directory(self):
         """Creates the work directory and video fragments folder."""
-        if debug_dir:
-            self.work_dir = debug_dir
+        if self.debug_dir:
+            self.work_dir = self.debug_dir
         else:
             self.work_dir = tempfile.mkdtemp()
         self.long_fragments_dir = os.path.join(self.work_dir, "long_video_fragments")
@@ -57,7 +59,6 @@ class VideoAgentPipeline:
         self.textual_repr_dir = os.path.join(self.work_dir, "textual_repr")
         self.chosen_clips_dir = os.path.join(self.work_dir, "chosen_clips_videos")
         self.ttv_dir = os.path.join(self.work_dir, "text_to_voice")
-        self.final_video_path = os.path.join(self.work_dir, "final_recap.mp4")
 
     async def preprocess_videos(self, video_path: str):
         """Splits videos into long and short fragments."""
@@ -96,27 +97,27 @@ class VideoAgentPipeline:
                 logger.info(
                     f"Trimming clip ID {clip_id} from {clip['start_timestamp']} to {clip['end_timestamp']}"
                 )
-                output_clip_path = os.path.join(self.chosen_clips_dir, f"{clip_id}.mp4")
+                output_clip_path = os.path.join(self.chosen_clips_dir, f"{clip_id}{self.media_extension}")
                 trim_video_clip(video_path, start, end, output_clip_path)
 
             except Exception as e:
                 logger.error(f"Failed to trim clip ID {clip.get('id', '?')}: {e}")
 
-    async def run(self, gcs_path: str = None, youtube_url: str = None, video_path: str = None):
+    async def run(self, gcs_path: str = None, video_path: str = None):
         """Runs the full movie recap pipeline."""
         logger.info("Starting Movie Recap Pipeline...")
         
         try:
             if gcs_path is not None:
                 logger.info(f"Downloading video from GCS: {gcs_path}")
-                video_path = os.path.join(self.work_dir, "source_video.mp4")
+                video_path = os.path.join(self.work_dir, os.path.basename(gcs_path))
+                self.media_extension = get_file_extension(video_path)
+                self.final_video_path = os.path.join(self.work_dir, f"final_recap{self.media_extension}")
                 await self.oss_client.download_to_file_with_progress(self.bucket, gcs_path, video_path)
-            elif youtube_url is not None:
-                # Download YouTube video
-                logger.info(f"Downloading video from YouTube: {youtube_url}")
-                video_path = os.path.join(self.work_dir, "source_video.mp4")
-                await download_youtube_video(youtube_url, video_path)            
-            # Continue with existing pipeline...
+            elif video_path is not None:
+                video_path = os.path.join(self.work_dir, os.path.basename(video_path))
+                self.media_extension = get_file_extension(video_path)
+                self.final_video_path = os.path.join(self.work_dir, f"final_recap{self.media_extension}")
             await self.preprocess_videos(video_path)
             
             # Step 2: Upload long fragments
@@ -172,19 +173,20 @@ class VideoAgentPipeline:
                 chosen_videos_dir=self.chosen_clips_dir,
                 narration_dir=self.ttv_dir,
                 background_music_path=self.bgm_path,
-                output_path=self.final_video_path,
+                final_video_output_path=self.final_video_path,
             )
-            self.oss_client.upload_from_file(self.final_video_path, self.bucket, self.movie_name + "/final_recap.mp4")
+            self.oss_client.upload_from_file(self.final_video_path, self.bucket, self.movie_name + f"/final_recap{self.media_extension}")
             logger.info("Movie Recap Pipeline Completed.")
 
             await self.genai_client.delete_all_files(self.files_tracker)
-            shutil.rmtree(self.work_dir)
+            if self.debug_dir is None:
+                shutil.rmtree(self.work_dir)
             logger.info("All files deleted.")
-            return self.oss_client.get_public_download_url(self.bucket, self.movie_name + "/final_recap.mp4", expired_in_hour=24)
+            return self.oss_client.get_public_download_url(self.bucket, self.movie_name + f"/final_recap{self.media_extension}", expired_in_hour=24)
 
         except Exception as e:
             logger.error(f"Pipeline failed: {str(e)}")
-            if self.work_dir:
+            if self.work_dir and self.debug_dir is None:
                 shutil.rmtree(self.work_dir)
             await self.genai_client.delete_all_files(self.files_tracker)
             raise e
@@ -192,20 +194,19 @@ class VideoAgentPipeline:
 
 if __name__ == "__main__":
     try:
-        video_path = "E:/OpenInterX Code Source/vea-playground/test_data/wusha2.mp4"
-        youtube_url = "https://www.youtube.com/watch?v=EPFAGQNnayQ&t"
-        debug_dir = "E:/OpenInterX Code Source/vea-playground/test_data/debug"
+        video_path = Path("E:/OpenInterX Code Source/vea-playground/test_data/忠犬八公的故事.mkv")
+        debug_dir = Path("E:/OpenInterX Code Source/vea-playground/test_data/debug")
         va = VideoAgentPipeline(
             movie_name="test_video",
-            bgm_path="E:/OpenInterX Code Source/vea-playground/test_data/Else - Paris.mp3",
-            long_interval_seconds=20 * 60,
+            bgm_path=Path("E:/OpenInterX Code Source/vea-playground/test_data/Else - Paris.mp3"),
+            long_interval_seconds=15 * 60,
             short_interval_seconds=5 * 60,
             debug_dir=debug_dir,
         )
-        asyncio.run(va.run(youtube_url=youtube_url, video_path=video_path))
+        asyncio.run(va.run(video_path=video_path))
     except Exception as e:
         logger.error(f"Work directory: {va.work_dir}")
-        if not debug_dir or debug_dir == "":
+        if va.debug_dir is None:
             shutil.rmtree(va.work_dir)
         asyncio.run(va.genai_client.delete_all_files(va.files_tracker))
         raise e
