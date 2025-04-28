@@ -1,0 +1,20 @@
+[project]
+name = "vea-playground"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+    "fastapi",
+    "google-generativeai",
+    "google-cloud-aiplatform",
+    "google-cloud-storage",
+    "tenacity",
+    "tqdm",
+    "certifi",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
