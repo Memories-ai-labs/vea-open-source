@@ -64,6 +64,29 @@ Notes:
 
 
 class SummaryPipeline:
+    """
+    SummaryPipeline is an asynchronous video summarization pipeline that processes a video into short clips,
+    generates a brief summary for each clip using an LLM (Gemini), and compiles the segment summaries into
+    a cohesive plot summary.
+
+    Core Workflow:
+    1. Download the video from GCS if needed.
+    2. Split the video into fixed-length clips based on the specified interval.
+    3. Generate a short summary ("gist") for each clip via the LLM.
+    4. Aggregate all clip summaries into a final integrated plot summary.
+
+    Attributes:
+        initial_prompt (str): Optional initial prompt to guide the summarization.
+        interval_seconds (int): Duration of each clip segment in seconds (default 1200s = 20min).
+        debug_dir (str or None): Directory for debugging output. If None, a temporary directory is created.
+        llm (Gemini): LLM client used for generating summaries.
+        oss_client (GoogleCloudStorage): Client for interacting with Google Cloud Storage.
+
+    Methods:
+        run(gcs_path: str = None) -> str:
+            Runs the full summarization pipeline and returns the final plot summary.
+    """
+     
     def __init__(
         self, initial_prompt: str = "", interval_seconds: int = 1200, debug_dir=None
     ):
@@ -151,8 +174,8 @@ class SummaryPipeline:
 
 if __name__ == "__main__":
     import asyncio
-    video_path = "E:/OpenInterX-Code-Source/mavi-edit-service/test/爱在日落黄昏时.mkv" ## -- replace it with your movie path
-    output_path = "E:/OpenInterX-Code-Source/mavi-edit-service/test/output" ## -- replace it with your debug dir path
+    video_path = "E:/OpenInterX-Code-Source/vea-playground/test/爱在日落黄昏时.mkv" ## -- replace it with your movie path
+    output_path = "E:/OpenInterX-Code-Source/vea-playground/test/output" ## -- replace it with your debug dir path
     s = SummaryPipeline(debug_dir=output_path)
     summary = asyncio.run(s.run(video_path))
     print(summary)
