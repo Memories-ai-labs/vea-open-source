@@ -9,8 +9,8 @@ from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
 from lib.utils.media import convert_video
 from lib.llm.gemini import Gemini
-from src.pipeline.utils import generate_response_for_video
-from src.pipeline.schema import ClipSummary
+from src.pipelines.utils import generate_response_for_video
+from src.pipelines.schema import ClipSummary
 
 logger = logging.getLogger(__name__)
 

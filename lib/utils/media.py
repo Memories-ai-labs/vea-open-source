@@ -51,17 +51,8 @@ async def convert_video(
 ) -> list[str]:
     """
     Split the input video into segments of length `interval_seconds`.
-    
-    Args:
-        input_path (str): Path to the input video.
-        output_dir (str): Directory to save the output segments.
-        interval_seconds (int): Length of each segment (in seconds).
-        fps (Optional[int]): Frames per second.
-        crf (Optional[int]): Constant rate factor (quality control).
-        target_height (Optional[int]): Resize video height (maintains aspect ratio).
 
-    Returns:
-        List[str]: List of output segment file paths, in order.
+    Output file format: segment_{start:05d}_{end:05d}.mp4
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -70,15 +61,17 @@ async def convert_video(
     total_duration = get_video_duration(input_path)
     logger.info(f"Total video duration: {total_duration:.2f} seconds")
 
-    segment_idx = 0
     current_start = 0.0
     output_paths = []
 
     while current_start < total_duration:
-        output_filename = os.path.join(output_dir, f"segment_{segment_idx:04d}.mp4")
+        start_sec = int(current_start)
+        end_sec = int(min(current_start + interval_seconds, total_duration))
+        output_filename = os.path.join(
+            output_dir, f"spacebetween_{start_sec:05d}_{end_sec:05d}.mp4"
+        )
 
-        # Calculate actual duration for this segment
-        duration = min(interval_seconds, total_duration - current_start)
+        duration = end_sec - start_sec
 
         cmd = ["ffmpeg", "-y", "-ss", str(current_start), "-i", input_path, "-t", str(duration)]
 
@@ -97,20 +90,20 @@ async def convert_video(
         cmd += ["-c:a", "copy"]
         cmd += [output_filename]
 
-        logger.info(f"Generating segment {segment_idx}: start={current_start:.2f}s duration={duration:.2f}s")
+        logger.info(f"Generating segment {start_sec:05d}–{end_sec:05d}: {output_filename}")
         result = subprocess.run(cmd, capture_output=True, text=False)
         if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg error during segment {segment_idx}: {result.stderr}")
+            raise RuntimeError(f"ffmpeg error during segment {start_sec}-{end_sec}: {result.stderr}")
 
-        output_paths.append(output_filename)  # record output path here
+        output_paths.append(output_filename)
 
-        segment_idx += 1
         current_start += interval_seconds
 
     end = time.time()
-    logger.info(f"Completed splitting {input_path} into {segment_idx} segments in {end - start:.2f} seconds")
+    logger.info(f"Completed splitting {input_path} into {len(output_paths)} segments in {end - start:.2f} seconds")
 
     return output_paths
+
 
 
 async def trim_video(
