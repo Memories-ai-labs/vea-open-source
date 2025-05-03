@@ -10,7 +10,7 @@ from lib.oss.auth import credentials_from_file
 from lib.utils.media import convert_video
 from lib.llm.gemini import Gemini
 from src.pipelines.utils import generate_response_for_video
-from src.pipelines.schema import ClipSummary
+from src.pipelines.movieRecap.schema import ClipSummary
 
 logger = logging.getLogger(__name__)
 
