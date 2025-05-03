@@ -1,40 +1,39 @@
 import os
+import asyncio
 
 class RoughComprehension:
-    def __init__(self, textual_repr_dir: str, lang: str, gemini_client):
+    def __init__(self, textual_repr_dir: str, lang: str, llm):
         """
         Args:
             textual_repr_dir (str): Directory where outputs will be saved.
             lang (str): The original language of the movie.
-            gemini_client: An object with a `_robust_gemini_call()` method for LLM calls.
+            llm: A manager for LLM calls (synchronous).
         """
         self.textual_repr_dir = textual_repr_dir
         self.lang = lang
-        self._robust_gemini_call = gemini_client._robust_gemini_call
+        self.llm = llm
 
         os.makedirs(self.textual_repr_dir, exist_ok=True)
         self.character_file_path = os.path.join(self.textual_repr_dir, "characters.txt")
         self.segment_by_segment_draft_path = os.path.join(self.textual_repr_dir, "segment_by_segment_draft.txt")
         self.combined_summary_draft_path = os.path.join(self.textual_repr_dir, "combined_summary_draft.txt")
 
-    def __call__(self, long_segments):
+    async def __call__(self, long_segments):
         if os.path.exists(self.combined_summary_draft_path):
             print("[INFO] Loading existing rough_comprehension file...")
-            with open(self.segment_by_segment_draft_path, "r", encoding="utf-8") as f:
-                segment_by_segment_draft = f.read()
             with open(self.combined_summary_draft_path, "r", encoding="utf-8") as f:
                 combined_summary_draft = f.read()
             with open(self.character_file_path, "r", encoding="utf-8") as f:
                 characters = f.read()
-            return combined_summary_draft, segment_by_segment_draft, characters
+            return combined_summary_draft, characters
 
-        long_segments.sort(key=lambda f: f.display_name)
+        long_segments.sort()
         segment_by_segment_draft = ""
         segment_num = 1
         compact_context = ""
 
         for segment in long_segments:
-            print(f"[INFO] Processing segment {segment_num}: {segment.display_name}")
+            print(f"[INFO] Processing segment {segment_num}: {segment}")
             print("compact context: ", compact_context)
 
             if segment_num == 1:
@@ -46,7 +45,7 @@ class RoughComprehension:
                     "Return plain text only. No preamble or extra commentary.\n"
                     f"The movie is in {self.lang}. Output in English, but preserve all original-language character names."
                 )
-                response_text = self._robust_gemini_call([segment, prompt])
+                response_text = await asyncio.to_thread(self.llm.LLM_request, [segment, prompt])
             else:
                 prompt = (
                     "You are provided with the current plot summary and character list from earlier segments, and a new video segment starting now.\n\n"
@@ -58,7 +57,7 @@ class RoughComprehension:
                     "Return plain text only. No preamble or extra commentary.\n"
                     f"The movie is in {self.lang}. Output in English, preserving original-language character names."
                 )
-                response_text = self._robust_gemini_call([segment, compact_context, prompt])
+                response_text = await asyncio.to_thread(self.llm.LLM_request, [segment, compact_context, prompt])
 
             segment_by_segment_draft += f"\n\n\n\n\nSegment {segment_num}:\n" + response_text
 
@@ -73,7 +72,7 @@ class RoughComprehension:
                 "Do not add formatting or headings. Return plain text only.\n"
                 f"The movie is in {self.lang}. Output in English, preserving original-language character names."
             )
-            compact_context = self._robust_gemini_call([segment_by_segment_draft, summary_prompt])
+            compact_context = await asyncio.to_thread(self.llm.LLM_request, [segment_by_segment_draft, summary_prompt])
             segment_num += 1
 
         plot_prompt = (
@@ -85,7 +84,7 @@ class RoughComprehension:
             "Do not include end credits or non-narrative elements. Return the plot as plain text only, with no headings or commentary.\n"
             f"The movie is in {self.lang}. Output in English, preserving original-language character names."
         )
-        combined_summary_draft = self._robust_gemini_call([segment_by_segment_draft, plot_prompt])
+        combined_summary_draft = await asyncio.to_thread(self.llm.LLM_request, [segment_by_segment_draft, plot_prompt])
 
         with open(self.combined_summary_draft_path, "w", encoding="utf-8") as f:
             f.write(combined_summary_draft)
@@ -96,10 +95,10 @@ class RoughComprehension:
             "Group related characters if appropriate. Return plain text only, no formatting or headings.\n"
             f"The movie is in {self.lang}. Output in English, preserving original-language character names."
         )
-        characters = self._robust_gemini_call([combined_summary_draft, character_prompt])
+        characters = await asyncio.to_thread(self.llm.LLM_request, [combined_summary_draft, character_prompt])
 
         with open(self.character_file_path, "w", encoding="utf-8") as f:
             f.write(characters)
 
         print("[INFO] Rough movie comprehension complete.")
-        return combined_summary_draft, segment_by_segment_draft, characters
+        return combined_summary_draft, characters

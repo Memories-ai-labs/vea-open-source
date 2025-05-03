@@ -1,15 +1,18 @@
 from google import genai
 from tqdm import tqdm
 import os
-import shutil
 from pathlib import Path
 import json
 import time 
-from src.config import API_KEYS_PATH
 import traceback
+from google.genai import types
+import mimetypes
+from src.config import API_KEYS_PATH
+MAX_BLOB_SIZE = 45 * 1024 * 1024  # 45 MB
 
-class GeminiMovieRecap:
+class GeminiGenaiManager:
     def __init__(self):
+        self.load_api_keys()
         self.gemini_api_key = os.getenv("GENAI_API_KEY")
         self.genai_client = genai.Client(api_key=self.gemini_api_key)
         self.model = "gemini-2.0-flash"
@@ -25,25 +28,69 @@ class GeminiMovieRecap:
         else:
             print("Warning: config.json not found. API keys not loaded.")
             
+    def _convert_path_to_blob_part(self, file_path: Path) -> types.Part:
+        """
+        Converts a file at the given path into a Gemini-compatible Part containing an inline Blob.
 
-    def robust_gemini_call(self, prompt_contents, config=None, retry_delay=60, max_retries=3):
+        Args:
+            file_path (Path): Path to the media file.
+
+        Returns:
+            types.Part: A Gemini Part containing the file blob with correct mime_type.
+
+        Raises:
+            FileNotFoundError: If the file does not exist.
+            ValueError: If MIME type cannot be determined or file is too large.
+        """
+        if not file_path.exists() or not file_path.is_file():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        file_size = file_path.stat().st_size
+        if file_size > MAX_BLOB_SIZE:
+            raise ValueError(f"File too large for inline Gemini upload: {file_path} ({file_size / (1024*1024):.2f} MB)")
+
+        mime_type, _ = mimetypes.guess_type(file_path)
+        if mime_type is None:
+            raise ValueError(f"Could not determine MIME type for: {file_path}")
+
+        file_bytes = file_path.read_bytes()
+
+        return types.Part(
+            inline_data=types.Blob(data=file_bytes, mime_type=mime_type)
+        )
+
+    def LLM_request(self, prompt_contents, config=None, retry_delay=60, max_retries=3):
+        """
+        Sends prompt_contents to Gemini. Converts Path objects to inline file blobs.
+        Handles JSON parse errors, rate limits (429), and retries.
+        """
+        # Prepare Gemini parts
+        parts = []
+        for item in prompt_contents:
+            if isinstance(item, Path):
+                parts.append(self._convert_path_to_blob_part(item))
+            else:
+                parts.append(types.Part(text=item))
+
         attempt = 0
         while attempt < max_retries:
             try:
-                response = self.client.models.generate_content(
+                response = self.genai_client.models.generate_content(
                     model=self.model,
-                    contents=prompt_contents,
+                    contents=types.Content(parts=parts),
                     config=config or {}
                 )
+
                 if config and config.get("response_mime_type") == "application/json":
                     return json.loads(response.text)
+
                 return response.text
 
             except Exception as e:
                 attempt += 1
                 error_str = str(e)
                 print(f"[ERROR] Gemini call failed: {error_str} (Attempt {attempt}/{max_retries})")
-                
+
                 if isinstance(e, json.JSONDecodeError):
                     print("[INFO] Detected JSON decode error. Retrying in 10 seconds...")
                     time.sleep(10)
@@ -55,5 +102,5 @@ class GeminiMovieRecap:
                     traceback.print_exc()
                     print(f"[INFO] Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
-                    
+
         raise RuntimeError(f"[FAILURE] Gemini failed after {max_retries} attempts.")
