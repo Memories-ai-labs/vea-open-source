@@ -7,13 +7,14 @@ from fastapi import FastAPI, HTTPException
 
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
-from src.schema import MovieFile, EditRequest, EditResponse
+from src.schema import MovieFile, EditRequest, EditResponse, SummaryRequest, SummaryResponse
 from src.config import (
     API_PREFIX,
     CREDENTIAL_PATH,
     BUCKET_NAME,
     MOVIE_LIBRARY,
 )
+from src.pipeline.summary_pipeline import SummaryPipeline
 
 
 # --- Initialize logging ---
@@ -43,8 +44,8 @@ async def list_available_movies() -> List[MovieFile]:
         raise HTTPException(status_code=500, detail="Failed to fetch movies.")
 
 
-@app.post(f"{API_PREFIX}/edit", response_model=EditResponse)
-async def edit_movie(request: EditRequest) -> EditResponse:
+@app.post(f"{API_PREFIX}/summary", response_model=SummaryResponse)
+async def summarize_movie(request: SummaryRequest) -> SummaryResponse:
     """
     Handle movie edit request.
     """
@@ -52,16 +53,22 @@ async def edit_movie(request: EditRequest) -> EditResponse:
         logger.info(f"Received edit request for blob: {request.blob_path}")
 
         # Placeholder: Add video processing logic here
-        download_url: Optional[str] = None
+        download_url: Optional[str] = request.blob_path
+        sp = SummaryPipeline()
+        res = await sp.run(download_url)
 
-        return EditResponse(
-            message=f"Successfully processed movie: {request.blob_path}.",
-            url=download_url or ""
+        return SummaryResponse(
+            message=f"Successfully summarized movie: {request.blob_path}.",
+            summary=res
         )
     except Exception as e:
         logger.error(f"Error processing video: {e}")
         raise HTTPException(status_code=500, detail="Failed to process video.")
 
+
+@app.post(f"{API_PREFIX}/edit", response_model=EditResponse)
+async def edit_movie(request: EditRequest) -> EditResponse:
+    raise NotImplementedError("Method not available")
 
 if __name__ == "__main__":
     import uvicorn

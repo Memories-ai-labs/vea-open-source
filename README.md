@@ -1,7 +1,7 @@
 ## Install environment using uv
 
 ```bash
- uv pip sync pyproject.toml
+ uv sync
  ```
 
 ### test summary pipline
@@ -23,3 +23,14 @@ There are some useful tools for vide processing, llm interaction:
 - [gemini.py](./lib/llm/gemini.py) provides a `Gemini` class for calling gemini to generate output based on your pompt.
 
 - [utils.py](./src/pipeline/utils.py) provides a `generate_response_for_video` function that prompt gemini with video efficiently without uploading a video.
+
+
+### Docker
+```bash
+docker build -t <image-name> .
+```
+
+### Local Server Test
+```bash
+python -m src.app
+```
