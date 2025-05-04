@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: video-edit-app
+  labels:
+    app: video-edit
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: video-edit
+  template:
+    metadata:
+      labels:
+        app: video-edit
+    spec:
+      containers:
+        - name: video-edit-container
+          image: us-docker.pkg.dev/gen-lang-client-0057517563/vea-service/video-edit:latest
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+          env:
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /var/secrets/google/key.json
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: video-edit-service
+spec:
+  selector:
+    app: video-edit
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+  type: ClusterIP
