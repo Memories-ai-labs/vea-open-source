@@ -6,7 +6,7 @@
 
 ### test summary pipline
 ```bash
-python -m src.pipeline.summary_pipeline
+python -m src.pipelines.movieRecap.movieRecapPipeline
 ```
 
 ### Pipeline
