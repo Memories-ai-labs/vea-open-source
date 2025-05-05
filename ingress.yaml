@@ -1,0 +1,18 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: video-edit-ingress
+  annotations:
+    kubernetes.io/ingress.class: "gce"  # 👈 For GKE ingress
+    networking.gke.io/managed-certificates: "fastapi-cert"  # Optional TLS
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /vea/v1
+            pathType: Prefix
+            backend:
+              service:
+                name: video-edit-service
+                port:
+                  number: 80

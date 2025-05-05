@@ -14,119 +14,111 @@ from src.pipelines.movieRecap.schema import ClipSummary
 
 logger = logging.getLogger(__name__)
 
-
 clip_prompt = """
-You are a professional screenwriting assistant tasked with analyzing a complete movie, segment by segment.
+    You are a professional screenwriting assistant tasked with analyzing a complete movie, segment by segment.
 
-Please carefully review the content of the following movie clip and complete the following tasks:
-- Summarize the main plot points of this clip in no more than 200 words.
-- List the key characters introduced or involved in this clip (include name and a brief description).
-- Identify critical events that occur in this clip (one sentence per event).
-- Highlight any foreshadowing, major conflicts, plot twists, or emotional shifts, if present.
+    Please carefully review the content of the following movie clip and complete the following tasks:
+    - Summarize the main plot points of this clip in no more than 200 words.
+    - List the key characters introduced or involved in this clip (include name and a brief description).
+    - Identify critical events that occur in this clip (one sentence per event).
+    - Highlight any foreshadowing, major conflicts, plot twists, or emotional shifts, if present.
 
-Please output in the following structured JSON format:
-{
-  "segment_summary": "...",
-  "characters": [{"name": "...", "description": "..."}, ...],
-  "key_events": ["...", "...", "..."],
-  "notes": ["...(foreshadowing/conflict/plot twist/emotion shift)", ...]
-}
-"""
+    Please output in the following structured JSON format:
+    {
+    "segment_summary": "...",
+    "characters": [{"name": "...", "description": "..."}, ...],
+    "key_events": ["...", "...", "..."],
+    "notes": ["...(foreshadowing/conflict/plot twist/emotion shift)", ...]
+    }
+    """
 
 integration_prompt = """
-You are a senior screenwriter tasked with creating a complete movie outline based on segmented summaries.
+    You are a senior screenwriter tasked with creating a complete movie outline based on segmented summaries.
 
-Please carefully read the following extracted summaries from all movie clips, and compile a full movie outline including the following sections:
+    Please carefully read the following extracted summaries from all movie clips, and compile a full movie outline including the following sections:
 
-- Story Setting (briefly introduce the world, time, and background)
-- Main Plot Summary (chronologically narrate the story, dividing into beginning, development, climax, and ending)
-- Key Characters (describe their personality, relationships, and any character arcs)
-- Major Conflicts and Climaxes (summarize key dramatic moments)
-- Themes and Emotional Arcs (summarize the underlying themes and emotional progression)
+    - Story Setting (briefly introduce the world, time, and background)
+    - Main Plot Summary (chronologically narrate the story, dividing into beginning, development, climax, and ending)
+    - Key Characters (describe their personality, relationships, and any character arcs)
+    - Major Conflicts and Climaxes (summarize key dramatic moments)
+    - Themes and Emotional Arcs (summarize the underlying themes and emotional progression)
 
-【Extracted Clip Summaries】:
-<<<
-{all_segment_summaries_json}
->>>
+    【Extracted Clip Summaries】:
+    <<<
+    {all_segment_summaries_json}
+    >>>
 
-Output format requirements:
-1. Story Setting (~100 words)
-2. Main Plot Summary (500–800 words, clearly structured: beginning, development, climax, ending)
-3. Key Characters (50–100 words per character)
-4. Major Conflicts and Climaxes (~150 words)
-5. Themes and Emotional Arcs (~100 words)
+    Output format requirements:
+    1. Story Setting (~100 words)
+    2. Main Plot Summary (~800 words, clearly structured: beginning, development, climax, ending)
+    3. Key Characters (~50 words per character)
+    4. Major Conflicts and Climaxes (~150 words)
+    5. Themes and Emotional Arcs (~100 words)
 
-Notes:
-- Maintain overall narrative coherence and logical consistency.
-- Ensure that any foreshadowing, plot twists, or callbacks are properly reflected in the summary.
-- Use a professional, concise, and clear writing style.
-"""
-
+    Notes:
+    - Maintain overall narrative coherence and logical consistency.
+    - Ensure that any foreshadowing, plot twists, or callbacks are properly reflected in the summary.
+    - Use a professional, concise, and clear writing style.
+    """
 
 class SummaryPipeline:
     """
     SummaryPipeline is an asynchronous video summarization pipeline that processes a video into short clips,
     generates a brief summary for each clip using an LLM (Gemini), and compiles the segment summaries into
     a cohesive plot summary.
-
-    Core Workflow:
-    1. Download the video from GCS if needed.
-    2. Split the video into fixed-length clips based on the specified interval.
-    3. Generate a short summary ("gist") for each clip via the LLM.
-    4. Aggregate all clip summaries into a final integrated plot summary.
-
-    Attributes:
-        initial_prompt (str): Optional initial prompt to guide the summarization.
-        interval_seconds (int): Duration of each clip segment in seconds (default 1200s = 20min).
-        debug_dir (str or None): Directory for debugging output. If None, a temporary directory is created.
-        llm (Gemini): LLM client used for generating summaries.
-        oss_client (GoogleCloudStorage): Client for interacting with Google Cloud Storage.
-
-    Methods:
-        run(gcs_path: str = None) -> str:
-            Runs the full summarization pipeline and returns the final plot summary.
     """
-     
-    def __init__(
-        self, initial_prompt: str = "", interval_seconds: int = 1200, debug_dir=None
-    ):
+
+    def __init__(self, initial_prompt: str = "", interval_seconds: int = 900, debug_dir=None):
         self.initial_prompt = initial_prompt
         self.interval_seconds = interval_seconds
         self.debug_dir = debug_dir
 
+        logger.info("Initializing SummaryPipeline...")
         self._setup_working_directories()
         self._setup_storage_client()
         self.llm = Gemini()
+        logger.info("SummaryPipeline initialized successfully.")
 
     def _setup_working_directories(self):
         self.temp_dir = self.debug_dir or tempfile.mkdtemp()
+        logger.info(f"Temporary working directory set up at: {self.temp_dir}")
 
     def _setup_storage_client(self):
         self.oss_client = GoogleCloudStorage(
             credentials=credentials_from_file(CREDENTIAL_PATH)
         )
+        logger.info("GCP OSS client initialized.")
 
     async def _download_video_if_needed(self, gcs_path: str, video_path: str) -> str:
+        logger.info(f"Preparing to download video from GCS: {gcs_path}")
         if gcs_path:
             local_video_path = os.path.join(self.temp_dir, os.path.basename(gcs_path))
             await self.oss_client.download_to_file_with_progress(
                 BUCKET_NAME, gcs_path, local_video_path
             )
+            logger.info(f"Video downloaded to local path: {local_video_path}")
             return local_video_path
         elif video_path:
-            return str(Path(video_path).resolve())
+            resolved_path = str(Path(video_path).resolve())
+            logger.info(f"Using provided local video path: {resolved_path}")
+            return resolved_path
         else:
+            logger.error("Neither GCS path nor local video path provided.")
             raise ValueError("Either gcs_path or video_path must be provided.")
 
     async def _get_clips(self, video_path: str):
+        logger.info(f"Splitting video into clips: {video_path}")
         clip_paths = await convert_video(
             video_path, self.temp_dir, self.interval_seconds, SUMMARY_FPS, SUMMARY_CRF
         )
+        logger.info(f"{len(clip_paths)} clips generated.")
         return clip_paths
 
     async def _generate_gist(self, video_paths: list[str]):
+        logger.info("Generating summaries for each clip...")
         clips = []
-        for video_path in video_paths:
+        for i, video_path in enumerate(video_paths):
+            logger.info(f"Processing clip {i + 1}/{len(video_paths)}: {video_path}")
             response = await generate_response_for_video(
                 self.llm,
                 clip_prompt,
@@ -136,7 +128,10 @@ class SummaryPipeline:
                     "response_schema": ClipSummary,
                 },
             )
+            logger.info(f"Summary for clip {i + 1} generated.")
             clips.append(response.text)
+
+        logger.info("Generating integrated full movie summary...")
         res = await self.llm.generate_async(
             integration_prompt.format(all_segment_summaries_json="\n".join(clips)),
             generation_config={
@@ -144,38 +139,42 @@ class SummaryPipeline:
                 "response_schema": ClipSummary,
             },
         )
-        return res
+        logger.info("Integrated summary successfully generated.")
+        return res.text
 
     async def run(self, gcs_path: str = None) -> str:
-        logger.info("Starting Movie Recap Pipeline")
+        logger.info("Starting full summarization pipeline...")
         try:
-            # Step 1: Prepare input video
-            # local_video = await self._download_video_if_needed(gcs_path, video_path)
-            local_video = gcs_path
+            # Step 1: Download video
+            local_video = await self._download_video_if_needed(
+                gcs_path, os.path.join(self.temp_dir, os.path.basename(gcs_path))
+            )
 
-            # Step 2: Split into fragments
+            # Step 2: Split video into clips
             clip_paths = await self._get_clips(local_video)
 
-            # Step 4: Generate story gist
+            # Step 3: Generate story gist
             plot_summary = await self._generate_gist(clip_paths)
+
+            logger.info("Summarization pipeline completed successfully.")
             return plot_summary
         except Exception as e:
             logger.error(f"Pipeline failed: {str(e)}")
-            raise e
+            raise
         finally:
             await self._cleanup()
 
     async def _cleanup(self):
-        if not self.temp_dir:
+        if not self.debug_dir and self.temp_dir:
             shutil.rmtree(self.temp_dir, ignore_errors=True)
-        logger.info("Cleaned up temporary files.")
-
-
+            logger.info("Temporary working directory cleaned up.")
 
 if __name__ == "__main__":
     import asyncio
-    video_path = "E:/OpenInterX-Code-Source/vea-playground/test/爱在日落黄昏时.mkv" ## -- replace it with your movie path
-    output_path = "E:/OpenInterX-Code-Source/vea-playground/test/output" ## -- replace it with your debug dir path
+
+    video_path = "E:/OpenInterX-Code-Source/vea-playground/test/爱在日落黄昏时.mkv"  # Example path
+    output_path = "E:/OpenInterX-Code-Source/vea-playground/test/output"
+
     s = SummaryPipeline(debug_dir=output_path)
     summary = asyncio.run(s.run(video_path))
     print(summary)

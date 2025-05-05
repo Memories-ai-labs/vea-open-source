@@ -24,3 +24,17 @@ class MovieFile(BaseModel):
     """
     name: str
     blob_path: str
+
+class SummaryRequest(BaseModel):
+    """
+    Request schema for video editing.
+    """
+    blob_path: str
+
+
+class SummaryResponse(BaseModel):
+    """
+    Response schema after video editing.
+    """
+    message: str
+    summary: str
