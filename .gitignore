@@ -32,3 +32,5 @@ test_data/
 ## self-defined
 test/
 config/
+data/
+requirements.txt

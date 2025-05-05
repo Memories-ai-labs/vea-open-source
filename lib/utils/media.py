@@ -1,6 +1,7 @@
 
 import logging
 import os
+from pathlib import Path
 
 
 logger = logging.getLogger(__name__)
@@ -35,11 +36,9 @@ def get_video_info(video_path: str) -> dict:
     metadata = json.loads(metadata_json)
     return metadata
 
-
 def get_video_duration(video_path: str) -> dict:
     video_info = get_video_info(video_path)
     return float(video_info["format"]["duration"])
-
 
 async def convert_video(
     input_path: str,
@@ -48,37 +47,34 @@ async def convert_video(
     fps: Optional[int] = None,
     crf: Optional[int] = None,
     target_height: Optional[int] = 480,
-) -> list[str]:
+) -> list[Path]:
     """
     Split the input video into segments of length `interval_seconds`.
-    
-    Args:
-        input_path (str): Path to the input video.
-        output_dir (str): Directory to save the output segments.
-        interval_seconds (int): Length of each segment (in seconds).
-        fps (Optional[int]): Frames per second.
-        crf (Optional[int]): Constant rate factor (quality control).
-        target_height (Optional[int]): Resize video height (maintains aspect ratio).
 
+    Output file format: spacebetween_{start:05d}_{end:05d}.mp4
     Returns:
-        List[str]: List of output segment file paths, in order.
+        List of Path objects for generated video files.
     """
+    output_dir = Path(output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
-    start = time.time()
+    existing_segments = sorted(output_dir.glob("*.mp4"))
+    if existing_segments:
+        logger.info(f"Found {len(existing_segments)} existing segments in {output_dir}. Skipping conversion.")
+        return existing_segments
 
+    start = time.time()
     total_duration = get_video_duration(input_path)
     logger.info(f"Total video duration: {total_duration:.2f} seconds")
 
-    segment_idx = 0
     current_start = 0.0
     output_paths = []
 
     while current_start < total_duration:
-        output_filename = os.path.join(output_dir, f"segment_{segment_idx:04d}.mp4")
-
-        # Calculate actual duration for this segment
-        duration = min(interval_seconds, total_duration - current_start)
+        start_sec = int(current_start)
+        end_sec = int(min(current_start + interval_seconds, total_duration))
+        output_path = output_dir / f"spacebetween_{start_sec:05d}_{end_sec:05d}.mp4"
+        duration = end_sec - start_sec
 
         cmd = ["ffmpeg", "-y", "-ss", str(current_start), "-i", input_path, "-t", str(duration)]
 
@@ -95,46 +91,50 @@ async def convert_video(
             cmd += ["-crf", str(crf)]
         cmd += ["-preset", "medium"]
         cmd += ["-c:a", "copy"]
-        cmd += [output_filename]
+        cmd += [str(output_path)]
 
-        logger.info(f"Generating segment {segment_idx}: start={current_start:.2f}s duration={duration:.2f}s")
+        logger.info(f"Generating segment {start_sec:05d}–{end_sec:05d}: {output_path}")
         result = subprocess.run(cmd, capture_output=True, text=False)
         if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg error during segment {segment_idx}: {result.stderr}")
+            raise RuntimeError(f"ffmpeg error during segment {start_sec}-{end_sec}: {result.stderr}")
 
-        output_paths.append(output_filename)  # record output path here
-
-        segment_idx += 1
+        output_paths.append(output_path)
         current_start += interval_seconds
 
     end = time.time()
-    logger.info(f"Completed splitting {input_path} into {segment_idx} segments in {end - start:.2f} seconds")
+    logger.info(f"Completed splitting {input_path} into {len(output_paths)} segments in {end - start:.2f} seconds")
 
     return output_paths
 
 
+
 async def trim_video(
     input_path: str,
-    output_path: str,
+    output_path: str | Path,
     start_time: float,
     end_time: float
-) -> None:
+) -> Path:
     """
     Trim a video between start_time and end_time (in seconds).
+    Returns:
+        Path object of the trimmed file.
     """
+    output_path = Path(output_path)
     duration = end_time - start_time
+
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(start_time),
         "-i", input_path,
         "-t", str(duration),
         "-c", "copy",
-        output_path
+        str(output_path)
     ]
     result = subprocess.run(cmd, capture_output=True, text=False)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg error: {result.stderr}")
 
+    return output_path
 
 if __name__ == "__main__":
     from pathlib import Path
