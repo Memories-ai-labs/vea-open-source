@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 # --- Static Constants ---
-API_PREFIX = "/v1"
+API_PREFIX = "/video-edit/v1"
 
 # --- Dynamic Constants (from environment) ---
 ENV = os.getenv("ENV", "development")
