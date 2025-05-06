@@ -10,3 +10,4 @@ venv
 tests
 notebooks
 test/
+data
