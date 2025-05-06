@@ -3,10 +3,33 @@
 ```bash
  uv sync
  ```
+- also ensure to have ffmpeg installed in the system
 
-### test summary pipline
+### test movie recap pipeline
+- first make sure you have api keys for gemini and soundstripe, stored in config/apiKeys.json. 
+- then store your movie in data/movie_name/
+- then for debug purposes only, modify src/pipelines/movieRecap/movieRecapPipeline.py so that the movie folder and mp4 name
+
 ```bash
 python -m src.pipelines.movieRecap.movieRecapPipeline
+```
+
+
+### Docker
+build the container
+```bash
+docker build -t <image-name> .
+```
+run the container
+```bash
+docker run -v "$(pwd)/data:/app/data" vea-recap
+```
+running it this way ensures the data folder is mounted. 
+
+
+### Local Server Test
+```bash
+python -m src.app
 ```
 
 ### Pipeline
@@ -23,14 +46,3 @@ There are some useful tools for vide processing, llm interaction:
 - [gemini.py](./lib/llm/gemini.py) provides a `Gemini` class for calling gemini to generate output based on your pompt.
 
 - [utils.py](./src/pipeline/utils.py) provides a `generate_response_for_video` function that prompt gemini with video efficiently without uploading a video.
-
-
-### Docker
-```bash
-docker build -t <image-name> .
-```
-
-### Local Server Test
-```bash
-python -m src.app
-```

@@ -93,12 +93,12 @@ class MovieRecapPipeline:
 
 if __name__ == "__main__":
 
-    movie_folder = "data/space_between"
+    movie_folder = "data/spacebetween2"
     movie_name = "spacebetween.mp4"
-    output_dir = "data/space_between"
+    output_dir = "data/spacebetween2"
     movie_language = "English"
     output_language = "English"
-    SF = False
+    SF = False 
 
     pipeline = MovieRecapPipeline(movie_folder, movie_name, output_dir, movie_language, output_language, SF)
     summary = asyncio.run(pipeline.run())
