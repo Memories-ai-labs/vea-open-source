@@ -7,14 +7,14 @@ from fastapi import FastAPI, HTTPException
 
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
-from src.schema import MovieFile, EditRequest, EditResponse, SummaryRequest, SummaryResponse
+from src.schema import MovieFile, MovieIndexRequest, MovieIndexResponse
 from src.config import (
     API_PREFIX,
     CREDENTIAL_PATH,
     BUCKET_NAME,
     MOVIE_LIBRARY,
 )
-from src.pipeline.summary_pipeline import SummaryPipeline
+from pipelines.longForm.longFormComprehensionPipeline import LongFormComprehensionPipeline
 
 
 # --- Initialize logging ---
@@ -44,31 +44,32 @@ async def list_available_movies() -> List[MovieFile]:
         raise HTTPException(status_code=500, detail="Failed to fetch movies.")
 
 
-@app.post(f"{API_PREFIX}/summary", response_model=SummaryResponse)
-async def summarize_movie(request: SummaryRequest) -> SummaryResponse:
+@app.post(f"{API_PREFIX}/index_movie")
+async def index_movie(request: MovieIndexRequest):
     """
-    Handle movie edit request.
+    Handle movie index request.
     """
     try:
-        logger.info(f"Received edit request for blob: {request.blob_path}")
+        logger.info(f"Received index request for blob: {request.blob_path}")
 
         # Placeholder: Add video processing logic here
         download_url: Optional[str] = request.blob_path
-        sp = SummaryPipeline()
-        res = await sp.run(download_url)
+        print(download_url)
+        pipeline = LongFormComprehensionPipeline(request.blob_path)
+        await pipeline.run()
 
-        return SummaryResponse(
-            message=f"Successfully summarized movie: {request.blob_path}.",
-            summary=res
-        )
+        # return SummaryResponse(
+        #     message=f"Successfully summarized movie: {request.blob_path}.",
+        #     summary=res
+        # )
     except Exception as e:
         logger.error(f"Error processing video: {e}")
         raise HTTPException(status_code=500, detail="Failed to process video.")
 
 
-@app.post(f"{API_PREFIX}/edit", response_model=EditResponse)
-async def edit_movie(request: EditRequest) -> EditResponse:
-    raise NotImplementedError("Method not available")
+# @app.post(f"{API_PREFIX}/edit", response_model=EditResponse)
+# async def edit_movie(request: EditRequest) -> EditResponse:
+#     raise NotImplementedError("Method not available")
 
 if __name__ == "__main__":
     import uvicorn

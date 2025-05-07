@@ -8,7 +8,7 @@ import traceback
 from google.genai import types
 import mimetypes
 from src.config import API_KEYS_PATH
-MAX_BLOB_SIZE = 45 * 1024 * 1024  # 45 MB
+MAX_BLOB_SIZE = 100 * 1024 * 1024  # 45 MB
 
 class GeminiGenaiManager:
     def __init__(self):
