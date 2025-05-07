@@ -51,17 +51,12 @@ async def convert_video(
     """
     Split the input video into segments of length `interval_seconds`.
 
-    Output file format: spacebetween_{start:05d}_{end:05d}.mp4
+    Output file format: {start:05d}_{end:05d}.mp4
     Returns:
         List of Path objects for generated video files.
     """
     output_dir = Path(output_dir)
     os.makedirs(output_dir, exist_ok=True)
-
-    existing_segments = sorted(output_dir.glob("*.mp4"))
-    if existing_segments:
-        logger.info(f"Found {len(existing_segments)} existing segments in {output_dir}. Skipping conversion.")
-        return existing_segments
 
     start = time.time()
     total_duration = get_video_duration(input_path)
@@ -73,7 +68,7 @@ async def convert_video(
     while current_start < total_duration:
         start_sec = int(current_start)
         end_sec = int(min(current_start + interval_seconds, total_duration))
-        output_path = output_dir / f"spacebetween_{start_sec:05d}_{end_sec:05d}.mp4"
+        output_path = output_dir / f"{start_sec:05d}_{end_sec:05d}.mp4"
         duration = end_sec - start_sec
 
         cmd = ["ffmpeg", "-y", "-ss", str(current_start), "-i", input_path, "-t", str(duration)]
@@ -106,42 +101,11 @@ async def convert_video(
 
     return output_paths
 
-
-
-async def trim_video(
-    input_path: str,
-    output_path: str | Path,
-    start_time: float,
-    end_time: float
-) -> Path:
-    """
-    Trim a video between start_time and end_time (in seconds).
-    Returns:
-        Path object of the trimmed file.
-    """
-    output_path = Path(output_path)
-    duration = end_time - start_time
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-ss", str(start_time),
-        "-i", input_path,
-        "-t", str(duration),
-        "-c", "copy",
-        str(output_path)
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=False)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg error: {result.stderr}")
-
-    return output_path
-
-if __name__ == "__main__":
-    from pathlib import Path
-    import asyncio
-    video_path = "E:/OpenInterX-Code-Source/mavi-edit-service/test/爱在日落黄昏时.mkv"
-    output_path = "E:/OpenInterX-Code-Source/mavi-edit-service/test"
-    info = get_video_info(video_path)
-    # print(info)
-    asyncio.run(convert_video(video_path, Path(output_path), interval_seconds=1200, fps=1, crf=28))
-    asyncio.run(trim_video(video_path, Path(output_path) / "trim.mp4", start_time=5.0, end_time=15.0))
+# if __name__ == "__main__":
+#     from pathlib import Path
+#     import asyncio
+#     video_path = "E:/OpenInterX-Code-Source/mavi-edit-service/test/爱在日落黄昏时.mkv"
+#     output_path = "E:/OpenInterX-Code-Source/mavi-edit-service/test"
+#     info = get_video_info(video_path)
+#     # print(info)
+#     asyncio.run(convert_video(video_path, Path(output_path), interval_seconds=1200, fps=1, crf=28))

@@ -30,6 +30,65 @@ class GoogleCloudStorage:
         else:
             raise ValueError(f"Invalid uri: {uri}")
 
+
+    def path_exists(self, bucket: str, gcs_path: str) -> bool:
+        """
+        Checks whether a file or folder exists in GCS at the given path.
+        Works for both exact blob paths (files) and folder prefixes.
+
+        Args:
+            bucket (str): The name of the GCS bucket.
+            gcs_path (str): The full GCS path (e.g., 'folder/file.txt' or 'folder/').
+
+        Returns:
+            bool: True if the path exists as a file or folder, False otherwise.
+        """
+        bucket = self.client.bucket(bucket)
+        # Check for exact match (file)
+        blob = bucket.blob(gcs_path)
+        if blob.exists():
+            return True
+        # Check for folder existence
+        blobs = list(bucket.list_blobs(prefix=gcs_path))
+        return len(blobs) > 0
+    
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10), reraise=True)
+    def upload_files(self, bucket_name: str, local_path: str, gcs_path: str):
+        bucket = self.client.bucket(bucket_name)
+
+        if os.path.isfile(local_path):
+            blob = bucket.blob(gcs_path)
+            blob.upload_from_filename(local_path)
+            logger.info(f"Uploaded file {local_path} to gs://{bucket_name}/{gcs_path}")
+        elif os.path.isdir(local_path):
+            for root, _, files in os.walk(local_path):
+                for file in files:
+                    full_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(full_path, local_path)
+                    blob_path = os.path.join(gcs_path, rel_path).replace("\\", "/")
+                    blob = bucket.blob(blob_path)
+                    blob.upload_from_filename(full_path)
+                    logger.info(f"Uploaded {full_path} to gs://{bucket_name}/{blob_path}")
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10), reraise=True)
+    def download_files(self, bucket_name: str, gcs_path: str, local_path: str):
+        bucket = self.client.bucket(bucket_name)
+
+        if gcs_path.endswith("/"):
+            blobs = bucket.list_blobs(prefix=gcs_path)
+            for blob in blobs:
+                rel_path = os.path.relpath(blob.name, gcs_path)
+                local_file_path = os.path.join(local_path, rel_path)
+                os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
+                blob.download_to_filename(local_file_path)
+                logger.info(f"Downloaded gs://{bucket_name}/{blob.name} to {local_file_path}")
+        else:
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            blob = bucket.blob(gcs_path)
+            blob.download_to_filename(local_path)
+            logger.info(f"Downloaded gs://{bucket_name}/{gcs_path} to {local_path}")
+
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
@@ -54,6 +113,7 @@ class GoogleCloudStorage:
         blob = bucket.blob(blob_path)
         return blob.download_as_bytes()
 
+    
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
