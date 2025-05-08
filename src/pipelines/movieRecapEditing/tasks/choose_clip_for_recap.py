@@ -46,7 +46,6 @@ class ChooseClipForRecap:
                 "- If a clip is reused, merge the summary sentences if possible, or discard extras.\n"
                 "- Remove any special characters that would be challenging for text-to-voice.\n"
                 "- Discard any clips not relevant to the story (e.g., logos, credits).\n\n"
-                f"Translate each recap sentence from English to {self.out_lang}, keeping character names in the original language. Output only the cleaned JSON list."
             )
 
             refined_clips = await asyncio.to_thread(
