@@ -4,21 +4,13 @@ import time
 import asyncio
 from datetime import timedelta
 
-from src.pipelines.movieRecap.schema import Scene
+from src.pipelines.longForm.schema import Scene
 
 class SceneBySceneComprehension:
-    def __init__(self, textual_repr_dir: str, lang: str, llm):
-        self.textual_repr_dir = textual_repr_dir
-        self.lang = lang
+    def __init__(self, llm):
         self.llm = llm
 
     async def __call__(self, short_segments, long_segments, summary_draft, characters):
-        scene_file_path = os.path.join(self.textual_repr_dir, "scenes.json")
-
-        if os.path.exists(scene_file_path):
-            print("[INFO] Loading existing scenes...")
-            with open(scene_file_path, "r", encoding="utf-8") as f:
-                return json.load(f)
 
         long_segment_bounds = []
         for i, file in enumerate(sorted(long_segments, key=lambda f: f.name)):
@@ -27,7 +19,6 @@ class SceneBySceneComprehension:
             end_sec = int(parts[2])
             long_segment_bounds.append((i + 1, start_sec, end_sec))
             
-
         short_segments.sort(key=lambda f: f.name)
         scenes = []
         scene_id = 1
@@ -41,8 +32,8 @@ class SceneBySceneComprehension:
             prompt = (
                 f"{summary_draft}\n\n"
                 f"{characters}\n\n"
-                "Provided is a segment of the movie and two references: "
-                "- a JSON with the movie's full plot summary and segment number, "
+                "Provided is a segment of a long-form narrative media, such as a movie, TV show, or documentary, along with two references: "
+                "- a JSON with the full plot summary and segment number, "
                 "- a character list with names, roles, and relationships. "
                 "Every 20 seconds, describe the scene in detail, such as the characters involved and their actions. "
                 "Use the plot and characters to help deduce who is in each scene and what is happening. "
@@ -51,7 +42,7 @@ class SceneBySceneComprehension:
                 "- start_timestamp (HH:MM:SS)\n"
                 "- end_timestamp (HH:MM:SS)\n"
                 "- description\n"
-                f"The movie is in {self.lang}. You should output in English except for character names, which should be in the original language."
+                "You should output in English except for character names, which should be in the original language."
             )
 
             scene_data = await asyncio.to_thread(
@@ -84,9 +75,6 @@ class SceneBySceneComprehension:
             scenes.extend(scene_data)
             print(f"[INFO] Segment {file_path.name} transcribed successfully.")
             time.sleep(1)
-
-        with open(scene_file_path, "w", encoding="utf-8") as f:
-            json.dump(scenes, f, indent=4, ensure_ascii=False)
 
         print("[INFO] Scenes transcribed successfully.")
         return scenes

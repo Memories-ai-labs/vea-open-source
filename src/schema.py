@@ -3,14 +3,14 @@
 from pydantic import BaseModel
 
 
-class EditRequest(BaseModel):
+class MovieRecapRequest(BaseModel):
     """
     Request schema for video editing.
     """
     blob_path: str
 
 
-class EditResponse(BaseModel):
+class MovieRecapResponse(BaseModel):
     """
     Response schema after video editing.
     """
@@ -25,16 +25,15 @@ class MovieFile(BaseModel):
     name: str
     blob_path: str
 
-class SummaryRequest(BaseModel):
+class MovieIndexRequest(BaseModel):
     """
     Request schema for video editing.
     """
     blob_path: str
 
 
-class SummaryResponse(BaseModel):
+class MovieIndexResponse(BaseModel):
     """
     Response schema after video editing.
     """
     message: str
-    summary: str

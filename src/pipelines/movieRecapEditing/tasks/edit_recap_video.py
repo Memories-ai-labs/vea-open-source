@@ -90,3 +90,4 @@ class EditMovieRecapVideo:
         )
 
         print(f"[INFO] Final recap video created: {self.output_path}")
+        return self.output_path
