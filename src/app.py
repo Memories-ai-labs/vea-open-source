@@ -14,8 +14,8 @@ from src.config import (
     BUCKET_NAME,
     MOVIE_LIBRARY,
 )
-from pipelines.longForm.longFormComprehensionPipeline import LongFormComprehensionPipeline
-from pipelines.movieRecapEditing.movieRecapEditingPipeline import MovieRecapEditingPipeline
+from src.pipelines.longForm.longFormComprehensionPipeline import LongFormComprehensionPipeline
+from src.pipelines.movieRecapEditing.movieRecapEditingPipeline import MovieRecapEditingPipeline
 
 
 # --- Initialize logging ---
@@ -81,4 +81,4 @@ async def edit_movie(request: MovieIndexRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
