@@ -1,13 +1,15 @@
 # src/schema.py
 
 from pydantic import BaseModel
+from typing import List, Optional
+
 
 
 class MovieRecapRequest(BaseModel):
-    """
-    Request schema for video editing.
-    """
     blob_path: str
+    user_prompt: Optional[str] = None
+    user_context: Optional[str] = None
+    output_language: Optional[str] = "English"
 
 
 class MovieRecapResponse(BaseModel):

@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException
 
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
-from src.schema import MovieFile, MovieIndexRequest, MovieIndexResponse
+from src.schema import MovieFile, MovieIndexRequest, MovieIndexResponse, MovieRecapRequest, MovieRecapResponse
 from src.config import (
     API_PREFIX,
     CREDENTIAL_PATH,
@@ -68,12 +68,17 @@ async def index_movie(request: MovieIndexRequest):
 
 
 
-@app.post(f"{API_PREFIX}/edit_movie")
-async def edit_movie(request: MovieIndexRequest):
+@app.post(f"{API_PREFIX}/edit_movie", response_model=MovieRecapResponse)
+async def edit_movie(request: MovieRecapRequest):
     try:
         logger.info(f"Editing movie recap: {request.blob_path}")
         pipeline = MovieRecapEditingPipeline(request.blob_path)
-        await pipeline.run()
+        url = await pipeline.run(
+            user_context=request.user_context,
+            user_prompt=request.user_prompt,
+            output_language=request.output_language or "English"
+        )
+        return MovieRecapResponse(message="Recap generated.", url=url)
     except Exception as e:
         logger.error(f"Edit error: {e}")
         raise HTTPException(status_code=500, detail="Editing failed.")
