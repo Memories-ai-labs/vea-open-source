@@ -51,7 +51,7 @@ async def convert_video(
     """
     Split the input video into segments of length `interval_seconds`.
 
-    Output file format: {start:05d}_{end:05d}.mp4
+    Output file format: clip_{start:05d}_{end:05d}.mp4
     Returns:
         List of Path objects for generated video files.
     """
@@ -68,7 +68,7 @@ async def convert_video(
     while current_start < total_duration:
         start_sec = int(current_start)
         end_sec = int(min(current_start + interval_seconds, total_duration))
-        output_path = output_dir / f"{start_sec:05d}_{end_sec:05d}.mp4"
+        output_path = output_dir / f"clip_{start_sec:05d}_{end_sec:05d}.mp4"
         duration = end_sec - start_sec
 
         cmd = ["ffmpeg", "-y", "-ss", str(current_start), "-i", input_path, "-t", str(duration)]
