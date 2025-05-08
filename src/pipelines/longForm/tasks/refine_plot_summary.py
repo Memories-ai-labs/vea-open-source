@@ -1,30 +1,14 @@
-import os
-import json
 import asyncio
 from collections import defaultdict
 
-from src.pipelines.movieRecap.schema import RecapSentence
-
+from src.pipelines.longForm.schema import RecapSentence
 
 class RefinePlotSummary:
-    def __init__(self, textual_repr_dir: str, lang: str, llm):
-        self.textual_repr_dir = textual_repr_dir
-        self.lang = lang
+    def __init__(self, llm):
         self.llm = llm
 
     async def __call__(self, summary_draft, scenes):
         print("[INFO] Refining plot summary segment-by-segment...")
-
-        plot_json_path = os.path.join(self.textual_repr_dir, "plot.json")
-        plot_txt_path = os.path.join(self.textual_repr_dir, "plot.txt")
-
-        if os.path.exists(plot_json_path) and os.path.exists(plot_txt_path):
-            print("[INFO] Loading existing refined plot and JSON...")
-            with open(plot_txt_path, "r", encoding="utf-8") as f:
-                full_refined_plot = f.read()
-            with open(plot_json_path, "r", encoding="utf-8") as f:
-                plot_json_final = json.load(f)
-            return plot_json_final, full_refined_plot
 
         # Step 1: Convert to structured JSON
         plot_json = await self._convert_summary_to_json(summary_draft)
@@ -48,7 +32,8 @@ class RefinePlotSummary:
             )
 
             refinement_prompt = (
-                f"You are given two descriptions for segment {segment_num} of a movie:\n\n"
+                f"You are given two descriptions for segment {segment_num} of a long-form storytelling video, "
+                "such as a movie, TV show, or documentary:\n\n"
                 "1. A plot summary written from a long segment.\n"
                 "2. A detailed scene-by-scene breakdown with timestamps.\n\n"
                 "Your task is to revise and improve the plot summary for this segment.\n"
@@ -60,7 +45,7 @@ class RefinePlotSummary:
                 "- However, the refined summary should be much shorter than the scene-by-scene breakdown and closer in length to the summary draft.\n"
                 "- Remove irrelevant or non-story content like studio names or credits.\n"
                 f"Make sure each sentence ends with (segment: {segment_num}).\n\n"
-                f"The movie is in {self.lang}. Output only the improved plot summary for segment {segment_num} as plain text."
+                "Output only the improved plot summary for segment as plain text."
             )
 
             segment_refined = await asyncio.to_thread(
@@ -70,27 +55,18 @@ class RefinePlotSummary:
             refined_sentences.append(segment_refined.strip())
 
         full_refined_plot = "\n\n".join(refined_sentences)
-        with open(plot_txt_path, "w", encoding="utf-8") as f:
-            f.write(full_refined_plot)
 
         # Step 4: Convert final version back to JSON
         plot_json_final = await self._convert_summary_to_json(full_refined_plot)
 
-        with open(plot_json_path, "w", encoding="utf-8") as f:
-            json.dump(plot_json_final, f, ensure_ascii=False, indent=4)
-
-        print("[INFO] Refined plot summary and JSON saved successfully.")
+        print("[INFO] Refined plot summary and JSON generated successfully.")
         return plot_json_final, full_refined_plot
 
     async def _convert_summary_to_json(self, text):
-        """
-        Converts a text-based summary into a list of RecapSentence-style dicts
-        by calling the Gemini LLM with a structured JSON conversion prompt.
-        """
         convert_prompt = (
             "Convert the plot summary into structured JSON format. Each sentence should be stored as an entry with its corresponding 'segment_num'.\n\n"
             "Remove the (segment: N) marker from the sentence text and instead store the segment number as a separate field.\n"
-            f"The movie is in {self.lang}. Output in English, preserving original-language character names."
+            "Output should be in JSON format following the expected structure."
         )
         return await asyncio.to_thread(
             self.llm.LLM_request,

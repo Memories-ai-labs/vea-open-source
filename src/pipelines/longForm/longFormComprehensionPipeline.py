@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 import asyncio
 import glob
+import json
 
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.oss.gcp_oss import GoogleCloudStorage
@@ -14,8 +15,8 @@ from lib.utils.media import convert_video
 from src.config import CREDENTIAL_PATH, BUCKET_NAME
 
 from src.pipelines.longForm.tasks.rough_comprehension import RoughComprehension
-# from src.pipelines.longForm.tasks.scene_by_scene_comprehension import SceneBySceneComprehension
-# from src.pipelines.longForm.tasks.refine_plot_summary import RefinePlotSummary
+from src.pipelines.longForm.tasks.scene_by_scene_comprehension import SceneBySceneComprehension
+from src.pipelines.longForm.tasks.refine_plot_summary import RefinePlotSummary
 # from src.pipelines.longForm.tasks.choose_clip_for_recap import ChooseClipForRecap
 # from src.pipelines.longForm.tasks.generate_narration import GenerateNarrationForClips
 # from src.pipelines.longForm.tasks.music_selection import MusicSelection
@@ -34,31 +35,45 @@ class LongFormComprehensionPipeline:
         self.cloud_storage_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
 
         # Local subfolders for temp work
+        self.clean_stale_tempdirs()
         self.workdir = tempfile.mkdtemp()
         self.long_segments_dir = tempfile.mkdtemp()
         self.short_segments_dir = tempfile.mkdtemp()
 
-        
+        self.local_media_path = os.path.join(tempfile.mkdtemp(), self.media_name)
+
+    def clean_stale_tempdirs(self):
+        print("Cleaning stale temp directories...")
+        tmp_root = tempfile.gettempdir()  # Usually /tmp
+        for name in os.listdir(tmp_root):
+            path = os.path.join(tmp_root, name)
+            if os.path.isdir(path) and name.startswith("tmp"):
+                try:
+                    shutil.rmtree(path)
+                    print(f"Deleted: {path}")
+                except Exception as e:
+                    print(f"Skipping {path}: {e}")
 
     async def run(self):
         # preprocess media
         long_segment_cspath = self.cloud_storage_root + "long_segments/"
         if self.cloud_storage_client.path_exists(BUCKET_NAME, long_segment_cspath):
             self.cloud_storage_client.download_files(BUCKET_NAME, long_segment_cspath, self.long_segments_dir)
-            long_segment_paths = [f for f in glob.glob(os.path.join(self.long_segments_dir, "*")) if os.path.isfile(f)]
+            long_segment_paths = [Path(f) for f in glob.glob(os.path.join(self.long_segments_dir, "*")) if os.path.isfile(f)]
         else:
             # Download media file from cloud_storage to local temp folder
-            self.local_media_path = os.path.join(tempfile.mkdtemp(), self.media_name)
             self.cloud_storage_client.download_files(BUCKET_NAME, self.cloud_storage_media_path, self.local_media_path)
-            
+
             long_segment_paths = await convert_video(self.local_media_path, self.long_segments_dir, interval_seconds=15*60, fps=1, crf=28)
             self.cloud_storage_client.upload_files(BUCKET_NAME, self.long_segments_dir, long_segment_cspath)
 
         short_segment_cspath = self.cloud_storage_root + "short_segments/"
         if self.cloud_storage_client.path_exists(BUCKET_NAME, short_segment_cspath):
             self.cloud_storage_client.download_files(BUCKET_NAME, short_segment_cspath, self.short_segments_dir)
-            short_segment_paths = [f for f in glob.glob(os.path.join(self.short_segments_dir, "*")) if os.path.isfile(f)]
+            short_segment_paths = [Path(f) for f in glob.glob(os.path.join(self.short_segments_dir, "*")) if os.path.isfile(f)]
         else:
+            self.cloud_storage_client.download_files(BUCKET_NAME, self.cloud_storage_media_path, self.local_media_path)
+
             short_segment_paths = await convert_video(self.local_media_path, self.short_segments_dir, interval_seconds=5*60, fps=1, crf=28)
             self.cloud_storage_client.upload_files(BUCKET_NAME, self.short_segments_dir, short_segment_cspath)
 
@@ -73,7 +88,7 @@ class LongFormComprehensionPipeline:
             with open(rough_summary_draft_path, "r", encoding="utf-8") as f:
                 rough_summary_draft = f.read()
             with open(characters_path, "r", encoding="utf-8") as f:
-                characters_path = f.read()
+                characters = f.read()
         else:
             rc = RoughComprehension(self.llm)
             rough_summary_draft, characters = await rc(long_segment_paths)
@@ -83,13 +98,58 @@ class LongFormComprehensionPipeline:
                 f.write(characters)
             self.cloud_storage_client.upload_files(BUCKET_NAME, rough_summary_draft_path, rough_summary_draft_cspath)
             self.cloud_storage_client.upload_files(BUCKET_NAME, characters_path, characters_cspath)
-    
-        # self.scene_by_scene_comprehension = SceneBySceneComprehension(
-        #     self.textual_representation_dir,
-        #     self.movie_language,
-        #     self.llm
-        # )
-        # scenes = await self.scene_by_scene_comprehension(self.short_segments, self.long_segments, combined_summary_draft, characters)
+
+        # perform scene by scene comprehension
+        scenes_cspath = self.cloud_storage_root + "scenes.json"
+        scenes_path = os.path.join(self.workdir, "scenes.json")
+        if self.cloud_storage_client.path_exists(BUCKET_NAME, scenes_cspath):
+            self.cloud_storage_client.download_files(BUCKET_NAME, scenes_cspath, scenes_path)
+            with open(scenes_path, "r", encoding="utf-8") as f:
+                scenes = json.load(f)
+        else:
+            sc = SceneBySceneComprehension(self.llm)
+            scenes = await sc(short_segment_paths, long_segment_paths, rough_summary_draft, characters)
+            with open(scenes_path, "w", encoding="utf-8") as f:
+                json.dump(scenes, f, ensure_ascii=False, indent=4)
+            self.cloud_storage_client.upload_files(BUCKET_NAME, scenes_path, scenes_cspath)
+        
+        # perform refined plot summary
+        plot_json_cspath = self.cloud_storage_root + "plot.json"
+        plot_text_cspath = self.cloud_storage_root + "plot.txt"
+        plot_json_path = os.path.join(self.workdir, "plot.json")
+        plot_text_path = os.path.join(self.workdir, "plot.txt")
+        if self.cloud_storage_client.path_exists(BUCKET_NAME, plot_json_cspath):
+            self.cloud_storage_client.download_files(BUCKET_NAME, plot_json_cspath, plot_json_path)
+            self.cloud_storage_client.download_files(BUCKET_NAME, plot_text_cspath, plot_text_path)
+            with open(plot_json_path, "r", encoding="utf-8") as f:
+                plot_json = json.load(f)
+            with open(plot_text_path, "r", encoding="utf-8") as f:
+                plot_text = f.read()
+        else:
+            rp = RefinePlotSummary(self.llm)
+            plot_json, plot_text = await rp(rough_summary_draft, scenes)
+            with open(plot_json_path, "w", encoding="utf-8") as f:
+                json.dump(plot_json, f, ensure_ascii=False, indent=4)
+            with open(plot_text_path, "w", encoding="utf-8") as f:
+                f.write(plot_text)
+            self.cloud_storage_client.upload_files(BUCKET_NAME, plot_json_path, plot_json_cspath)
+            self.cloud_storage_client.upload_files(BUCKET_NAME, plot_text_path, plot_text_cspath)
+
+        # --- Artistic analysis ---
+        artistic_cspath = self.cloud_storage_root + "artistic.json"
+        artistic_path = os.path.join(self.workdir, "artistic.json")
+        if self.cloud_storage_client.path_exists(BUCKET_NAME, artistic_cspath):
+            self.cloud_storage_client.download_files(BUCKET_NAME, artistic_cspath, artistic_path)
+            with open(artistic_path, "r", encoding="utf-8") as f:
+                artistic_annotations = json.load(f)
+        else:
+            from src.pipelines.longForm.tasks.artistic_analysis import ArtisticAnalysis
+            aa = ArtisticAnalysis(self.llm)
+            artistic_annotations = await aa(short_segment_paths, plot_text)
+            with open(artistic_path, "w", encoding="utf-8") as f:
+                json.dump(artistic_annotations, f, ensure_ascii=False, indent=4)
+            self.cloud_storage_client.upload_files(BUCKET_NAME, artistic_path, artistic_cspath)
+
 
         # self.refine_plot_summary = RefinePlotSummary(
         #     self.textual_representation_dir,

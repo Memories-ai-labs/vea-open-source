@@ -15,6 +15,7 @@ from src.config import (
     MOVIE_LIBRARY,
 )
 from pipelines.longForm.longFormComprehensionPipeline import LongFormComprehensionPipeline
+from pipelines.movieRecapEditing.movieRecapEditingPipeline import MovieRecapEditingPipeline
 
 
 # --- Initialize logging ---
@@ -58,18 +59,25 @@ async def index_movie(request: MovieIndexRequest):
         pipeline = LongFormComprehensionPipeline(request.blob_path)
         await pipeline.run()
 
-        # return SummaryResponse(
-        #     message=f"Successfully summarized movie: {request.blob_path}.",
-        #     summary=res
-        # )
+        return MovieIndexResponse(
+            message=f"Successfully indexed movie: {request.blob_path}."
+        )
     except Exception as e:
         logger.error(f"Error processing video: {e}")
         raise HTTPException(status_code=500, detail="Failed to process video.")
 
 
-# @app.post(f"{API_PREFIX}/edit", response_model=EditResponse)
-# async def edit_movie(request: EditRequest) -> EditResponse:
-#     raise NotImplementedError("Method not available")
+
+@app.post(f"{API_PREFIX}/edit_movie")
+async def edit_movie(request: MovieIndexRequest):
+    try:
+        logger.info(f"Editing movie recap: {request.blob_path}")
+        pipeline = MovieRecapEditingPipeline(request.blob_path)
+        await pipeline.run()
+    except Exception as e:
+        logger.error(f"Edit error: {e}")
+        raise HTTPException(status_code=500, detail="Editing failed.")
+
 
 if __name__ == "__main__":
     import uvicorn

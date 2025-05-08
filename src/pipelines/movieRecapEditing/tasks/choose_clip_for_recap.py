@@ -1,26 +1,13 @@
-import os
-import json
 import asyncio
-
-from src.pipelines.movieRecap.schema import ChosenClip
-
+import json
+from src.pipelines.movieRecapEditing.schema import ChosenClip  # update path if needed
 
 class ChooseClipForRecap:
-    def __init__(self, textual_repr_dir, lang, out_lang, llm):
-        self.textual_repr_dir = textual_repr_dir
-        self.lang = lang
-        self.out_lang = out_lang
+    def __init__(self, llm, out_lang="English"):
         self.llm = llm
+        self.out_lang = out_lang
 
     async def __call__(self, plot_json, scenes):
-        chosen_clips_path = os.path.join(self.textual_repr_dir, "chosen_clips.json")
-        os.makedirs(self.textual_repr_dir, exist_ok=True)
-
-        if os.path.exists(chosen_clips_path):
-            print("[INFO] Loading existing chosen clips...")
-            with open(chosen_clips_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-
         segment_nums = sorted(set(entry["segment_num"] for entry in plot_json))
         all_chosen_clips = []
 
@@ -33,13 +20,13 @@ class ChooseClipForRecap:
             select_prompt = (
                 f"{json.dumps(segment_plot, ensure_ascii=False)}\n\n\n"
                 f"{json.dumps(segment_scenes, ensure_ascii=False)}\n\n\n"
-                "You are given a plot summary and a set of scene descriptions for the same movie segment.\n"
-                "Select one visual scene clip for each plot sentence to use in a video recap:\n"
+                "You are given a plot summary and a set of scene descriptions for the same segment of a long-form narrative media (e.g. movie, TV show, or documentary).\n"
+                "Select one visual scene clip for each plot sentence to use in a recap video:\n"
                 "- Each clip should be the best match for the corresponding sentence.\n"
                 "- No clip should be used more than once.\n"
                 "- Ignore clips that show only credits, logos, or irrelevant visuals.\n"
                 "- Use only one clip per sentence.\n"
-                f"The movie is in {self.lang}. Output in English except for character names, which should remain in the original language."
+                f"Output in English except for character names, which should remain in the original language."
             )
 
             chosen_clips = await asyncio.to_thread(
@@ -53,7 +40,7 @@ class ChooseClipForRecap:
 
             refine_prompt = (
                 f"{json.dumps(chosen_clips, ensure_ascii=False)}\n\n\n"
-                "Above is a list of selected clips for a segment of a movie recap.\n"
+                "Above is a list of selected clips for a segment of a recap.\n"
                 "Please revise this list to ensure that:\n"
                 "- Each recap sentence appears only once (no duplicates).\n"
                 "- If a clip is reused, merge the summary sentences if possible, or discard extras.\n"
@@ -87,9 +74,5 @@ class ChooseClipForRecap:
             all_chosen_clips.extend(filtered_clips)
 
         all_chosen_clips.sort(key=lambda c: int(c.get("id", 0)))
-
-        with open(chosen_clips_path, "w", encoding="utf-8") as f:
-            json.dump(all_chosen_clips, f, indent=4, ensure_ascii=False)
-
         print("[INFO] All segment clips chosen and cleaned successfully.")
         return all_chosen_clips
