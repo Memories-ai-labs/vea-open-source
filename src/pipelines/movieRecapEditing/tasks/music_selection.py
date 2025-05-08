@@ -5,11 +5,11 @@ import pandas as pd
 from pathlib import Path
 from pydub import AudioSegment
 import asyncio
-from src.pipelines.movieRecap.schema import ChosenMusic
+from src.pipelines.movieRecapEditing.schema import ChosenMusic
 
 
 class MusicSelection:
-    def __init__(self, llm):
+    def __init__(self, llm, output_dir):
         self.llm = llm
         self.soundstripe_headers = {
             "accept": "application/json",
@@ -18,6 +18,7 @@ class MusicSelection:
             "Authorization": f"Token {os.getenv('SOUNDSTRIPE_KEY')}"
         }
         self.base_url = "https://api.soundstripe.com/v1/songs"
+        self.output_dir = output_dir
 
     def fetch_instrumental_tracks(self, page_count=1):
         all_tracks = []
@@ -69,8 +70,7 @@ class MusicSelection:
 
         return result["id"], result["title"]
 
-    def download_music(self, music_id, music_title, save_dir="data/music"):
-        os.makedirs(save_dir, exist_ok=True)
+    def download_music(self, music_id, music_title):
         url = f"https://api.soundstripe.com/v1/songs/{music_id}"
 
         response = requests.get(url, headers=self.soundstripe_headers)
@@ -90,7 +90,7 @@ class MusicSelection:
         if not best_link:
             raise ValueError("No downloadable instrumental track found.")
 
-        temp_path = os.path.join(save_dir, f"temp_{music_title}.mp3")
+        temp_path = os.path.join(self.output_dir, f"temp_{music_title}.mp3")
         with requests.get(best_link, stream=True) as r:
             r.raise_for_status()
             with open(temp_path, 'wb') as f:
@@ -102,7 +102,7 @@ class MusicSelection:
         loop_count = one_hour_ms // len(original_audio) + 1
         long_audio = (original_audio * loop_count)[:one_hour_ms]
 
-        final_path = os.path.join(save_dir, f"{music_title}_1hour_loop.mp3")
+        final_path = os.path.join(self.output_dir, f"{music_title}_1hour_loop.mp3")
         long_audio.export(final_path, format="mp3")
 
         os.remove(temp_path)
