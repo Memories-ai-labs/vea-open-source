@@ -4,6 +4,9 @@ import asyncio
 from moviepy import *
 from pathlib import Path
 from pydub.utils import mediainfo
+import subprocess
+import tempfile
+
 
 class EditMovieRecapVideo:
     def __init__(self, output_path="final_recap.mp4", music_volume_multiplier=0.5):
@@ -41,6 +44,45 @@ class EditMovieRecapVideo:
             speed_factor = window_duration / duration
             print(f"[WARN] Window too short. Slowing down by factor {1/speed_factor:.2f} to match {duration:.2f}s")
             return video.with_effects([vfx.MultiplySpeed(speed_factor)])
+
+    def write_srt(self, clips, srt_path, narration_dir):
+        def format_srt_time(seconds):
+            h = int(seconds // 3600)
+            m = int((seconds % 3600) // 60)
+            s = int(seconds % 60)
+            ms = int((seconds - int(seconds)) * 1000)
+            return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+        current_time = 0.0  # running timestamp in the final video
+
+        with open(srt_path, "w", encoding="utf-8") as f:
+            for idx, clip in enumerate(clips, start=1):
+                clip_id = clip["id"]
+                sentence = clip.get("corresponding_summary_sentence", "").replace("\n", " ").strip()
+
+                audio_path = os.path.join(narration_dir, f"{clip_id}.mp3")
+                duration = self.get_audio_duration(audio_path)
+
+                start_sec = current_time
+                end_sec = current_time + duration
+
+                f.write(f"{idx}\n")
+                f.write(f"{format_srt_time(start_sec)} --> {format_srt_time(end_sec)}\n")
+                f.write(f"{sentence}\n\n")
+
+                current_time = end_sec  # move forward for the next caption
+
+
+    def burn_subtitles(self, input_path, srt_path, output_path):
+        cmd = [
+            "ffmpeg",
+            "-y",  # Overwrite if exists
+            "-i", input_path,
+            "-vf", f"subtitles={srt_path}",
+            "-c:a", "copy",
+            output_path
+        ]
+        subprocess.run(cmd, check=True)
 
     async def __call__(
         self,
@@ -81,13 +123,22 @@ class EditMovieRecapVideo:
         ).subclipped(0, final_video.duration)
         final_audio = CompositeAudioClip([narration_audio, background_music])
         final_video = final_video.with_audio(final_audio)
-
+        
+        # render the final video and add captions
+        caption_dir = tempfile.mkdtemp()
+        tmp_srt_path = os.path.join(caption_dir, "captions.srt")
+        tmp_video_path = os.path.join(caption_dir, "no_caption.mp4")
         await asyncio.to_thread(
             final_video.write_videofile,
-            self.output_path,
+            tmp_video_path,
             codec='libx264',
             audio_codec='aac'
         )
+
+        # add captions
+        self.write_srt(clips, tmp_srt_path, narration_dir)
+        self.burn_subtitles(tmp_video_path, tmp_srt_path, self.output_path)
+
 
         print(f"[INFO] Final recap video created: {self.output_path}")
         return self.output_path
