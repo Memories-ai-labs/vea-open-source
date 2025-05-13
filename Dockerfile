@@ -40,7 +40,7 @@ ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # Default entrypoint
-CMD ["python", "-m", "src.pipelines.movieRecap.movieRecapPipeline"]
+CMD ["python", "-m", "src.app"]
 
 
 

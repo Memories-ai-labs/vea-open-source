@@ -11,3 +11,7 @@ class ChosenClip(BaseModel):
 class ChosenMusic(BaseModel):
     id: str 
     title: str 
+
+class RecapSentence(BaseModel):
+    sentence_text: str 
+    segment_num: int 
