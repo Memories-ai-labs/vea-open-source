@@ -12,3 +12,9 @@ class EvidenceClip(BaseModel):
     end: str                 # e.g., "00:13:45"
     description: str         # visual scene description
     reason: str              # why this clip supports the response
+
+class NarratedClip(BaseModel):
+    id: int
+    start: str
+    end: str
+    narration: str

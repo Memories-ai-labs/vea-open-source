@@ -22,7 +22,7 @@ from src.config import (
     BUCKET_NAME,
     MOVIE_LIBRARY,
 )
-from src.pipelines.longForm.longFormComprehensionPipeline import LongFormComprehensionPipeline
+from src.pipelines.longFormComprehension.longFormComprehensionPipeline import LongFormComprehensionPipeline
 from src.pipelines.movieRecapEditing.movieRecapEditingPipeline import MovieRecapEditingPipeline
 from src.pipelines.flexibleResponse.flexibleResponsePipeline import FlexibleResponsePipeline
 

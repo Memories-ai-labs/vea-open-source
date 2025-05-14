@@ -9,7 +9,6 @@ class FlexibleGeminiAnswer:
         context_description = "\n".join(
             f"- {fname}: {desc}" for fname, desc in file_descriptions.items()
         )
-
         # Flatten the contents for inline use
         content_dump = "\n\n".join(
             f"===== {fname} =====\n{indexing_data[fname]}" for fname in indexing_data
