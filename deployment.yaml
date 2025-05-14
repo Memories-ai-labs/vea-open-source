@@ -1,11 +1,10 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: video-edit-app
+  name: video-edit
   labels:
     app: video-edit
 spec:
-  replicas: 2
   selector:
     matchLabels:
       app: video-edit
@@ -21,15 +20,11 @@ spec:
             - containerPort: 8000
           resources:
             requests:
-              cpu: "250m"
-              memory: "512Mi"
+              cpu: "6"
+              memory: "2Gi"
             limits:
-              cpu: "500m"
-              memory: "1Gi"
-          env:
-            - name: GOOGLE_APPLICATION_CREDENTIALS
-              value: /var/secrets/google/key.json
-
+              cpu: "8"
+              memory: "7Gi"
 ---
 apiVersion: v1
 kind: Service
