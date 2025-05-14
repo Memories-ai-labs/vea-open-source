@@ -4,7 +4,7 @@ import time
 import asyncio
 from datetime import timedelta
 from pathlib import Path
-from src.pipelines.longForm.schema import ArtisticSegment
+from src.pipelines.longFormComprehension.schema import ArtisticSegment
 
 class ArtisticAnalysis:
     def __init__(self, llm):

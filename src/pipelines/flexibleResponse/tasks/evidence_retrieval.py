@@ -9,13 +9,23 @@ class EvidenceRetrieval:
         self.llm = llm
 
     async def __call__(self, initial_response: str, indexing_data: dict, file_descriptions: dict):
-        scenes_json = indexing_data.get("scenes.json", {})
+        # Format descriptions of each file
+        context_description = "\n".join(
+            f"- {fname}: {desc}" for fname, desc in file_descriptions.items()
+        )
+        # Flatten the contents for inline use
+        content_dump = "\n\n".join(
+            f"===== {fname} =====\n{indexing_data[fname]}" for fname in indexing_data
+        )
 
         prompt = (
             "You are given an assistant's long-form text response to a user prompt about a movie.\n"
             "Here is the response:\n"
             f"---\n{initial_response.strip()}\n---\n\n"
-            "You also have access to scene metadata (scenes.json) that includes timestamped scene descriptions.\n"
+            "The following indexing files have been provided:\n"
+            f"{context_description}\n\n"
+            "Below are the contents of the files:\n"
+            f"{content_dump}\n\n"
             "Select relevant scenes that could serve as **visual evidence** for the points made in the response.\n\n"
             "For each clip you select, include:\n"
             "- `start`: timestamp (HH:MM:SS)\n"
@@ -24,7 +34,6 @@ class EvidenceRetrieval:
             "- `reason`: explanation of why this scene supports the assistant's response\n\n"
             "Respond using structured JSON format only. Do not include any extra text or explanation.\n"
             "Here is the scene metadata:\n"
-            f"{json.dumps(scenes_json, ensure_ascii=False)}"
         )
 
         return await asyncio.to_thread(

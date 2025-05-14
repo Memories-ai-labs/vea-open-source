@@ -56,3 +56,4 @@ class FlexibleResponseResult(BaseModel):
     response: str
     response_type: str  # one of: 'text', 'text_with_clips', 'video'
     evidence_paths: List[str]
+    run_id: str

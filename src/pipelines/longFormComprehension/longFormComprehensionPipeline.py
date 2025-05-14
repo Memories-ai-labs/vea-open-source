@@ -14,13 +14,10 @@ from google.cloud.exceptions import NotFound
 from lib.utils.media import convert_video
 from src.config import CREDENTIAL_PATH, BUCKET_NAME
 
-from src.pipelines.longForm.tasks.rough_comprehension import RoughComprehension
-from src.pipelines.longForm.tasks.scene_by_scene_comprehension import SceneBySceneComprehension
-from src.pipelines.longForm.tasks.refine_plot_summary import RefinePlotSummary
-# from src.pipelines.longForm.tasks.choose_clip_for_recap import ChooseClipForRecap
-# from src.pipelines.longForm.tasks.generate_narration import GenerateNarrationForClips
-# from src.pipelines.longForm.tasks.music_selection import MusicSelection
-# from src.pipelines.longForm.tasks.edit_recap_video import EditMovieRecapVideo
+from src.pipelines.longFormComprehension.tasks.rough_comprehension import RoughComprehension
+from src.pipelines.longFormComprehension.tasks.scene_by_scene_comprehension import SceneBySceneComprehension
+from src.pipelines.longFormComprehension.tasks.refine_plot_summary import RefinePlotSummary
+from src.pipelines.longFormComprehension.tasks.artistic_analysis import ArtisticAnalysis
 
 class LongFormComprehensionPipeline:
     def __init__(self, cloud_storage_media_path):
@@ -143,7 +140,7 @@ class LongFormComprehensionPipeline:
             with open(artistic_path, "r", encoding="utf-8") as f:
                 artistic_annotations = json.load(f)
         else:
-            from src.pipelines.longForm.tasks.artistic_analysis import ArtisticAnalysis
+            
             aa = ArtisticAnalysis(self.llm)
             artistic_annotations = await aa(short_segment_paths, plot_text)
             with open(artistic_path, "w", encoding="utf-8") as f:
