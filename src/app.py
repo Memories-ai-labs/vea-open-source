@@ -7,7 +7,15 @@ from fastapi import FastAPI, HTTPException
 
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
-from src.schema import MovieFile, MovieIndexRequest, MovieIndexResponse, MovieRecapRequest, MovieRecapResponse
+from src.schema import (
+    MovieFile,
+    MovieIndexRequest,
+    MovieIndexResponse,
+    MovieRecapRequest,
+    MovieRecapResponse,
+    FlexibleResponseRequest,
+    FlexibleResponseResult
+)
 from src.config import (
     API_PREFIX,
     CREDENTIAL_PATH,
@@ -16,6 +24,7 @@ from src.config import (
 )
 from src.pipelines.longForm.longFormComprehensionPipeline import LongFormComprehensionPipeline
 from src.pipelines.movieRecapEditing.movieRecapEditingPipeline import MovieRecapEditingPipeline
+from src.pipelines.flexibleResponse.flexibleResponsePipeline import FlexibleResponsePipeline
 
 
 # --- Initialize logging ---
@@ -44,7 +53,6 @@ async def list_available_movies() -> List[MovieFile]:
         logger.error(f"Error fetching movies: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch movies.")
 
-
 @app.post(f"{API_PREFIX}/index_movie")
 async def index_movie(request: MovieIndexRequest):
     """
@@ -66,8 +74,6 @@ async def index_movie(request: MovieIndexRequest):
         logger.error(f"Error processing video: {e}")
         raise HTTPException(status_code=500, detail="Failed to process video.")
 
-
-
 @app.post(f"{API_PREFIX}/edit_movie", response_model=MovieRecapResponse)
 async def edit_movie(request: MovieRecapRequest):
     try:
@@ -82,7 +88,21 @@ async def edit_movie(request: MovieRecapRequest):
     except Exception as e:
         logger.error(f"Edit error: {e}")
         raise HTTPException(status_code=500, detail="Editing failed.")
+    
+@app.post(f"{API_PREFIX}/flexible_respond", response_model=FlexibleResponseResult)
+async def flexible_respond(request: FlexibleResponseRequest):
+    """
+    Run the flexible response pipeline on a movie.
+    """
+    try:
+        logger.info(f"Flexible response for: {request.blob_path} with prompt: {request.prompt}")
+        pipeline = FlexibleResponsePipeline(request.blob_path)
+        response = await pipeline.run(request.prompt, request.video_response)
 
+        return response
+    except Exception as e:
+        logger.error(f"Flexible response error: {e}")
+        raise HTTPException(status_code=500, detail="Flexible response failed.")
 
 if __name__ == "__main__":
     import uvicorn

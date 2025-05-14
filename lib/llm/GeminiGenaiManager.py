@@ -11,11 +11,11 @@ from src.config import API_KEYS_PATH
 MAX_BLOB_SIZE = 100 * 1024 * 1024  # 45 MB
 
 class GeminiGenaiManager:
-    def __init__(self):
+    def __init__(self, model = "gemini-2.0-flash"):
         self.load_api_keys()
         self.gemini_api_key = os.getenv("GENAI_API_KEY")
         self.genai_client = genai.Client(api_key=self.gemini_api_key)
-        self.model = "gemini-2.0-flash"
+        self.model = model
 
     def load_api_keys(self):
         """Loads API keys from a JSON file and sets them as environment variables."""
