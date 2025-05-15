@@ -39,3 +39,21 @@ class MovieIndexResponse(BaseModel):
     Response schema after video editing.
     """
     message: str
+
+class FlexibleResponseRequest(BaseModel):
+    """
+    Request schema for flexible response from media.
+    """
+    blob_path: str
+    prompt: str
+    video_response: bool
+
+
+class FlexibleResponseResult(BaseModel):
+    """
+    Output from flexible response pipeline.
+    """
+    response: str
+    response_type: str  # one of: 'text', 'text_with_clips', 'video'
+    evidence_paths: List[str]
+    run_id: str
