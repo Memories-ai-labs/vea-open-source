@@ -29,6 +29,10 @@ app = FastAPI()
 gcp_oss = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
 
 
+@app.get("/")
+async def root():
+    return {"message": "FastAPI inference service is running."}
+
 @app.get(f"{API_PREFIX}/movies", response_model=List[MovieFile])
 async def list_available_movies() -> List[MovieFile]:
     """

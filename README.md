@@ -32,3 +32,31 @@ There are some useful tools for video processing, llm interaction:
 
 - [GeminiGenaiManager.py](lib/llm/GeminiGenaiManager.py) provides a class for calling gemini to generate output based on your pompt.
 
+
+### Cloud deployment
+- Cluster info: GCP -> Clusters -> video-edit-cluster
+- Deployment info (a deployed service in a cluster): GCP -> Clusters -> workloads -> video-edit
+- [ingress.yaml](./ingress.yaml): define how network ingress work on GCP
+- [deployment.yaml](./deployment.yaml): define how image is deployed on GCP
+- GCP docker image: GCP -> Artifact Registry -> vea-service -> video-edit
+- Tools: [gcloud](https://cloud.google.com/sdk/docs/install?hl=zh-cn), [kubectl](https://cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl?hl=zh-cn)
+
+basic commands:
+Deploy
+```bash
+kubectl apply -f deployment.yaml
+```
+
+Delete deployment
+```bash
+kubectl delete -f deployment.yaml
+```
+
+push docker image to GCP docker image
+```bash
+docker tag <local-image-name> <GCP image name>
+docker push <GCP image name> # current GCP image name: us-docker.pkg.dev/gen-lang-client-0057517563/vea-service/video-edit:latest
+```
+
+### Test tool
+[postman](https://www.postman.com/)

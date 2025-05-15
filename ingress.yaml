@@ -4,12 +4,12 @@ metadata:
   name: video-edit-ingress
   annotations:
     kubernetes.io/ingress.class: "gce"  # 👈 For GKE ingress
-    networking.gke.io/managed-certificates: "fastapi-cert"  # Optional TLS
+    kubernetes.io/ingress.global-static-ip-name: "video-edit-ip"
 spec:
   rules:
     - http:
         paths:
-          - path: /vea/v1
+          - path: /
             pathType: Prefix
             backend:
               service:
