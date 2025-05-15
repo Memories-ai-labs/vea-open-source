@@ -1,7 +1,7 @@
 import asyncio
 from collections import defaultdict
 
-from src.pipelines.longForm.schema import RecapSentence
+from src.pipelines.longFormComprehension.schema import RecapSentence
 
 class RefinePlotSummary:
     def __init__(self, llm):

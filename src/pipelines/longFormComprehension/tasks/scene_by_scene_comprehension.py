@@ -4,7 +4,7 @@ import time
 import asyncio
 from datetime import timedelta
 
-from src.pipelines.longForm.schema import Scene
+from src.pipelines.longFormComprehension.schema import Scene
 
 class SceneBySceneComprehension:
     def __init__(self, llm):
