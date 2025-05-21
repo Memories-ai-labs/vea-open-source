@@ -8,24 +8,25 @@ import shutil
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
+from lib.utils.media import clean_stale_tempdirs
 from src.config import CREDENTIAL_PATH, BUCKET_NAME
 
-from src.pipelines.flexibleResponse.tasks.flexible_gemini_answer import FlexibleGeminiAnswer
-from src.pipelines.flexibleResponse.tasks.classify_response_type import ClassifyResponseType
-from src.pipelines.flexibleResponse.tasks.evidence_retrieval import EvidenceRetrieval
-from src.pipelines.flexibleResponse.tasks.clip_extraction import ClipExtractor
-from src.pipelines.flexibleResponse.tasks.generate_narration_script import GenerateNarrationScript
-from src.pipelines.flexibleResponse.tasks.generate_video_clip_plan import GenerateVideoClipPlan
-from src.pipelines.flexibleResponse.tasks.generate_narration_audio import GenerateNarrationForVideoResponse
-from src.pipelines.flexibleResponse.tasks.edit_video_response import EditFlexibleVideoResponse
+from src.pipelines.longFormFlexibleResponse.tasks.flexible_gemini_answer import FlexibleGeminiAnswer
+from src.pipelines.longFormFlexibleResponse.tasks.classify_response_type import ClassifyResponseType
+from src.pipelines.longFormFlexibleResponse.tasks.evidence_retrieval import EvidenceRetrieval
+from src.pipelines.longFormFlexibleResponse.tasks.clip_extraction import ClipExtractor
+from src.pipelines.longFormFlexibleResponse.tasks.generate_narration_script import GenerateNarrationScript
+from src.pipelines.longFormFlexibleResponse.tasks.generate_video_clip_plan import GenerateVideoClipPlan
+from src.pipelines.longFormFlexibleResponse.tasks.generate_narration_audio import GenerateNarrationForVideoResponse
+from src.pipelines.longFormFlexibleResponse.tasks.edit_video_response import EditFlexibleVideoResponse
 
-class FlexibleResponsePipeline:
+class longFormFlexibleResponsePipeline:
     def __init__(self, cloud_storage_media_path):
         self.cloud_storage_media_path = cloud_storage_media_path
         self.media_name = os.path.basename(cloud_storage_media_path)
         self.media_base_name = os.path.splitext(self.media_name)[0]
 
-        self.clean_stale_tempdirs()
+        clean_stale_tempdirs()
         self.cloud_storage_indexing_dir = f"indexing/{self.media_base_name}/"
         self.llm = GeminiGenaiManager(model="gemini-2.5-flash-preview-04-17")
         self.cloud_storage_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
@@ -57,18 +58,6 @@ class FlexibleResponsePipeline:
                 self.filtered_file_descriptions[fname] = desc
             except Exception as e:
                 print(f"[WARNING] Skipping {fname}: {e}")
-
-    def clean_stale_tempdirs(self):
-        print("Cleaning stale temp directories...")
-        tmp_root = tempfile.gettempdir()  # Usually /tmp
-        for name in os.listdir(tmp_root):
-            path = os.path.join(tmp_root, name)
-            if os.path.isdir(path) and name.startswith("tmp"):
-                try:
-                    shutil.rmtree(path)
-                    print(f"Deleted: {path}")
-                except Exception as e:
-                    print(f"Skipping {path}: {e}")
 
     async def run(self, user_prompt: str, video_response: bool):
         # Generate 8-char alphanumeric ID

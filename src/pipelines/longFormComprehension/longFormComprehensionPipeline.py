@@ -1,6 +1,6 @@
 import os
-import shutil
 import tempfile
+import shutil
 from pathlib import Path
 import asyncio
 import glob
@@ -11,7 +11,7 @@ from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
 from google.cloud.exceptions import NotFound
 
-from lib.utils.media import convert_video
+from lib.utils.media import preprocess_long_video, clean_stale_tempdirs
 from src.config import CREDENTIAL_PATH, BUCKET_NAME
 
 from src.pipelines.longFormComprehension.tasks.rough_comprehension import RoughComprehension
@@ -20,38 +20,27 @@ from src.pipelines.longFormComprehension.tasks.refine_plot_summary import Refine
 from src.pipelines.longFormComprehension.tasks.artistic_analysis import ArtisticAnalysis
 
 class LongFormComprehensionPipeline:
-    def __init__(self, cloud_storage_media_path):
+    def __init__(self, cloud_storage_media_path, start_fresh: bool = False):
         self.cloud_storage_media_path = cloud_storage_media_path
         self.media_name = os.path.basename(cloud_storage_media_path)
         self.media_base_name = os.path.splitext(self.media_name)[0]
-
         self.cloud_storage_root = f"indexing/{self.media_base_name}/"
-        self.output_cloud_storage_dir = f"outputs/{self.media_base_name}/"
 
-        self.llm = GeminiGenaiManager()
+        self.start_fresh = start_fresh
+        self.llm = GeminiGenaiManager("gemini-2.0-flash")
         self.cloud_storage_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
 
-        # Local subfolders for temp work
-        self.clean_stale_tempdirs()
+        clean_stale_tempdirs()
         self.workdir = tempfile.mkdtemp()
         self.long_segments_dir = tempfile.mkdtemp()
         self.short_segments_dir = tempfile.mkdtemp()
-
         self.local_media_path = os.path.join(tempfile.mkdtemp(), self.media_name)
 
-    def clean_stale_tempdirs(self):
-        print("Cleaning stale temp directories...")
-        tmp_root = tempfile.gettempdir()  # Usually /tmp
-        for name in os.listdir(tmp_root):
-            path = os.path.join(tmp_root, name)
-            if os.path.isdir(path) and name.startswith("tmp"):
-                try:
-                    shutil.rmtree(path)
-                    print(f"Deleted: {path}")
-                except Exception as e:
-                    print(f"Skipping {path}: {e}")
-
     async def run(self):
+        if self.start_fresh:
+            print(f"[INFO] Start fresh: Deleting existing GCS folder at {self.cloud_storage_root}")
+            self.cloud_storage_client.delete_folder(BUCKET_NAME, self.cloud_storage_root)
+
         # preprocess media
         long_segment_cspath = self.cloud_storage_root + "long_segments/"
         if self.cloud_storage_client.path_exists(BUCKET_NAME, long_segment_cspath):
@@ -61,7 +50,7 @@ class LongFormComprehensionPipeline:
             # Download media file from cloud_storage to local temp folder
             self.cloud_storage_client.download_files(BUCKET_NAME, self.cloud_storage_media_path, self.local_media_path)
 
-            long_segment_paths = await convert_video(self.local_media_path, self.long_segments_dir, interval_seconds=15*60, fps=1, crf=28)
+            long_segment_paths = await preprocess_long_video(self.local_media_path, self.long_segments_dir, interval_seconds=15*60, fps=1, crf=30)
             self.cloud_storage_client.upload_files(BUCKET_NAME, self.long_segments_dir, long_segment_cspath)
 
         short_segment_cspath = self.cloud_storage_root + "short_segments/"
@@ -71,7 +60,7 @@ class LongFormComprehensionPipeline:
         else:
             self.cloud_storage_client.download_files(BUCKET_NAME, self.cloud_storage_media_path, self.local_media_path)
 
-            short_segment_paths = await convert_video(self.local_media_path, self.short_segments_dir, interval_seconds=5*60, fps=1, crf=28)
+            short_segment_paths = await preprocess_long_video(self.local_media_path, self.short_segments_dir, interval_seconds=5*60, fps=1, crf=30)
             self.cloud_storage_client.upload_files(BUCKET_NAME, self.short_segments_dir, short_segment_cspath)
 
         # perform rough comprehension
@@ -146,36 +135,3 @@ class LongFormComprehensionPipeline:
             with open(artistic_path, "w", encoding="utf-8") as f:
                 json.dump(artistic_annotations, f, ensure_ascii=False, indent=4)
             self.cloud_storage_client.upload_files(BUCKET_NAME, artistic_path, artistic_cspath)
-
-
-        # self.refine_plot_summary = RefinePlotSummary(
-        #     self.textual_representation_dir,
-        #     self.movie_language,
-        #     self.llm
-        # )
-        # plot_json, plot = await self.refine_plot_summary(combined_summary_draft, scenes)
-
-        # self.choose_clip_for_recap = ChooseClipForRecap(
-        #     self.textual_representation_dir,
-        #     self.movie_language,
-        #     self.output_language,
-        #     self.llm
-        # )
-        # chosen_clips = await self.choose_clip_for_recap(plot_json, scenes)
-
-        # self.generate_narration = GenerateNarrationForClips(
-        #     self.text_to_voice_dir, self.output_language
-        # )
-        # await self.generate_narration(chosen_clips)
-
-        # self.music_selection = MusicSelection(
-        #     self.llm
-        # )
-        # chosen_music_path = await self.music_selection(plot)
-
-        # self.videoedit = EditMovieRecapVideo(
-        #     os.path.join(self.output_dir, "recap.mp4"),
-        #     0.5
-        # )
-        # await self.videoedit(chosen_clips, self.movie_path, self.text_to_voice_dir, chosen_music_path)
-        

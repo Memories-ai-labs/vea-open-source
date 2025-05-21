@@ -1,4 +1,4 @@
-from src.pipelines.flexibleResponse.schema import NarratedClip
+from src.pipelines.longFormFlexibleResponse.schema import NarratedClip
 import asyncio
 import json
 

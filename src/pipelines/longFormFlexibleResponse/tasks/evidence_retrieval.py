@@ -1,8 +1,8 @@
-# src/pipelines/flexibleResponse/tasks/evidence_retrieval.py
+# src/pipelines/longFormFlexibleResponse/tasks/evidence_retrieval.py
 
 import asyncio
 import json
-from src.pipelines.flexibleResponse.schema import EvidenceClip
+from src.pipelines.longFormFlexibleResponse.schema import EvidenceClip
 
 class EvidenceRetrieval:
     def __init__(self, llm):

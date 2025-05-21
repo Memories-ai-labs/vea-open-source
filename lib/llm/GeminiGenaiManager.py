@@ -8,7 +8,6 @@ import traceback
 from google.genai import types
 import mimetypes
 from src.config import API_KEYS_PATH
-MAX_BLOB_SIZE = 100 * 1024 * 1024  # 45 MB
 
 class GeminiGenaiManager:
     def __init__(self, model = "gemini-2.0-flash"):
@@ -46,9 +45,7 @@ class GeminiGenaiManager:
             raise FileNotFoundError(f"File not found: {file_path}")
 
         file_size = file_path.stat().st_size
-        if file_size > MAX_BLOB_SIZE:
-            raise ValueError(f"File too large for inline Gemini upload: {file_path} ({file_size / (1024*1024):.2f} MB)")
-
+    
         mime_type, _ = mimetypes.guess_type(file_path)
         if mime_type is None:
             raise ValueError(f"Could not determine MIME type for: {file_path}")
@@ -62,9 +59,8 @@ class GeminiGenaiManager:
     def LLM_request(self, prompt_contents, config=None, retry_delay=60, max_retries=3):
         """
         Sends prompt_contents to Gemini. Converts Path objects to inline file blobs.
-        Handles JSON parse errors, rate limits (429), and retries.
+        Handles JSON parse errors, blank responses, rate limits (429), and retries.
         """
-        # Prepare Gemini parts
         parts = []
         for item in prompt_contents:
             if isinstance(item, Path):
@@ -81,8 +77,16 @@ class GeminiGenaiManager:
                     config=config or {}
                 )
 
+                # Handle JSON config separately
                 if config and config.get("response_mime_type") == "application/json":
+                    if not response.text or not response.text.strip():
+                        raise ValueError("Blank JSON response from Gemini.")
                     return json.loads(response.text)
+
+                # Handle plain text
+                if not response.text or not response.text.strip():
+                    print("[INFO] Detected blank response.")
+                    raise ValueError("Blank response from Gemini.")
 
                 return response.text
 
@@ -90,7 +94,7 @@ class GeminiGenaiManager:
                 attempt += 1
                 error_str = str(e)
                 print(f"[ERROR] Gemini call failed: {error_str} (Attempt {attempt}/{max_retries})")
-
+                print(response)
                 if isinstance(e, json.JSONDecodeError):
                     print("[INFO] Detected JSON decode error. Retrying in 10 seconds...")
                     time.sleep(10)

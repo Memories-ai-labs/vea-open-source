@@ -1,85 +1,108 @@
-
 import logging
 import os
 from pathlib import Path
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
 import subprocess
 import json
-from typing import Optional
 import time
-import os, subprocess, time
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
+from datetime import timedelta
+import tempfile
+import shutil
+
+logging.basicConfig(level=logging.WARNING)  # Only show warnings, errors, and critical logs
+logger = logging.getLogger(__name__)
 
 def get_video_info(video_path: str) -> dict:
-    """
-    Extract video metadata (width, height, fps, duration, etc.) using ffprobe.
-    """
     cmd = [
-        "ffprobe",
-        "-v", "error",
+        "ffprobe", "-v", "error",
+        "-loglevel", "error",
         "-print_format", "json",
-        "-show_format",
-        "-show_streams",
+        "-show_format", "-show_streams",
         video_path
     ]
     result = subprocess.run(cmd, capture_output=True, text=False)
-
     if result.returncode != 0:
-        # 把错误流也 decode 成 utf-8，看清楚
         raise RuntimeError(f"ffprobe error: {result.stderr.decode('utf-8')}")
+    return json.loads(result.stdout.decode('utf-8'))
 
-    metadata_json = result.stdout.decode('utf-8')  # ✅ 手动decode成utf-8
-    metadata = json.loads(metadata_json)
-    return metadata
+def get_video_duration(video_path: str) -> float:
+    return float(get_video_info(video_path)["format"]["duration"])
 
-def get_video_duration(video_path: str) -> dict:
-    video_info = get_video_info(video_path)
-    return float(video_info["format"]["duration"])
+def downsample_video(input_path: str, output_path: str, crf: int = 30, target_height: int = 480, fps: float = 0.5):
+    """
+    Create a downsampled version of the video with lower FPS and resolution, preserving audio.
+    """
+    cmd = [
+        "ffmpeg", "-y",
+        "-loglevel", "error",
+        "-i", input_path,
+        "-vf", f"fps={fps},scale=-2:{target_height}",
+        "-c:v", "libx264",
+        "-crf", str(crf),
+        "-preset", "ultrafast",
+        "-c:a", "copy",
+        output_path
+    ]
+    logger.info(f"[Downsampling] Running: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
 
-def build_ffmpeg_command(input_path, output_path, start, duration, filter_str, crf):
-    cmd = ["ffmpeg", "-y", "-ss", str(start), "-i", str(input_path), "-t", str(duration)]
-    if filter_str:
-        cmd += ["-vf", filter_str]
-    cmd += ["-c:v", "libx264", "-crf", str(crf or 28), "-preset", "ultrafast", "-c:a", "copy", "-threads", "1", str(output_path)]
-    return cmd
+def build_chunk_command(input_path, output_path, start, duration):
+    """
+    Build FFmpeg command to slice preprocessed video into a chunk without re-encoding.
+    """
+    return [
+        "ffmpeg", "-y",
+        "-loglevel", "error",
+        "-ss", str(start),
+        "-i", input_path,
+        "-t", str(duration),
+        "-c", "copy",
+        "-threads", "1",
+        output_path
+    ]
 
-async def convert_video(
+async def preprocess_long_video(
     input_path: str,
     output_dir: str,
     interval_seconds: int,
-    fps: Optional[int] = None,
-    crf: Optional[int] = 28,
+    crf: Optional[int] = 30,
     target_height: Optional[int] = 480,
-    max_workers: int = 4,
+    fps: Optional[float] = 0.5,
 ) -> list[Path]:
     output_dir = Path(output_dir)
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    total_duration = get_video_duration(input_path)
-    filter_parts = []
-    if target_height:
-        filter_parts.append(f"scale=-2:{target_height}")
-    if fps:
-        filter_parts.append(f"fps={fps}")
-    filter_str = ",".join(filter_parts) if filter_parts else None
+    input_path = Path(input_path)
+    input_stem = input_path.stem  # e.g., "video1" from "video1.mp4"
+
+    downsampled_path = output_dir / f"{input_stem}_downsampled.mp4"
+    if not downsampled_path.exists():
+        logger.info(f"[INFO] Downsampling video: {input_path}")
+        downsample_video(str(input_path), str(downsampled_path), crf=crf, target_height=target_height, fps=fps)
+    else:
+        logger.info(f"[INFO] Skipping downsampling (already exists)")
+
+    total_duration = get_video_duration(str(downsampled_path))
+    logger.info(f"[INFO] Total duration of downsampled video: {total_duration:.2f} seconds")
 
     tasks = []
     paths = []
-
     current_start = 0
     while current_start < total_duration:
         start = int(current_start)
         end = int(min(current_start + interval_seconds, total_duration))
         duration = end - start
-        output_path = output_dir / f"clip_{start:05d}_{end:05d}.mp4"
-        cmd = build_ffmpeg_command(input_path, output_path, start, duration, filter_str, crf)
+
+        # Include original filename in the chunk's name
+        output_path = output_dir / f"{input_stem}_{start:05d}_{end:05d}.mp4"
+
+        cmd = build_chunk_command(str(downsampled_path), str(output_path), start, duration)
         tasks.append((cmd, output_path))
         current_start += interval_seconds
+
+    max_workers = min(os.cpu_count(), 8)
+    logger.info(f"[INFO] Using {max_workers} worker threads")
 
     def run_cmd(cmd):
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -89,17 +112,65 @@ async def convert_video(
         futures = [executor.submit(run_cmd, cmd) for cmd, _ in tasks]
         for f in futures: f.result()
         paths = [p for _, p in tasks]
+    logger.info(f"[INFO] Completed {len(paths)} segments in {time.time() - start_time:.2f} sec")
 
-    end_time = time.time()
-    print(f"[INFO] Completed {len(paths)} segments in {end_time - start_time:.2f} sec")
     return paths
+async def preprocess_short_video(
+    input_path: str,
+    output_dir: str,
+    crf: int = 30,
+    target_height: int = 480,
+    fps: float = 0.5
+) -> Path:
+    """
+    Downsample a video to a lower resolution and frame rate without splitting.
+    Returns the path to the downsampled video.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    input_path = Path(input_path)
+    input_stem = input_path.stem
+    downsampled_path = output_dir / f"{input_stem}_downsampled.mp4"
+
+    if downsampled_path.exists():
+        logger.info(f"[INFO] Skipping downsampling (already exists): {downsampled_path}")
+        return downsampled_path
+
+    logger.info(f"[INFO] Downsampling video: {input_path}")
+    downsample_video(str(input_path), str(downsampled_path), crf=crf, target_height=target_height, fps=fps)
+
+    return downsampled_path
 
 
-# if __name__ == "__main__":
-#     from pathlib import Path
-#     import asyncio
-#     video_path = "E:/OpenInterX-Code-Source/mavi-edit-service/test/爱在日落黄昏时.mkv"
-#     output_path = "E:/OpenInterX-Code-Source/mavi-edit-service/test"
-#     info = get_video_info(video_path)
-#     # print(info)
-#     asyncio.run(convert_video(video_path, Path(output_path), interval_seconds=1200, fps=1, crf=28))
+def parse_time_to_seconds(t: str) -> int:
+    """
+    Converts a timestamp string (HH:MM:SS or MM:SS) to total seconds.
+    """
+    parts = list(map(int, t.split(":")))
+    if len(parts) == 3:
+        h, m, s = parts
+    elif len(parts) == 2:
+        h = 0
+        m, s = parts
+    else:
+        raise ValueError(f"Invalid timestamp format: {t}")
+    return h * 3600 + m * 60 + s
+
+def seconds_to_hhmmss(seconds: int) -> str:
+    """
+    Converts seconds to HH:MM:SS format.
+    """
+    return str(timedelta(seconds=int(seconds)))
+
+def clean_stale_tempdirs():
+        print("Cleaning stale temp directories...")
+        tmp_root = tempfile.gettempdir()  # Usually /tmp
+        for name in os.listdir(tmp_root):
+            path = os.path.join(tmp_root, name)
+            if os.path.isdir(path) and name.startswith("tmp"):
+                try:
+                    shutil.rmtree(path)
+                    print(f"Deleted: {path}")
+                except Exception as e:
+                    print(f"Skipping {path}: {e}")
