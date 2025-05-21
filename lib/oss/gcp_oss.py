@@ -133,5 +133,69 @@ class GoogleCloudStorage:
                 blob.delete()
         except Exception as e:
             raise e
+    def get_public_download_url(
+            self, bucket_name: str, blob_path: str, expired_in_hour=1
+        ) -> str:
+            bucket = self.client.bucket(bucket_name)
+            blob = bucket.blob(blob_path)
+            expiration = timedelta(hours=expired_in_hour)
+            signed_url = blob.generate_signed_url(expiration=expiration)
+            return signed_url
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True
+    )
+    def list_folder(
+            self, bucket, blob_path: str
+        ) -> List[str]:
+            bucket = self.client.bucket(bucket)
+            blobs = bucket.list_blobs(prefix=blob_path)
+            return [(os.path.basename(blob.name).split('.')[0], blob.name) for blob in blobs if blob.name != blob_path]
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True
+    )
+    def list_blobs(
+            self, bucket, match_glob: str | None = None, max_result: int | None = None
+        ) -> List[str]:
+            """Lists all the blobs in the bucket that begin with the prefix.
+
+            This can be used to list all blobs in a "folder", e.g. "public/".
+
+            The delimiter argument can be used to restrict the results to only the
+            "files" in the given "folder". Without the delimiter, the entire tree under
+            the prefix is returned. For example, given these blobs:
+
+                a/1.txt
+                a/b/2.txt
+
+            If you specify prefix ='a/', without a delimiter, you'll get back:
+
+                a/1.txt
+                a/b/2.txt
+
+            However, if you specify prefix='a/' and delimiter='/', you'll get back
+            only the file directly under 'a/':
+
+                a/1.txt
+
+            As part of the response, you'll also get back a blobs.prefixes entity
+            that lists the "subfolders" under `a/`:
+
+                a/b/
+            """
+
+            storage_client = storage.Client()
+
+            # Note: Client.list_blobs requires at least package version 1.17.0.
+            blobs = storage_client.list_blobs(
+                bucket, match_glob=match_glob, max_results=max_result
+            )
+
+            return [blob.name for blob in blobs]
 
 
