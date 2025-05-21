@@ -4,6 +4,7 @@ import time
 import asyncio
 from datetime import timedelta
 
+from lib.utils.media import seconds_to_hhmmss, parse_time_to_seconds
 from src.pipelines.longFormComprehension.schema import Scene
 
 class SceneBySceneComprehension:
@@ -62,10 +63,10 @@ class SceneBySceneComprehension:
 
             for scene in scene_data:
                 try:
-                    scene_start_sec = self._parse_time_to_seconds(scene["start_timestamp"])
-                    scene_end_sec = self._parse_time_to_seconds(scene["end_timestamp"])
-                    scene["start_timestamp"] = self._seconds_to_hhmmss(start_seconds + scene_start_sec)
-                    scene["end_timestamp"] = self._seconds_to_hhmmss(start_seconds + scene_end_sec)
+                    scene_start_sec = parse_time_to_seconds(scene["start_timestamp"])
+                    scene_end_sec = parse_time_to_seconds(scene["end_timestamp"])
+                    scene["start_timestamp"] = seconds_to_hhmmss(start_seconds + scene_start_sec)
+                    scene["end_timestamp"] = seconds_to_hhmmss(start_seconds + scene_end_sec)
                     scene["id"] = scene_id
                     scene["segment_num"] = segment_num
                     scene_id += 1
@@ -78,17 +79,3 @@ class SceneBySceneComprehension:
 
         print("[INFO] Scenes transcribed successfully.")
         return scenes
-
-    def _parse_time_to_seconds(self, t: str) -> int:
-        parts = list(map(int, t.split(":")))
-        if len(parts) == 3:
-            h, m, s = parts
-        elif len(parts) == 2:
-            h = 0
-            m, s = parts
-        else:
-            raise ValueError(f"Invalid timestamp format: {t}")
-        return h * 3600 + m * 60 + s
-
-    def _seconds_to_hhmmss(self, seconds: int) -> str:
-        return str(timedelta(seconds=int(seconds)))

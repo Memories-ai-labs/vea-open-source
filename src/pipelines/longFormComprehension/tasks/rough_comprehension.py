@@ -16,7 +16,7 @@ class RoughComprehension:
 
         for segment in long_segments:
             print(f"[INFO] Processing segment {segment_num}: {segment}")
-            print("compact context: ", compact_context)
+            # print("compact context: ", compact_context)
 
             if segment_num == 1:
                 prompt = (
@@ -40,7 +40,7 @@ class RoughComprehension:
                 )
                 response_text = await asyncio.to_thread(self.llm.LLM_request, [segment, compact_context, prompt])
 
-            print(response_text)
+            # print(response_text)
             
             segment_by_segment_draft += f"\n\n\n\n\nSegment {segment_num}:\n" + response_text
 

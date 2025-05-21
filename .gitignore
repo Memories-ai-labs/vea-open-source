@@ -34,3 +34,5 @@ test/
 config/
 data/
 requirements.txt
+index_all.py
+excluded_movies.txt

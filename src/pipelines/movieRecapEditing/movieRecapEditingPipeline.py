@@ -7,7 +7,7 @@ import shutil
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
-from google.cloud.exceptions import NotFound
+from lib.utils.media import clean_stale_tempdirs
 
 from src.config import CREDENTIAL_PATH, BUCKET_NAME
 from src.pipelines.movieRecapEditing.tasks.user_customization import UserCustomization
@@ -30,23 +30,12 @@ class MovieRecapEditingPipeline:
         self.llm = GeminiGenaiManager()
         self.cloud_storage_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
 
-        self.clean_stale_tempdirs()
+        clean_stale_tempdirs()
         self.workdir = tempfile.mkdtemp()
         self.text_to_voice_dir = tempfile.mkdtemp()
         self.final_output_path = os.path.join(self.workdir, "recap.mp4")
         self.final_output_cspath = os.path.join(self.output_cloud_storage_dir, "recap.mp4")
 
-    def clean_stale_tempdirs(self):
-        print("Cleaning stale temp directories...")
-        tmp_root = tempfile.gettempdir()  # Usually /tmp
-        for name in os.listdir(tmp_root):
-            path = os.path.join(tmp_root, name)
-            if os.path.isdir(path) and name.startswith("tmp"):
-                try:
-                    shutil.rmtree(path)
-                    print(f"Deleted: {path}")
-                except Exception as e:
-                    print(f"Skipping {path}: {e}")
 
     async def run(self, user_context=None, user_prompt=None, output_language="English"):
 

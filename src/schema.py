@@ -28,11 +28,8 @@ class MovieFile(BaseModel):
     blob_path: str
 
 class MovieIndexRequest(BaseModel):
-    """
-    Request schema for video editing.
-    """
     blob_path: str
-
+    start_fresh: Optional[bool] = False
 
 class MovieIndexResponse(BaseModel):
     """
@@ -40,7 +37,7 @@ class MovieIndexResponse(BaseModel):
     """
     message: str
 
-class FlexibleResponseRequest(BaseModel):
+class LongFormFlexibleResponseRequest(BaseModel):
     """
     Request schema for flexible response from media.
     """
@@ -49,7 +46,7 @@ class FlexibleResponseRequest(BaseModel):
     video_response: bool
 
 
-class FlexibleResponseResult(BaseModel):
+class LongFormFlexibleResponseResult(BaseModel):
     """
     Output from flexible response pipeline.
     """
@@ -57,3 +54,19 @@ class FlexibleResponseResult(BaseModel):
     response_type: str  # one of: 'text', 'text_with_clips', 'video'
     evidence_paths: List[str]
     run_id: str
+
+
+class IndexCheckRequest(BaseModel):
+    blob_path: str
+    required_files: List[str]
+
+class IndexCheckResponse(BaseModel):
+    blob_path: str
+    all_exist: bool
+
+class ShortFormIndexRequest(BaseModel):
+    blob_path: str  # GCS folder path containing short videos
+    start_fresh: Optional[bool] = False
+
+class ShortFormIndexResponse(BaseModel):
+    message: str

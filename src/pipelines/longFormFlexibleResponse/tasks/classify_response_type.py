@@ -2,7 +2,7 @@
 
 import asyncio
 from google import genai
-from src.pipelines.flexibleResponse.schema import ResponseForm
+from src.pipelines.longFormFlexibleResponse.schema import ResponseForm
 
 class ClassifyResponseType:
     def __init__(self, llm):
