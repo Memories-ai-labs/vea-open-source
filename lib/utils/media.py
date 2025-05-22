@@ -69,12 +69,16 @@ async def preprocess_long_video(
     crf: Optional[int] = 30,
     target_height: Optional[int] = 480,
     fps: Optional[float] = 0.5,
-) -> list[Path]:
+) -> list[dict]:
+    """
+    Splits a downsampled video into segments and returns a list of dicts
+    with clip path, start/end timestamps, parent file, and segment number.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     input_path = Path(input_path)
-    input_stem = input_path.stem  # e.g., "video1" from "video1.mp4"
+    input_stem = input_path.stem
 
     downsampled_path = output_dir / f"{input_stem}_downsampled.mp4"
     if not downsampled_path.exists():
@@ -87,19 +91,20 @@ async def preprocess_long_video(
     logger.info(f"[INFO] Total duration of downsampled video: {total_duration:.2f} seconds")
 
     tasks = []
-    paths = []
+    segments = []
     current_start = 0
+    segment_number = 1
+
     while current_start < total_duration:
         start = int(current_start)
         end = int(min(current_start + interval_seconds, total_duration))
         duration = end - start
 
-        # Include original filename in the chunk's name
         output_path = output_dir / f"{input_stem}_{start:05d}_{end:05d}.mp4"
-
         cmd = build_chunk_command(str(downsampled_path), str(output_path), start, duration)
-        tasks.append((cmd, output_path))
+        tasks.append((cmd, output_path, start, end, segment_number))
         current_start += interval_seconds
+        segment_number += 1
 
     max_workers = min(os.cpu_count(), 8)
     logger.info(f"[INFO] Using {max_workers} worker threads")
@@ -109,22 +114,31 @@ async def preprocess_long_video(
 
     start_time = time.time()
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(run_cmd, cmd) for cmd, _ in tasks]
-        for f in futures: f.result()
-        paths = [p for _, p in tasks]
-    logger.info(f"[INFO] Completed {len(paths)} segments in {time.time() - start_time:.2f} sec")
+        futures = [executor.submit(run_cmd, cmd) for cmd, *_ in tasks]
+        for i, f in enumerate(futures):
+            f.result()
+            _, path, start, end, seg_num = tasks[i]
+            segments.append({
+                "path": path,
+                "start": start,
+                "end": end,
+                "segment_number": seg_num,
+                "parent_path": str(input_path)
+            })
 
-    return paths
+    logger.info(f"[INFO] Completed {len(segments)} segments in {time.time() - start_time:.2f} sec")
+    return segments
+
 async def preprocess_short_video(
     input_path: str,
     output_dir: str,
     crf: int = 30,
     target_height: int = 480,
     fps: float = 0.5
-) -> Path:
+) -> dict:
     """
     Downsample a video to a lower resolution and frame rate without splitting.
-    Returns the path to the downsampled video.
+    Returns a dict with clip path, start/end timestamps, segment number, and parent file path.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -135,13 +149,18 @@ async def preprocess_short_video(
 
     if downsampled_path.exists():
         logger.info(f"[INFO] Skipping downsampling (already exists): {downsampled_path}")
-        return downsampled_path
+    else:
+        logger.info(f"[INFO] Downsampling video: {input_path}")
+        downsample_video(str(input_path), str(downsampled_path), crf=crf, target_height=target_height, fps=fps)
 
-    logger.info(f"[INFO] Downsampling video: {input_path}")
-    downsample_video(str(input_path), str(downsampled_path), crf=crf, target_height=target_height, fps=fps)
-
-    return downsampled_path
-
+    duration = get_video_duration(str(downsampled_path))
+    return {
+        "path": downsampled_path,
+        "start": 0,
+        "end": int(duration),
+        "segment_number": 1,
+        "parent_path": str(input_path)
+    }
 
 def parse_time_to_seconds(t: str) -> int:
     """

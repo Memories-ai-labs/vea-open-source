@@ -8,6 +8,7 @@ class ResponseForm(Enum):
     TEXT_AND_EVIDENCE = "text_and_evidence"
 
 class EvidenceClip(BaseModel):
+    file_name: str
     start: str               # e.g., "00:12:03"
     end: str                 # e.g., "00:13:45"
     description: str         # visual scene description
@@ -15,6 +16,7 @@ class EvidenceClip(BaseModel):
 
 class NarratedClip(BaseModel):
     id: int
+    file_name: str
     start: str
     end: str
     narration: str

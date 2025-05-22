@@ -4,21 +4,24 @@ import time
 import asyncio
 from datetime import timedelta
 from pathlib import Path
+
+from lib.utils.media import parse_time_to_seconds, seconds_to_hhmmss
 from src.pipelines.longFormComprehension.schema import ArtisticSegment
+
 
 class ArtisticAnalysis:
     def __init__(self, llm):
         self.llm = llm
 
-    async def __call__(self, short_segments: list[Path], plot_text: str):
+    async def __call__(self, short_segments: list[dict], plot_text: str):
         segments = []
         segment_id = 1
 
-        for video_file in sorted(short_segments, key=lambda f: f.name):
-            path_parts = video_file.stem.rsplit("_", 2)
-            start_seconds = int(path_parts[1])
+        for seg in sorted(short_segments, key=lambda x: x["start"]):
+            file_path = Path(seg["path"])
+            start_seconds = seg["start"]
 
-            print(f"[INFO] Analyzing artistic elements for: {video_file.name}")
+            print(f"[INFO] Analyzing artistic elements for: {file_path.name}")
 
             prompt = (
                 f"{plot_text}\n\n"
@@ -36,42 +39,32 @@ class ArtisticAnalysis:
                 "- end_timestamp (HH:MM:SS)\n"
                 "- visual_elements\n"
                 "- audio_elements\n\n"
-                "keep your answer brief, and dont include descriptions of the plot or characters, focus on the artistry.\n"
+                "Keep your answer focused on artistic elements, and don't include descriptions of the plot or characters.\n"
             )
 
             results = await asyncio.to_thread(
                 self.llm.LLM_request,
-                [video_file, prompt],
+                [file_path, prompt],
                 config={
                     "response_mime_type": "application/json",
                     "response_schema": list[ArtisticSegment]
                 }
             )
 
-            for seg in results:
+            for seg_data in results:
                 try:
-                    seg["start_timestamp"] = self._shift_timestamp(seg["start_timestamp"], start_seconds)
-                    seg["end_timestamp"] = self._shift_timestamp(seg["end_timestamp"], start_seconds)
-                    seg["id"] = segment_id
+                    seg_start = parse_time_to_seconds(seg_data["start_timestamp"])
+                    seg_end = parse_time_to_seconds(seg_data["end_timestamp"])
+                    seg_data["start_timestamp"] = seconds_to_hhmmss(start_seconds + seg_start)
+                    seg_data["end_timestamp"] = seconds_to_hhmmss(start_seconds + seg_end)
+                    seg_data["id"] = segment_id
                     segment_id += 1
                 except Exception as e:
-                    print(f"[WARN] Timestamp fix failed: {seg} | {e}")
+                    print(f"[WARN] Timestamp fix failed: {seg_data} | {e}")
 
             segments.extend(results)
+            print(f"[INFO] Segment {file_path.name} analysis complete.")
             time.sleep(1)
 
         print("[INFO] Artistic analysis complete.")
         return segments
-
-    def _shift_timestamp(self, timestamp: str, shift_seconds: int) -> str:
-        parts = list(map(int, timestamp.split(":")))
-        if len(parts) == 3:
-            h, m, s = parts
-        elif len(parts) == 2:
-            h = 0
-            m, s = parts
-        else:
-            raise ValueError(f"Invalid timestamp format: {timestamp}")
-        total = h * 3600 + m * 60 + s + shift_seconds
-        return str(timedelta(seconds=total))
-
