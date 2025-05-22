@@ -59,7 +59,7 @@ class GeminiGenaiManager:
     def LLM_request(self, prompt_contents, config=None, retry_delay=60, max_retries=3):
         """
         Sends prompt_contents to Gemini. Converts Path objects to inline file blobs.
-        Handles JSON parse errors, blank responses, rate limits (429), and retries.
+        Handles JSON parse errors, blank responses, rate limits (429), model overloads (503), and retries.
         """
         parts = []
         for item in prompt_contents:
@@ -70,6 +70,7 @@ class GeminiGenaiManager:
 
         attempt = 0
         while attempt < max_retries:
+            response = None
             try:
                 response = self.genai_client.models.generate_content(
                     model=self.model,
@@ -93,17 +94,38 @@ class GeminiGenaiManager:
             except Exception as e:
                 attempt += 1
                 error_str = str(e)
+                status = None
+                # Try to extract HTTP status code
+                try:
+                    # For google.genai error format
+                    if hasattr(e, "args") and e.args and isinstance(e.args[0], dict):
+                        status = e.args[0].get('error', {}).get('code')
+                except Exception:
+                    status = None
+
                 print(f"[ERROR] Gemini call failed: {error_str} (Attempt {attempt}/{max_retries})")
-                print(response)
+
+                # Only print response if it exists
+                if response is not None:
+                    print("[DEBUG] Gemini raw response:", response)
+
+                # Print prompt for debugging
+                print("[DEBUG] Prompt contents:", prompt_contents)
+
+                # Retry logic
                 if isinstance(e, json.JSONDecodeError):
                     print("[INFO] Detected JSON decode error. Retrying in 10 seconds...")
                     time.sleep(10)
-                elif "429" in error_str:
+                elif status == 429 or "429" in error_str:
                     print("[INFO] Detected rate limit error (429). Retrying in 60 seconds...")
                     time.sleep(60)
+                elif status == 503 or "503" in error_str or "model is overloaded" in error_str.lower():
+                    print("[INFO] Detected model overload (503). Retrying in 60 seconds...")
+                    time.sleep(60)
                 else:
-                    print(prompt_contents)
-                    traceback.print_exc()
+                    if attempt == max_retries:
+                        print("[ERROR] Final failure, printing traceback:")
+                        traceback.print_exc()
                     print(f"[INFO] Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
 

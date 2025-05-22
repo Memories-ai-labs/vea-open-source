@@ -37,7 +37,7 @@ class MovieIndexResponse(BaseModel):
     """
     message: str
 
-class LongFormFlexibleResponseRequest(BaseModel):
+class FlexibleResponseRequest(BaseModel):
     """
     Request schema for flexible response from media.
     """
@@ -46,7 +46,7 @@ class LongFormFlexibleResponseRequest(BaseModel):
     video_response: bool
 
 
-class LongFormFlexibleResponseResult(BaseModel):
+class FlexibleResponseResult(BaseModel):
     """
     Output from flexible response pipeline.
     """

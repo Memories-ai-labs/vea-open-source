@@ -3,6 +3,7 @@ import json
 import time
 import asyncio
 from datetime import timedelta
+from pathlib import Path
 
 from lib.utils.media import seconds_to_hhmmss, parse_time_to_seconds
 from src.pipelines.longFormComprehension.schema import Scene
@@ -11,22 +12,14 @@ class SceneBySceneComprehension:
     def __init__(self, llm):
         self.llm = llm
 
-    async def __call__(self, short_segments, long_segments, summary_draft, characters):
-
-        long_segment_bounds = []
-        for i, file in enumerate(sorted(long_segments, key=lambda f: f.name)):
-            parts = file.stem.rsplit("_", 2)
-            start_sec = int(parts[1])
-            end_sec = int(parts[2])
-            long_segment_bounds.append((i + 1, start_sec, end_sec))
-            
-        short_segments.sort(key=lambda f: f.name)
+    async def __call__(self, short_segments: list[dict], summary_draft: str, characters: str):
         scenes = []
         scene_id = 1
 
-        for file_path in short_segments:
-            path_parts = file_path.stem.rsplit("_", 2)
-            start_seconds = int(path_parts[1])
+        for seg in sorted(short_segments, key=lambda x: x["start"]):
+            file_path = Path(seg["path"])
+            start_seconds = seg["start"]
+            segment_number = seg["segment_number"]
 
             print(f"[INFO] Transcribing scene-by-scene for segment: {file_path.name}")
 
@@ -55,20 +48,14 @@ class SceneBySceneComprehension:
                 }
             )
 
-            segment_num = None
-            for idx, seg_start, seg_end in long_segment_bounds:
-                if seg_start <= start_seconds < seg_end:
-                    segment_num = idx
-                    break
-
             for scene in scene_data:
                 try:
-                    scene_start_sec = parse_time_to_seconds(scene["start_timestamp"])
-                    scene_end_sec = parse_time_to_seconds(scene["end_timestamp"])
-                    scene["start_timestamp"] = seconds_to_hhmmss(start_seconds + scene_start_sec)
-                    scene["end_timestamp"] = seconds_to_hhmmss(start_seconds + scene_end_sec)
+                    raw_start = parse_time_to_seconds(scene["start_timestamp"])
+                    raw_end = parse_time_to_seconds(scene["end_timestamp"])
+                    scene["start_timestamp"] = seconds_to_hhmmss(start_seconds + raw_start)
+                    scene["end_timestamp"] = seconds_to_hhmmss(start_seconds + raw_end)
                     scene["id"] = scene_id
-                    scene["segment_num"] = segment_num
+                    scene["segment_num"] = segment_number
                     scene_id += 1
                 except Exception as e:
                     print(f"[WARN] Timestamp fix failed for scene: {scene} | {e}")

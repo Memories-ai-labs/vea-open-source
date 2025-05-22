@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 import asyncio
 import shutil
+
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
@@ -36,9 +37,7 @@ class MovieRecapEditingPipeline:
         self.final_output_path = os.path.join(self.workdir, "recap.mp4")
         self.final_output_cspath = os.path.join(self.output_cloud_storage_dir, "recap.mp4")
 
-
     async def run(self, user_context=None, user_prompt=None, output_language="English"):
-
         # Helper to download GCS file to local path
         def gcs_download(gcs_rel_path, local_filename):
             local_path = os.path.join(self.workdir, local_filename)
@@ -49,22 +48,24 @@ class MovieRecapEditingPipeline:
             )
             return local_path
 
-        # 1. Download summary, scene info, character info, artistic analysis
-        plot_json_path = gcs_download("plot.json", "plot.json")
-        scenes_path = gcs_download("scenes.json", "scenes.json")
-        characters_path = gcs_download("characters.txt", "characters.txt")
-        artistic_path = gcs_download("artistic.json", "artistic.json")
+        # 1. Download unified media_indexing.json
+        indexing_json_path = gcs_download("media_indexing.json", "media_indexing.json")
+        with open(indexing_json_path, "r", encoding="utf-8") as f:
+            index_data = json.load(f)
 
-        with open(plot_json_path, "r", encoding="utf-8") as f:
-            plot_json = json.load(f)
-        with open(scenes_path, "r", encoding="utf-8") as f:
-            scenes = json.load(f)
-        with open(characters_path, "r", encoding="utf-8") as f:
-            characters = f.read()
-        with open(artistic_path, "r", encoding="utf-8") as f:
-            artistic = json.load(f)
+        # 2. Extract media data for this movie
+        media_entry = next((entry for entry in index_data["media_files"] if entry["name"] == self.media_name), None)
+        if not media_entry:
+            raise ValueError(f"No media entry found for: {self.media_name}")
 
-        # 2. Run User Customization
+        manifest = index_data.get("manifest", {})
+
+        plot_json = media_entry.get("plot.json", [])
+        scenes = media_entry.get("scenes.json", [])
+        characters = media_entry.get("characters.txt", "")
+        artistic = media_entry.get("artistic.json", {})
+
+        # 3. Run User Customization
         customizer = UserCustomization(self.llm)
         customized_plot_json = await customizer(
             user_context=user_context,
@@ -74,38 +75,36 @@ class MovieRecapEditingPipeline:
             characters=characters,
             artistic_elements=artistic
         )
-        with open(plot_json_path, "w", encoding="utf-8") as f:
-            json.dump(customized_plot_json, f, indent=4, ensure_ascii=False)
 
-        # 2. Choose Clips
+        # 4. Choose Clips
         clip_selector = ChooseClipForRecap(self.llm)
         chosen_clips = await clip_selector(customized_plot_json, scenes)
 
-        # 2. Translate Clips
+        # 5. Translate Clips
         translator = TranslateRecap(self.llm)
         chosen_clips = await translator(chosen_clips, output_language)
 
-        # 3. Generate Narration
+        # 6. Generate Narration
         narrator = GenerateNarrationForClips(self.text_to_voice_dir, output_language)
         await narrator(chosen_clips)
 
-        # 4. Choose Music
+        # 7. Choose Music
         full_plot_text = "\n".join([entry["sentence_text"] for entry in plot_json])
         music_selector = MusicSelection(self.llm, self.workdir)
         chosen_music_path = await music_selector(full_plot_text)
 
-        # 5. Create Video
+        # 8. Create Video
         self.local_media_path = os.path.join(self.workdir, self.media_name)
         self.cloud_storage_client.download_files(BUCKET_NAME, self.cloud_storage_media_path, self.local_media_path)
         editor = EditMovieRecapVideo(self.final_output_path)
         await editor(
             chosen_clips,
-            self.local_media_path, 
+            self.local_media_path,
             self.text_to_voice_dir,
             chosen_music_path
         )
 
-        # 6. Upload Final Recap
+        # 9. Upload Final Recap
         self.cloud_storage_client.upload_files(
             BUCKET_NAME,
             self.final_output_path,

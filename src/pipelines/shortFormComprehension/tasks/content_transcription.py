@@ -1,38 +1,59 @@
 import asyncio
 from typing import List
 from pathlib import Path
+from src.pipelines.shortFormComprehension.schema import TranscribedLine
+from lib.utils.media import parse_time_to_seconds, seconds_to_hhmmss
 
 class ContentTranscription:
     def __init__(self, llm):
         self.llm = llm
 
-    async def __call__(self, segment_path: Path) -> str:
+    async def __call__(self, segments: List[dict]) -> dict:
         """
-        Ask Gemini to transcribe a video segment.
-        The transcription should include:
-        - Verbatim speech
-        - Visible text from signs, screens, or blackboards
-        - Timestamps for when content appears
-        - Plain text format only
+        Ask Gemini to transcribe a list of video segments using structured output.
+        Segments with the same parent file are merged together into a single transcript list.
+        Returns: dict[parent_path -> List[TranscribedLine]]
         """
+        grouped = {}
+        for seg in segments:
+            parent = str(seg.get("parent_path"))
+            grouped.setdefault(parent, []).append(seg)
 
-        prompt = (
-            "You are given a video segment. Please transcribe the following:\n\n"
-            "- Verbatim spoken words by people in the video\n"
-            "- Any readable text visible in the video (e.g. signs, posters, presentation slides, blackboards)\n\n"
-            "For each piece of speech or visible text, include a timestamp of when it occurred in HH:MM:SS format.\n"
-            "If a sentence spans multiple timestamps, start with the earliest one.\n"
-            "If possible, interleave spoken and visual text in chronological order.\n\n"
-            "Return plain text only in this format:\n\n"
-            "HH:MM:SS - [transcribed sentence or visible text]\n"
-            "HH:MM:SS - [another sentence]\n"
-            "...\n\n"
-            "Avoid summaries or formatting beyond this structure, but you may include the person's name or role if it is known.\n"
-        )
+        results = {}
+        for parent_path, seg_group in grouped.items():
+            merged_lines = []
+            print(f"[INFO] Running transcription for: {parent_path} ({len(seg_group)} segments)")
+            for seg in sorted(seg_group, key=lambda s: s["start"]):
+                video_path = Path(seg["path"])
+                start_offset = seg["start"]
 
-        response_text = await asyncio.to_thread(
-            self.llm.LLM_request,
-            [segment_path, prompt],
-        )
+                prompt = (
+                    "You are given a video segment. Transcribe all content in structured JSON.\n\n"
+                    "Include:\n"
+                    "- Spoken words (verbatim)\n"
+                    "- Readable visible text (from signs, posters, presentation slides, blackboards)\n"
+                    "- A timestamp in HH:MM:SS for when the content appears\n\n"
+                    "If there is no spoken content or visible text, return nothing. Do not include placeholder or filler lines.\n"
+                )
 
-        return response_text.strip()
+                response = await asyncio.to_thread(
+                    self.llm.LLM_request,
+                    [video_path, prompt],
+                    config={
+                        "response_mime_type": "application/json",
+                        "response_schema": list[TranscribedLine],
+                    }
+                )
+
+                for line in response:
+                    try:
+                        raw_ts = parse_time_to_seconds(line["timestamp"])
+                        line["timestamp"] = seconds_to_hhmmss(raw_ts + start_offset)
+                    except Exception as e:
+                        print(f"[WARN] Failed to normalize timestamp: {line} | {e}")
+
+                merged_lines.extend(response)
+
+            results[parent_path] = merged_lines
+
+        return results

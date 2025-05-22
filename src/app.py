@@ -13,8 +13,8 @@ from src.schema import (
     MovieIndexResponse,
     MovieRecapRequest,
     MovieRecapResponse,
-    LongFormFlexibleResponseRequest,
-    LongFormFlexibleResponseResult,
+    FlexibleResponseRequest,
+    FlexibleResponseResult,
     IndexCheckRequest, 
     IndexCheckResponse,
     ShortFormIndexRequest, 
@@ -29,7 +29,7 @@ from src.config import (
 )
 from src.pipelines.longFormComprehension.longFormComprehensionPipeline import LongFormComprehensionPipeline
 from src.pipelines.movieRecapEditing.movieRecapEditingPipeline import MovieRecapEditingPipeline
-from src.pipelines.longFormFlexibleResponse.flexibleResponsePipeline import longFormFlexibleResponsePipeline
+from src.pipelines.flexibleResponse.flexibleResponsePipeline import FlexibleResponsePipeline
 from src.pipelines.shortFormComprehension.shortFormComprehensionPipeline import ShortFormComprehensionPipeline
 
 
@@ -63,8 +63,8 @@ async def list_available_movies() -> List[MovieFile]:
         logger.error(f"Error fetching movies: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch movies.")
 
-@app.post(f"{API_PREFIX}/index_movie")
-async def index_movie(request: MovieIndexRequest):
+@app.post(f"{API_PREFIX}/index_longform")
+async def index_longform(request: MovieIndexRequest):
     try:
         logger.info(f"Received index request for blob: {request.blob_path} | Start fresh: {request.start_fresh}")
         pipeline = LongFormComprehensionPipeline(request.blob_path, start_fresh=request.start_fresh)
@@ -93,20 +93,20 @@ async def edit_movie(request: MovieRecapRequest):
         logger.error(f"Edit error: {e}")
         raise HTTPException(status_code=500, detail="Editing failed.")
     
-@app.post(f"{API_PREFIX}/flexible_respond", response_model=LongFormFlexibleResponseResult)
-async def flexible_respond(request: LongFormFlexibleResponseRequest):
+@app.post(f"{API_PREFIX}/flexible_respond", response_model=FlexibleResponseResult)
+async def flexible_respond(request: FlexibleResponseRequest):
     """
     Run the flexible response pipeline on a movie.
     """
-    try:
-        logger.info(f"Flexible response for: {request.blob_path} with prompt: {request.prompt}")
-        pipeline = longFormFlexibleResponsePipeline(request.blob_path)
-        response = await pipeline.run(request.prompt, request.video_response)
+    # try:
+    logger.info(f"Flexible response for: {request.blob_path} with prompt: {request.prompt}")
+    pipeline = FlexibleResponsePipeline(request.blob_path)
+    response = await pipeline.run(request.prompt, request.video_response)
 
-        return response
-    except Exception as e:
-        logger.error(f"Flexible response error: {e}")
-        raise HTTPException(status_code=500, detail="Flexible response failed.")
+    return response
+    # except Exception as e:
+    #     logger.error(f"Flexible response error: {e}")
+    #     raise HTTPException(status_code=500, detail="Flexible response failed.")
     
 
 @app.post(f"{API_PREFIX}/check_index", response_model=IndexCheckResponse)
@@ -135,14 +135,14 @@ async def index_shortform(request: ShortFormIndexRequest):
     """
     Handle short form video comprehension (folder of short videos).
     """
-    # try:
-    logger.info(f"Indexing shortform videos from: {request.blob_path} | Start fresh: {request.start_fresh}")
-    pipeline = ShortFormComprehensionPipeline(request.blob_path, start_fresh=request.start_fresh)
-    await pipeline.run()
-    return ShortFormIndexResponse(message=f"Successfully indexed shortform videos from: {request.blob_path}")
-    # except Exception as e:
-    #     logger.error(f"Shortform indexing error: {e}")
-    #     raise HTTPException(status_code=500, detail="Failed to index shortform videos.")
+    try:
+        logger.info(f"Indexing shortform videos from: {request.blob_path} | Start fresh: {request.start_fresh}")
+        pipeline = ShortFormComprehensionPipeline(request.blob_path, start_fresh=request.start_fresh)
+        await pipeline.run()
+        return ShortFormIndexResponse(message=f"Successfully indexed shortform videos from: {request.blob_path}")
+    except Exception as e:
+        logger.error(f"Shortform indexing error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to index shortform videos.")
 
 
 if __name__ == "__main__":
