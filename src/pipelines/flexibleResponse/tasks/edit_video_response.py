@@ -52,6 +52,8 @@ class EditFlexibleVideoResponse:
             speed_factor = window_duration / duration
             print(f"[WARN] Window too short. Slowing down by factor {1/speed_factor:.2f} to match {duration:.2f}s")
             return video.with_effects([vfx.MultiplySpeed(speed_factor)])
+        
+        
 
     def _download_media_file(self, file_name, cloud_storage_path):
         # Only download each media file once (by file_name)
@@ -120,18 +122,22 @@ class EditFlexibleVideoResponse:
 
                 video_path = self._downloaded_files[file_name]
 
-                video = await asyncio.to_thread(
-                    self.trim_video,
-                    video_path,
-                    clip["start"],
-                    clip["end"],
-                    audio_duration
-                )
+                # Extract subclip
+                start_sec = parse_time_to_seconds(clip["start"])
+                end_sec = parse_time_to_seconds(clip["end"])
+                video_clip = VideoFileClip(video_path).subclipped(start_sec, end_sec)
+                video_duration = video_clip.duration
 
-                if video:
-                    narration = AudioFileClip(audio_path)
-                    video = video.with_audio(narration)
-                    processed_clips.append(video)
+                # 1. If audio is longer: slow down the video to match audio length.
+                # . If video is longer than audio: use the video as is.
+                if video_duration < audio_duration:
+                    speed_factor = video_duration / audio_duration if audio_duration > 0 else 1
+                    # print(f"[WARN] Video (id={clip_id}) shorter than audio. Slowing down by {1/speed_factor:.2f}x to match narration.")
+                    video_clip = video_clip.with_effects([vfx.MultiplySpeed(speed_factor)])
+
+                narration = AudioFileClip(audio_path)
+                video_clip = video_clip.with_audio(narration)
+                processed_clips.append(video_clip)
 
             if not processed_clips:
                 raise ValueError("No clips were processed successfully.")

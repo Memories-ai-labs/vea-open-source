@@ -129,6 +129,25 @@ async def preprocess_long_video(
     logger.info(f"[INFO] Completed {len(segments)} segments in {time.time() - start_time:.2f} sec")
     return segments
 
+def correct_segment_number_based_on_time(reference_segments, target_segments):
+    """
+    For each segment in target_segments, find the reference_segment in reference_segments
+    such that its 'start' <= target_segment['start'] < 'end', and set the segment_number accordingly.
+    Modifies target_segments in-place.
+    """
+    for target in target_segments:
+        target_start = target["start"]
+        matched = False
+        for ref in reference_segments:
+            if ref["start"] <= target_start < ref["end"]:
+                target["segment_number"] = ref["segment_number"]
+                matched = True
+                break
+        if not matched:
+            print(f"[WARN] No reference segment found for target segment starting at {target_start}")
+    return target_segments  # not required, but useful for chaining
+
+
 async def preprocess_short_video(
     input_path: str,
     output_dir: str,

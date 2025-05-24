@@ -29,6 +29,7 @@ class GeneralComprehension:
             merged_scenes = []
             print(f"[INFO] Running general comprehension for: {parent_path} ({len(seg_group)} segments)")
             for seg in sorted(seg_group, key=lambda s: s["start"]):
+                print(f"[INFO] Running general comprehension for: {seg["path"]}")
                 video_path = Path(seg["path"])
                 start_offset = seg["start"]
                 segment_id = seg["segment_number"]

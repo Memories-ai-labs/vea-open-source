@@ -24,6 +24,7 @@ class ContentTranscription:
             merged_lines = []
             print(f"[INFO] Running transcription for: {parent_path} ({len(seg_group)} segments)")
             for seg in sorted(seg_group, key=lambda s: s["start"]):
+                print(f"[INFO] Running transcription for: {seg["path"]}")
                 video_path = Path(seg["path"])
                 start_offset = seg["start"]
 
