@@ -9,7 +9,7 @@ import json
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
-from lib.utils.media import preprocess_long_video, clean_stale_tempdirs
+from lib.utils.media import preprocess_long_video, correct_segment_number_based_on_time, clean_stale_tempdirs
 from src.config import CREDENTIAL_PATH, BUCKET_NAME
 
 from src.pipelines.longFormComprehension.tasks.rough_comprehension import RoughComprehension
@@ -46,12 +46,14 @@ class LongFormComprehensionPipeline:
         print("[INFO] Preprocessing long segments...")
         long_segments = await preprocess_long_video(
             self.local_media_path, self.long_segments_dir, interval_seconds=15 * 60, fps=1, crf=30)
-        long_segment_paths = [Path(d["path"]) for d in long_segments]
+        print(long_segments)
         print(f"[INFO] Generated {len(long_segments)} long segments.")
 
         print("[INFO] Preprocessing short segments...")
         short_segments = await preprocess_long_video(
             self.local_media_path, self.short_segments_dir, interval_seconds=5 * 60, fps=1, crf=30)
+        short_segments = correct_segment_number_based_on_time(long_segments, short_segments)
+        print(short_segments)
         print(f"[INFO] Generated {len(short_segments)} short segments.")
 
         print("[INFO] Starting rough comprehension...")
