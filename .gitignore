@@ -33,7 +33,6 @@ test_data/
 test/
 config/
 data/
-requirements.txt
 index_all.py
 excluded_movies.txt
 migrate_index.py
