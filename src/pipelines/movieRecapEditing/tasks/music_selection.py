@@ -108,6 +108,7 @@ class MusicSelection:
         os.remove(temp_path)
         print(f"[INFO] 1-hour looped music saved to: {final_path}")
         return final_path
+    
 
     async def __call__(self, plot):
         print("[INFO] Fetching instrumental music library...")

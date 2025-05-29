@@ -1,6 +1,7 @@
 from enum import Enum
 from google import genai
 from pydantic import BaseModel
+from typing import Optional
 
 
 class ResponseForm(Enum):
@@ -14,9 +15,15 @@ class EvidenceClip(BaseModel):
     description: str         # visual scene description
     reason: str              # why this clip supports the response
 
+class ClipPriority(str, Enum):
+    NARRATION = "narration"      # prioritize narration voiceover
+    CLIP_AUDIO = "clip_audio"    # prioritize original clip audio (e.g., interviews)
+    CLIP_VIDEO = "clip_video"    # use the whole video uncut (e.g., sports play)
+
 class NarratedClip(BaseModel):
     id: int
     file_name: str
     start: str
     end: str
     narration: str
+    priority: ClipPriority = ClipPriority.NARRATION  # defau

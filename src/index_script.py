@@ -34,15 +34,23 @@ def mark_indexed(path):
 
 def list_all(folder):
     """
-    List available movies stored in GCS.
+    List available media files stored in GCS, excluding image files.
     """
     logger.info("Fetching list of available TV shows from GCS...")
     items = gcp_oss.list_folder("openinterx-vea", f"{folder}/")
+
+    # Define image extensions to exclude
+    image_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff", ".svg"}
+
     paths = []
     for item in items:
-        paths.append(item[1])
+        path = item[1]
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in image_exts:
+            paths.append(path)
 
     return paths
+
 
 async def index_longform(path):
     print(f"Received index request for blob: {path}")
@@ -51,8 +59,26 @@ async def index_longform(path):
 
 async def recap_longform(path):
     print(f"Received index request for blob: {path}")
+    music_path = None
+    if "Black Mirror" in path:
+        music_path = "user_media/music/2.黑镜HalloweenAmc Orchestra.mp3"
+    elif "Game.of.Thrones" in path:
+        music_path = "user_media/music/1.权力的游戏Main TitlesRamin Djawadi.mp3"
+    elif "Criminal Minds" in path:
+        music_path = "user_media/music/8.犯罪心理Lのテーマ  タニウチヒデキ.mp3"
+    elif "The.Big.Bang.Theory" in path:
+        music_path = "user_media/music/4.生活大爆炸Undead Funeral March Ugress.mp3"
+    elif "Downton Abbey" in path:
+        music_path = "user_media/music/9.傲慢与偏见δ α·Pav.mp3"
+    elif "House.of.Cards" in path:
+        music_path = "user_media/music/3.纸牌屋Truth and Lies X Ray Dog.mp3"
+    elif "Supernatural" in path:
+        music_path = "user_media/music/7.邪恶力量Paris  Else.mp3"
+
+
+
     pipeline = MovieRecapEditingPipeline(path)
-    await pipeline.run()
+    await pipeline.run(user_music=music_path)
 
 async def index_all():
     folder = "tv_show"
@@ -86,5 +112,7 @@ async def index_all():
 
 
 if __name__ == "__main__":
+    # music_paths = gcp_oss.list_folder("openinterx-vea", f"user_media/music/")
+    # print(music_paths)
     asyncio.run(index_all())
  

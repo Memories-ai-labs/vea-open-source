@@ -36,3 +36,4 @@ data/
 index_all.py
 excluded_movies.txt
 migrate_index.py
+indexed_files.txt
