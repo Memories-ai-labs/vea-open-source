@@ -12,6 +12,7 @@ click==8.1.8
 decorator==5.2.1
 docstring-parser==0.16
 edge-tts==7.0.1
+elevenlabs==2.1.0
 exceptiongroup==1.2.2
 fastapi==0.115.12
 frozenlist==1.6.0
@@ -79,6 +80,7 @@ uritemplate==4.1.1
 urllib3==2.4.0
 uvicorn==0.34.2
 uvloop==0.21.0
+-e file:///home/alex/Documents/vscodeprojects/personal/vea-playground
 watchfiles==1.0.5
 websockets==15.0.1
 yarl==1.20.0
