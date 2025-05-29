@@ -56,7 +56,33 @@ class GeneralComprehension:
                     }
                 )
 
-                for item in chunk_descriptions:
+                # --- Second pass: refinement ---
+                refinement_prompt = (
+                    "You are given a video segment, and a breakdown of its content into several clips with start/end timestamps and descriptions.\n"
+                    "Your task is to refine each clip by:\n"
+                    "- Adjusting the start and end timestamps to avoid cutting off important speech, action, or visuals at the boundaries\n"
+                    "- Try to set the new timestamps to match the natural cut points or scene changes in the video segment\n"
+                    "- Refine the timestamp to best fit the *actual content* in the desription\n"
+                    "You must return the same number of clips as given, each as a dictionary with:\n"
+                    "- start_timestamp (HH:MM:SS)\n"
+                    "- end_timestamp (HH:MM:SS)\n"
+                    "- scene_description\n"
+                    "- segment_id (keep this unchanged)\n"
+                    "The order of clips and the overall time coverage should stay as close to the original as possible, just with improved accuracy and alignment.\n"
+                )
+                # Prepare current text description as input
+                chunk_text = json.dumps(chunk_descriptions, ensure_ascii=False, indent=2)
+
+                refined_chunks: List[Scene] = await asyncio.to_thread(
+                    self.llm.LLM_request,
+                    [video_path, refinement_prompt, chunk_text],
+                    config={
+                        "response_mime_type": "application/json",
+                        "response_schema": list[Scene],
+                    }
+                )
+
+                for item in refined_chunks:
                     try:
                         raw_start = parse_time_to_seconds(item["start_timestamp"])
                         raw_end = parse_time_to_seconds(item["end_timestamp"])
@@ -66,7 +92,7 @@ class GeneralComprehension:
                     except Exception as e:
                         print(f"[WARN] Timestamp fix failed: {item} | {e}")
 
-                merged_scenes.extend(chunk_descriptions)
+                merged_scenes.extend(refined_chunks)
                 time.sleep(1)
 
             results[parent_path] = merged_scenes

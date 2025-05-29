@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 import asyncio
 import shutil
+from pydub import AudioSegment
 
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.oss.gcp_oss import GoogleCloudStorage
@@ -37,7 +38,7 @@ class MovieRecapEditingPipeline:
         self.final_output_path = os.path.join(self.workdir, "recap.mp4")
         self.final_output_cspath = os.path.join(self.output_cloud_storage_dir, "recap.mp4")
 
-    async def run(self, user_context=None, user_prompt=None, output_language="English"):
+    async def run(self, user_context=None, user_prompt=None, output_language="English", user_music=None):
         # Helper to download GCS file to local path
         def gcs_download(gcs_rel_path, local_filename):
             local_path = os.path.join(self.workdir, local_filename)
@@ -89,9 +90,25 @@ class MovieRecapEditingPipeline:
         await narrator(chosen_clips)
 
         # 7. Choose Music
-        full_plot_text = "\n".join([entry["sentence_text"] for entry in plot_json])
-        music_selector = MusicSelection(self.llm, self.workdir)
-        chosen_music_path = await music_selector(full_plot_text)
+        if not user_music:
+            full_plot_text = "\n".join([entry["sentence_text"] for entry in plot_json])
+            music_selector = MusicSelection(self.llm, self.workdir)
+            chosen_music_path = await music_selector(full_plot_text)
+        else:
+            # If user provided specific music, download it
+            local_music_path = os.path.join(self.workdir, "user_music.mp3")
+            self.cloud_storage_client.download_files(
+                BUCKET_NAME,
+                user_music,
+                local_music_path
+            )
+            original_audio = AudioSegment.from_mp3(local_music_path)
+            one_hour_ms = 60 * 60 * 1000
+            loop_count = one_hour_ms // len(original_audio) + 1
+            long_audio = (original_audio * loop_count)[:one_hour_ms]
+
+            chosen_music_path = os.path.join(self.workdir, "user_music_1hour_loop.mp3")
+            long_audio.export(chosen_music_path, format="mp3")
 
         # 8. Create Video
         self.local_media_path = os.path.join(self.workdir, self.media_name)

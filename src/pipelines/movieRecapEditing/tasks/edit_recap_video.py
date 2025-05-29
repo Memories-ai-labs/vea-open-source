@@ -6,6 +6,7 @@ from pathlib import Path
 from pydub.utils import mediainfo
 import subprocess
 import tempfile
+from pydub import AudioSegment
 
 
 class EditMovieRecapVideo:
@@ -45,7 +46,7 @@ class EditMovieRecapVideo:
             print(f"[WARN] Window too short. Slowing down by factor {1/speed_factor:.2f} to match {duration:.2f}s")
             return video.with_effects([vfx.MultiplySpeed(speed_factor)])
 
-    def write_srt(self, clips, srt_path, narration_dir):
+    def write_srt(self, clips, srt_path, narration_dir, max_words_per_line=10):
         def format_srt_time(seconds):
             h = int(seconds // 3600)
             m = int((seconds % 3600) // 60)
@@ -53,24 +54,48 @@ class EditMovieRecapVideo:
             ms = int((seconds - int(seconds)) * 1000)
             return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
+        def split_into_halves(text):
+            words = text.split()
+            half = len(words) // 2
+            return ' '.join(words[:half]), ' '.join(words[half:])
+
         current_time = 0.0  # running timestamp in the final video
 
         with open(srt_path, "w", encoding="utf-8") as f:
-            for idx, clip in enumerate(clips, start=1):
+            srt_index = 1
+
+            for clip in clips:
                 clip_id = clip["id"]
                 sentence = clip.get("corresponding_summary_sentence", "").replace("\n", " ").strip()
 
                 audio_path = os.path.join(narration_dir, f"{clip_id}.mp3")
                 duration = self.get_audio_duration(audio_path)
 
-                start_sec = current_time
-                end_sec = current_time + duration
+                if len(sentence.split()) > max_words_per_line * 2:
+                    # Split long subtitles into two
+                    part1, part2 = split_into_halves(sentence)
 
-                f.write(f"{idx}\n")
-                f.write(f"{format_srt_time(start_sec)} --> {format_srt_time(end_sec)}\n")
-                f.write(f"{sentence}\n\n")
+                    mid_time = current_time + duration / 2
 
-                current_time = end_sec  # move forward for the next caption
+                    # Write first part
+                    f.write(f"{srt_index}\n")
+                    f.write(f"{format_srt_time(current_time)} --> {format_srt_time(mid_time)}\n")
+                    f.write(f"{part1}\n\n")
+                    srt_index += 1
+
+                    # Write second part
+                    f.write(f"{srt_index}\n")
+                    f.write(f"{format_srt_time(mid_time)} --> {format_srt_time(current_time + duration)}\n")
+                    f.write(f"{part2}\n\n")
+                    srt_index += 1
+                else:
+                    # Regular 1-part subtitle
+                    f.write(f"{srt_index}\n")
+                    f.write(f"{format_srt_time(current_time)} --> {format_srt_time(current_time + duration)}\n")
+                    f.write(f"{sentence}\n\n")
+                    srt_index += 1
+
+                current_time += duration
 
 
     def burn_subtitles(self, input_path, srt_path, output_path):
@@ -118,8 +143,23 @@ class EditMovieRecapVideo:
         final_video = concatenate_videoclips(processed_clips)
 
         narration_audio = final_video.audio
+
+        # --- Calculate average volume of narration
+        tmp_narration_path = os.path.join(tempfile.mkdtemp(), "combined_narration.mp3")
+        final_video.audio.write_audiofile(tmp_narration_path, fps=44100, codec="libmp3lame")
+        narration_volume = AudioSegment.from_file(tmp_narration_path).dBFS
+
+        # --- Load background music and measure its volume
+        music_segment = AudioSegment.from_file(background_music_path)
+        music_volume = music_segment.dBFS
+
+        # --- Adjust music volume to be ~6 dB lower than narration
+        target_music_volume = narration_volume - 6.0
+        delta_db = target_music_volume - music_volume
+        volume_multiplier = 10 ** (delta_db / 20)
+
         background_music = AudioFileClip(background_music_path).with_effects(
-            [afx.MultiplyVolume(self.music_volume_multiplier)]
+            [afx.MultiplyVolume(volume_multiplier)]
         ).subclipped(0, final_video.duration)
         final_audio = CompositeAudioClip([narration_audio, background_music])
         final_video = final_video.with_audio(final_audio)
