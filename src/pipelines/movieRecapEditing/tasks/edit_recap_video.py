@@ -7,6 +7,7 @@ from pydub.utils import mediainfo
 import subprocess
 import tempfile
 from pydub import AudioSegment
+from moviepy.tools import close_all_clips
 
 
 class EditMovieRecapVideo:
@@ -140,7 +141,7 @@ class EditMovieRecapVideo:
         if not processed_clips:
             raise ValueError("No clips were processed successfully.")
 
-        final_video = concatenate_videoclips(processed_clips)
+        final_video = concatenate_videoclips(processed_clips, method="compose")
 
         narration_audio = final_video.audio
 
@@ -177,6 +178,17 @@ class EditMovieRecapVideo:
 
         # add captions
         self.write_srt(clips, tmp_srt_path, narration_dir)
+
+        # cleanup
+        for clip in processed_clips:
+            clip.close()
+        narration_audio.close()
+        background_music.close()
+        final_video.close()
+        close_all_clips()
+
+
+        # burn subtitles into the final video
         self.burn_subtitles(tmp_video_path, tmp_srt_path, self.output_path)
 
 

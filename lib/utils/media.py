@@ -42,6 +42,7 @@ def downsample_video(input_path: str, output_path: str, crf: int = 30, target_he
         "-crf", str(crf),
         "-preset", "ultrafast",
         "-c:a", "copy",
+        # "-strict -2",
         output_path
     ]
     logger.info(f"[Downsampling] Running: {' '.join(cmd)}")
