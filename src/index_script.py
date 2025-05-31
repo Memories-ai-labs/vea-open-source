@@ -41,12 +41,13 @@ def list_all(folder):
 
     # Define image extensions to exclude
     image_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff", ".svg"}
-
+    # Filter out bad tvshow files
+    exclude_names = {"Mandalorian", "Clancy's", "WandaVision"}
     paths = []
     for item in items:
         path = item[1]
         ext = os.path.splitext(path)[1].lower()
-        if ext not in image_exts:
+        if ext not in image_exts and not any(excluded in path for excluded in exclude_names):
             paths.append(path)
 
     return paths

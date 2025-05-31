@@ -40,6 +40,7 @@ class RefinePlotSummary:
                 "- Fix any logical inconsistencies.\n"
                 "- Improve the storytelling flow and transitions.\n"
                 "- Resolve unclear pronouns or character name mismatches.\n"
+                "- Make sure you dont use the actor's name, but the character's name.\n"
                 "- You may rewrite or add new sentences if needed to make the plot clearer.\n"
                 "- Treat the scene-by-scene breakdown as the more accurate source for factual events.\n"
                 "- However, the refined summary should be much shorter than the scene-by-scene breakdown and closer in length to the summary draft.\n"
