@@ -7,7 +7,14 @@ class ChooseClipForRecap:
         self.llm = llm
         self.out_lang = out_lang
 
-    async def __call__(self, plot_json, scenes):
+    def _build_file_to_cloud_path(self, indexing_data):
+        return {
+            entry["name"]: entry["cloud_storage_path"]
+            for entry in indexing_data
+            if "name" in entry and "cloud_storage_path" in entry
+        }
+
+    async def __call__(self, plot_json, scenes, file_name, cloud_storage_path):
         segment_nums = sorted(set(entry["segment_num"] for entry in plot_json))
         all_chosen_clips = []
 
@@ -22,10 +29,11 @@ class ChooseClipForRecap:
                 f"{json.dumps(segment_scenes, ensure_ascii=False)}\n\n\n"
                 "You are given a plot summary and a set of scene descriptions for the same segment of a long-form narrative media (e.g. movie, TV show, or documentary).\n"
                 "Select one visual scene clip for each plot sentence to use in a recap video:\n"
-                "- Each clip should be the best match for the corresponding sentence.\n"
+                "- Each clip should be the best match for the plot sentence.\n"
                 "- No clip should be used more than once.\n"
                 "- Ignore clips that show only credits, logos, or irrelevant visuals.\n"
                 "- Use only one clip per sentence.\n"
+                "- the term 'narration' refers to a sentence in the plot summary, which will be read out loud in the recap video.\n"
                 f"Output in English except for character names, which should remain in the original language."
             )
 
@@ -42,7 +50,7 @@ class ChooseClipForRecap:
                 f"{json.dumps(chosen_clips, ensure_ascii=False)}\n\n\n"
                 "Above is a list of selected clips for a segment of a recap.\n"
                 "Please revise this list to ensure that:\n"
-                "- Each recap sentence appears only once (no duplicates).\n"
+                "- Each narration sentence appears only once (no duplicates).\n"
                 "- If a clip is reused, merge the summary sentences if possible, or discard extras.\n"
                 "- Remove any special characters that would be challenging for text-to-voice.\n"
                 "- Discard any clips not relevant to the story (e.g., logos, credits).\n\n"
@@ -62,8 +70,8 @@ class ChooseClipForRecap:
             filtered_clips = []
 
             for clip in refined_clips:
-                sentence = clip.get("corresponding_summary_sentence", "").strip()
-                clip_id = clip.get("id", "").strip()
+                sentence = clip.get("narration", "").strip()
+                clip_id = clip.get("id", "")
                 if sentence and clip_id and sentence not in seen_sentences and clip_id not in seen_clip_ids:
                     seen_sentences.add(sentence)
                     seen_clip_ids.add(clip_id)
@@ -73,5 +81,11 @@ class ChooseClipForRecap:
             all_chosen_clips.extend(filtered_clips)
 
         all_chosen_clips.sort(key=lambda c: int(c.get("id", 0)))
+
+        # Add cloud storage path to clips
+        for clip in all_chosen_clips:
+            clip["file_name"] = file_name
+            clip["cloud_storage_path"] = cloud_storage_path
+
         print("[INFO] All segment clips chosen and cleaned successfully.")
         return all_chosen_clips

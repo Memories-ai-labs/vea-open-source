@@ -80,34 +80,33 @@ async def index_longform(request: MovieIndexRequest):
 
 @app.post(f"{API_PREFIX}/edit_movie", response_model=MovieRecapResponse)
 async def edit_movie(request: MovieRecapRequest):
-    try:
+    # try:
         logger.info(f"Editing movie recap: {request.blob_path}")
         pipeline = MovieRecapEditingPipeline(request.blob_path)
         url = await pipeline.run(
             user_context=request.user_context,
             user_prompt=request.user_prompt,
-            output_language=request.output_language or "English",
             user_music=request.user_music_path
         )
         return MovieRecapResponse(message="Recap generated.", url=url)
-    except Exception as e:
-        logger.error(f"Edit error: {e}")
-        raise HTTPException(status_code=500, detail="Editing failed.")
+    # except Exception as e:
+    #     logger.error(f"Edit error: {e}")
+    #     raise HTTPException(status_code=500, detail="Editing failed.")
     
 @app.post(f"{API_PREFIX}/flexible_respond", response_model=FlexibleResponseResult)
 async def flexible_respond(request: FlexibleResponseRequest):
     """
     Run the flexible response pipeline on a movie.
     """
-    try:
-        logger.info(f"Flexible response for: {request.blob_path} with prompt: {request.prompt}")
-        pipeline = FlexibleResponsePipeline(request.blob_path)
-        response = await pipeline.run(request.prompt, request.video_response)
+    # try:
+    logger.info(f"Flexible response for: {request.blob_path} with prompt: {request.prompt}")
+    pipeline = FlexibleResponsePipeline(request.blob_path)
+    response = await pipeline.run(request.prompt, request.video_response, request.narration)
 
-        return response
-    except Exception as e:
-        logger.error(f"Flexible response error: {e}")
-        raise HTTPException(status_code=500, detail="Flexible response failed.")
+    return response
+    # except Exception as e:
+    #     logger.error(f"Flexible response error: {e}")
+    #     raise HTTPException(status_code=500, detail="Flexible response failed.")
     
 
 @app.post(f"{API_PREFIX}/check_index", response_model=IndexCheckResponse)
