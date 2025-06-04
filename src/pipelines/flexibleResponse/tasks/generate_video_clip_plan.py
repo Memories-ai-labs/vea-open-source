@@ -28,14 +28,16 @@ class GenerateVideoClipPlan:
         
         if narration_enabled:
             prompt = (
-                "You are assisting in building a video using clips from a movie or a collection of video files to support a narration script.\n\n"
+                "You are assisting in helping a user edit a video by using clips from a movie or a collection of video files to support a script that the user wrote for the video.\n"
+                "Below is the user's prompt, you should adhere to any requests and tailor the response to the user's preferences. You must retain narration content specifically asked for in the user prompt, and do your best to choose the most appropriate clip for user prompt specific narration texts.\n"
+                "You must not omit content from the narration script that is specifically requested by the user or is neccasary to customize the video for the user.\n"
+                f"User prompt:\n---\n{user_prompt.strip()}\n---\n\n"
                 "For each clip, set a `priority` field (choose only one):\n"
                 "- `narration`: Use text-to-speech narration as primary audio. This is best when narration is more important than original audio, "
                 "for example, summarizing story scenes or when visual context is enough and the narration is primary.\n"
                 "- `clip_audio`: Use the original audio from the video clip as primary. Choose this if the meaning depends on hearing specific words, interviews, quotes, or presentations from people in the clip (e.g., documentary quotes, news soundbites, speeches, interview moments, presentations).\n"
                 "- `clip_video`: Use the entire video segment, uncut, including all original audio, even if it is longer than the narration. Use this for clips where it's crucial not to miss any action, such as sports plays or complex sequences where timing is critical.\n\n"
                 "For each clip, choose one `priority` and set the field accordingly. Only set `clip_audio` or `clip_video` if absolutely necessary; prefer `narration` otherwise.\n\n"
-                f"User prompt:\n---\n{user_prompt.strip()}\n---\n\n"
                 f"Narration script:\n---\n{narration_script.strip()}\n---\n\n"
                 "The following indexing files have been provided:\n"
                 f"{context_description}\n\n"
@@ -61,11 +63,14 @@ class GenerateVideoClipPlan:
                 }
             )
 
+            # print(f"[DEBUG] Initial clips from Gemini: {clips}")
+
             # Gemini pass 2: Clean up narration for TTS
             clean_prompt = (
                 "You are a narration script editor for text-to-speech. "
                 "You are given a JSON list of video clips, each with narration. "
-                "For each narration sentence, STRICTLY ensure:\n"
+                "You must keep content and preferences from the user prompt."
+                "For each narration sentence, ensure:\n"
                 "- No timestamps\n"
                 "- No file names or video file extensions\n"
                 "- No odd/unpronounceable characters\n"
@@ -86,7 +91,7 @@ class GenerateVideoClipPlan:
                     "response_schema": list[ChosenClip]
                 }
             )
-
+            # print(f"[DEBUG] Cleaned clips after narration editing: {cleaned_clips}")
             final_clips = cleaned_clips
         else:
             # No narration: select clips based on user prompt alone.

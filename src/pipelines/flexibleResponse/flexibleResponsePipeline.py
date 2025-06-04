@@ -73,6 +73,7 @@ class FlexibleResponsePipeline:
             file_descriptions=file_descriptions
         )
         print("[INFO] Initial Gemini response received.")
+        # print(f"[DEBUG] Initial response: {initial_response}")
 
         if not video_response:
             # --- Text/Evidence Response Path ---
@@ -127,6 +128,7 @@ class FlexibleResponsePipeline:
                     file_descriptions=file_descriptions
                 )
                 print("[INFO] Narration script generated.")
+                # print(f"[DEBUG] Refined narration script: {refined_script}")
             else:
                 print("[INFO] Skipping narration script generation as narration is disabled.")
                 refined_script = initial_response
