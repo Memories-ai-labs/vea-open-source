@@ -14,6 +14,7 @@ class GenerateNarrationScript:
 
         prompt = (
             "You are refining a narration script for a video response to a user question about a movie or a collection of media files.\n"
+            "you should tailor the narration to the user's prompt, and abide by any specific requests made in the user's prompt.\n"
             f"User prompt:\n---\n{user_prompt.strip()}\n---\n\n"
             f"Initial assistant response:\n---\n{initial_response.strip()}\n---\n\n"
             "Below are supporting indexing documents (possibly from multiple media files):\n"

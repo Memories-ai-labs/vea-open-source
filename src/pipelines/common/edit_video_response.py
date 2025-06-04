@@ -13,7 +13,7 @@ class EditVideoResponse:
     def __init__(
         self, 
         output_path="video_response.mp4", 
-        music_volume_multiplier=0.65, 
+        music_volume_multiplier=0.5, 
         gcs_client=None, 
         gcs_media_base_path=None, 
         bucket_name=None,
@@ -28,7 +28,6 @@ class EditVideoResponse:
         self._downloaded_files = {}
         self.whisper_model = whisper.load_model("base")  # You can choose 'tiny', 'base', 'small', 'medium', 'large'
 
-
     # ---------- File Download Helpers ----------
     def _download_media_file(self, file_name, cloud_storage_path):
         """Download the media file from GCS if not already present."""
@@ -38,95 +37,6 @@ class EditVideoResponse:
         self.gcs_client.download_files(self.bucket_name, cloud_storage_path, local_path)
         self._downloaded_files[file_name] = local_path
         return local_path
-
-    # ---------- Audio/Video Duration ----------
-    def get_audio_duration(self, audio_path):
-        """Returns the duration (in seconds) of an audio file."""
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"Audio file not found: {audio_path}")
-        info = mediainfo(audio_path)
-        if 'duration' not in info:
-            raise ValueError(f"'duration' not found in mediainfo output: {info} for file {audio_path}")
-        return float(info['duration'])
-
-    # # ---------- Subtitle (SRT) Handling ----------
-    # def write_srt(self, clips, srt_path, narration_dir, max_words_per_line=10):
-    #     """Writes out a .srt subtitle file for the final video."""
-    #     def format_srt_time(seconds):
-    #         h = int(seconds // 3600)
-    #         m = int((seconds % 3600) // 60)
-    #         s = int(seconds % 60)
-    #         ms = int((seconds - int(seconds)) * 1000)
-    #         return f"{h:02}:{m:02}:{s:02},{ms:03}"
-
-    #     def split_into_halves(text):
-    #         words = text.split()
-    #         half = len(words) // 2
-    #         return ' '.join(words[:half]), ' '.join(words[half:])
-
-    #     current_time = 0.0
-    #     with open(srt_path, "w", encoding="utf-8") as f:
-    #         srt_index = 1
-    #         for clip in clips:
-    #             clip_id = clip["id"]
-    #             sentence = clip.get("narration", "").replace("\n", " ").strip()
-    #             audio_path = os.path.join(narration_dir, f"{clip_id}.mp3")
-    #             audio_clip = AudioFileClip(audio_path)
-    #             duration = audio_clip.duration
-    #             audio_clip.close()
-    #             # duration = self.get_audio_duration(audio_path)
-    #             if len(sentence.split()) > max_words_per_line * 2:
-    #                 part1, part2 = split_into_halves(sentence)
-    #                 mid_time = current_time + duration / 2
-    #                 f.write(f"{srt_index}\n")
-    #                 f.write(f"{format_srt_time(current_time)} --> {format_srt_time(mid_time)}\n")
-    #                 f.write(f"{part1}\n\n")
-    #                 srt_index += 1
-    #                 f.write(f"{srt_index}\n")
-    #                 f.write(f"{format_srt_time(mid_time)} --> {format_srt_time(current_time + duration)}\n")
-    #                 f.write(f"{part2}\n\n")
-    #                 srt_index += 1
-    #             else:
-    #                 f.write(f"{srt_index}\n")
-    #                 f.write(f"{format_srt_time(current_time)} --> {format_srt_time(current_time + duration)}\n")
-    #                 f.write(f"{sentence}\n\n")
-    #                 srt_index += 1
-    #             current_time += duration
-
-    def generate_subtitles_with_whisper(self, audio_path, srt_output_path):
-        """
-        Transcribes the given audio file using Whisper and saves the subtitles in SRT format.
-        """
-        result = self.whisper_model.transcribe(audio_path)
-        segments = result.get("segments", [])
-        with open(srt_output_path, "w", encoding="utf-8") as f:
-            for i, segment in enumerate(segments, start=1):
-                start = self._format_timestamp(segment["start"])
-                end = self._format_timestamp(segment["end"])
-                text = segment["text"].strip()
-                f.write(f"{i}\n{start} --> {end}\n{text}\n\n")
-
-    def _format_timestamp(self, seconds):
-        """
-        Formats the timestamp in SRT format.
-        """
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        secs = int(seconds % 60)
-        milliseconds = int((seconds - int(seconds)) * 1000)
-        return f"{hours:02}:{minutes:02}:{secs:02},{milliseconds:03}"
-
-    def burn_subtitles(self, input_path, srt_path, output_path):
-        """Burns subtitles from an SRT file into the video using ffmpeg."""
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i", input_path,
-            "-vf", f"subtitles={srt_path}",
-            "-c:a", "copy",
-            output_path
-        ]
-        subprocess.run(cmd, check=True)
 
     # ---------- Video Clip Assembly ----------
     def _process_clip(
@@ -221,12 +131,11 @@ class EditVideoResponse:
 
         return adjusted_clips
 
-
     def _assemble_final_video(
         self, processed_clips, background_music_path=None, narration_enabled=True
     ):
         """Concatenates all processed video clips and handles music mixing."""
-        final_video = concatenate_videoclips(processed_clips, method="compose")
+        final_video = concatenate_videoclips(processed_clips)
         video_audio = final_video.audio
 
         # If background music, mix it in at the correct level
@@ -250,6 +159,41 @@ class EditVideoResponse:
         else:
             print("[INFO] No background music provided. Exporting narration only.")
         return final_video
+    
+    def generate_subtitles_with_whisper(self, audio_path, srt_output_path):
+        """
+        Transcribes the given audio file using Whisper and saves the subtitles in SRT format.
+        """
+        result = self.whisper_model.transcribe(audio_path)
+        segments = result.get("segments", [])
+        with open(srt_output_path, "w", encoding="utf-8") as f:
+            for i, segment in enumerate(segments, start=1):
+                start = self._format_timestamp(segment["start"])
+                end = self._format_timestamp(segment["end"])
+                text = segment["text"].strip()
+                f.write(f"{i}\n{start} --> {end}\n{text}\n\n")
+
+    def _format_timestamp(self, seconds):
+        """
+        Formats the timestamp in SRT format.
+        """
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        milliseconds = int((seconds - int(seconds)) * 1000)
+        return f"{hours:02}:{minutes:02}:{secs:02},{milliseconds:03}"
+
+    def burn_subtitles(self, input_path, srt_path, output_path):
+        """Burns subtitles from an SRT file into the video using ffmpeg."""
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", input_path,
+            "-vf", f"subtitles={srt_path}",
+            "-c:a", "copy",
+            output_path
+        ]
+        subprocess.run(cmd, check=True)
 
     # ---------- MAIN ENTRYPOINT ----------
     async def __call__(
@@ -276,7 +220,7 @@ class EditVideoResponse:
         if not processed_clips:
             raise ValueError("No clips were processed successfully.")
         
-        if background_music_path:
+        if background_music_path and not narration_enabled:
             processed_clips = self.snap_clips_to_music_beats(processed_clips, background_music_path)
 
         # Concatenate, mix music, and export to temp mp4
@@ -301,9 +245,12 @@ class EditVideoResponse:
             audio_export_path
         )
 
+        for clip in processed_clips:
+            clip.close()
+        final_video.close()
+
         # 2. Run Whisper for SRT
         self.generate_subtitles_with_whisper(audio_export_path, tmp_srt_path)
-
 
         # 3. Burn subtitles with ffmpeg
         self.burn_subtitles(tmp_video_path, tmp_srt_path, self.output_path)
