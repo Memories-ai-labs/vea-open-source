@@ -9,7 +9,6 @@ class MovieRecapRequest(BaseModel):
     blob_path: str
     user_prompt: Optional[str] = None
     user_context: Optional[str] = None
-    output_language: Optional[str] = "English"
     user_music_path: Optional[str] = None
 
 
@@ -44,7 +43,8 @@ class FlexibleResponseRequest(BaseModel):
     """
     blob_path: str
     prompt: str
-    video_response: bool
+    video_response: bool = False
+    narration: bool = True
 
 
 class FlexibleResponseResult(BaseModel):

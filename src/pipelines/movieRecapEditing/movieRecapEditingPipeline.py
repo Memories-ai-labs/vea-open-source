@@ -15,9 +15,9 @@ from src.config import CREDENTIAL_PATH, BUCKET_NAME
 from src.pipelines.movieRecapEditing.tasks.user_customization import UserCustomization
 from src.pipelines.movieRecapEditing.tasks.choose_clip_for_recap import ChooseClipForRecap
 from src.pipelines.movieRecapEditing.tasks.translate_recap import TranslateRecap
-from src.pipelines.movieRecapEditing.tasks.generate_narration import GenerateNarrationForClips
-from src.pipelines.movieRecapEditing.tasks.music_selection import MusicSelection
-from src.pipelines.movieRecapEditing.tasks.edit_recap_video import EditMovieRecapVideo
+from src.pipelines.common.generate_narration_audio import GenerateNarrationAudio
+from src.pipelines.common.music_selection import MusicSelection
+from src.pipelines.common.edit_video_response import EditVideoResponse
 
 
 class MovieRecapEditingPipeline:
@@ -25,9 +25,7 @@ class MovieRecapEditingPipeline:
         self.cloud_storage_media_path = cloud_storage_media_path
         self.media_name = os.path.basename(cloud_storage_media_path)
         self.media_base_name = os.path.splitext(self.media_name)[0]
-
         self.cloud_storage_indexing_dir = f"indexing/{self.media_base_name}/"
-        self.output_cloud_storage_dir = f"outputs/{self.media_base_name}/"
 
         self.llm = GeminiGenaiManager()
         self.cloud_storage_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
@@ -35,8 +33,6 @@ class MovieRecapEditingPipeline:
         clean_stale_tempdirs()
         self.workdir = tempfile.mkdtemp()
         self.text_to_voice_dir = tempfile.mkdtemp()
-        self.final_output_path = os.path.join(self.workdir, "recap.mp4")
-        self.final_output_cspath = os.path.join(self.output_cloud_storage_dir, "recap.mp4")
 
     async def run(self, user_context=None, user_prompt=None, output_language="English", user_music=None):
         # Helper to download GCS file to local path
@@ -60,11 +56,12 @@ class MovieRecapEditingPipeline:
             raise ValueError(f"No media entry found for: {self.media_name}")
 
         manifest = index_data.get("manifest", {})
-
         plot_json = media_entry.get("plot.json", [])
         scenes = media_entry.get("scenes.json", [])
         characters = media_entry.get("characters.txt", "")
         artistic = media_entry.get("artistic.json", {})
+        filename = media_entry.get("name")
+        cloud_storage_media_path = media_entry.get("cloud_storage_path")
 
         # 3. Run User Customization
         customizer = UserCustomization(self.llm)
@@ -79,14 +76,14 @@ class MovieRecapEditingPipeline:
 
         # 4. Choose Clips
         clip_selector = ChooseClipForRecap(self.llm)
-        chosen_clips = await clip_selector(customized_plot_json, scenes)
+        chosen_clips = await clip_selector(customized_plot_json, scenes, filename, cloud_storage_media_path)
 
-        # 5. Translate Clips
-        translator = TranslateRecap(self.llm)
-        chosen_clips = await translator(chosen_clips, output_language)
+        # # 5. Translate Clips
+        # translator = TranslateRecap(self.llm)
+        # chosen_clips = await translator(chosen_clips, output_language)
 
         # 6. Generate Narration
-        narrator = GenerateNarrationForClips(self.text_to_voice_dir, output_language)
+        narrator = GenerateNarrationAudio(self.text_to_voice_dir)
         await narrator(chosen_clips)
 
         # 7. Choose Music
@@ -111,22 +108,27 @@ class MovieRecapEditingPipeline:
             long_audio.export(chosen_music_path, format="mp3")
 
         # 8. Create Video
-        self.local_media_path = os.path.join(self.workdir, self.media_name)
-        self.cloud_storage_client.download_files(BUCKET_NAME, self.cloud_storage_media_path, self.local_media_path)
-        editor = EditMovieRecapVideo(self.final_output_path)
+        # self.local_media_path = os.path.join(self.workdir, self.media_name)
+        # self.cloud_storage_client.download_files(BUCKET_NAME, self.cloud_storage_media_path, self.local_media_path)
+        final_output_path = os.path.join(self.workdir, "recap.mp4")
+        editor = EditVideoResponse(
+            output_path=final_output_path,
+            gcs_client=self.cloud_storage_client,
+            bucket_name=BUCKET_NAME,
+            workdir=self.workdir
+            )
+        
         await editor(
-            chosen_clips,
-            self.local_media_path,
-            self.text_to_voice_dir,
-            chosen_music_path
+            clips=chosen_clips,
+            narration_dir=self.text_to_voice_dir,
+            background_music_path=chosen_music_path,
+            narration_enabled=True
         )
 
-        # 9. Upload Final Recap
-        self.cloud_storage_client.upload_files(
-            BUCKET_NAME,
-            self.final_output_path,
-            self.final_output_cspath
-        )
+        # Upload the result to GCS
+        final_gcs_path = f"outputs/{self.media_base_name}/recap.mp4"
+        print(f"[INFO] Uploading final video to: {final_gcs_path}")
+        self.cloud_storage_client.upload_files(BUCKET_NAME, final_output_path, final_gcs_path)
 
         print(f"[INFO] Final video uploaded")
-        return self.final_output_cspath
+        return final_gcs_path

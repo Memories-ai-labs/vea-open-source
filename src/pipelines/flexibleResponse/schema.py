@@ -20,7 +20,7 @@ class ClipPriority(str, Enum):
     CLIP_AUDIO = "clip_audio"    # prioritize original clip audio (e.g., interviews)
     CLIP_VIDEO = "clip_video"    # use the whole video uncut (e.g., sports play)
 
-class NarratedClip(BaseModel):
+class ChosenClip(BaseModel):
     id: int
     file_name: str
     start: str

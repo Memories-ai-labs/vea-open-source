@@ -30,7 +30,7 @@ class FlexibleGeminiAnswer:
             "    - A short explanation for why you chose it\n"
             "3. **Video Response**: If the user explicitly asked for a video response:\n"
             "   - First, write a short narration script or video script suitable for voiceover.\n"
-            "   - Then, identify scenes from  whose visual content best matches the script.\n"
+            "   - Then, identify scenes from whose visual content best matches the script.\n"
             "   - Provide a list of these scene timestamps and file names with descriptions and how they match the lines of the script.\n\n"
             "If you reference any scenes, timestamps, or visuals, **always say which media file each one comes from**. This is essential when the user uploads multiple videos.\n"
             "\n"
