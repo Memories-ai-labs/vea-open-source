@@ -40,7 +40,7 @@ class EditVideoResponse:
 
     # ---------- Video Clip Assembly ----------
     def _process_clip(
-        self, clip, narration_dir, narration_enabled=True
+        self, clip, narration_dir, narration_enabled=True, portrait=False
     ):
         """
         Given a NarratedClip dict, returns a processed moviepy VideoClip.
@@ -53,41 +53,52 @@ class EditVideoResponse:
         end_sec = parse_time_to_seconds(clip["end"])
         priority = clip.get("priority", False)
 
-        video_clip = VideoFileClip(video_path).resized((1920, 1080))
+        if portrait:
+            resolution = (1080, 1920)
+        else:
+            resolution = (1920, 1080)
+
+        video_clip = VideoFileClip(video_path).resized(resolution)
 
         if narration_enabled:
-            audio_path = os.path.join(narration_dir, f"{clip_id}.mp3")
-            narration = AudioFileClip(audio_path)
-            audio_duration = narration.duration
-            conservative_trim_end = max(end_sec, min(start_sec + audio_duration, video_clip.duration))
-            video_clip = video_clip.subclipped(start_sec, conservative_trim_end)
-            video_duration = video_clip.duration
-            if video_duration < audio_duration:
-                speed_factor = video_duration / audio_duration if audio_duration > 0 else 1
-                video_clip = video_clip.with_effects([vfx.MultiplySpeed(speed_factor)])
-            clip_volume = video_clip.audio.max_volume().mean()
-            narration_volume = narration.max_volume().mean()
-            volume_multiplier = (narration_volume / clip_volume) if narration_volume != 0 and clip_volume != 0 else 1.0
+            try:
+                audio_path = os.path.join(narration_dir, f"{clip_id}.mp3")
+                narration = AudioFileClip(audio_path)
+                audio_duration = narration.duration
+                conservative_trim_end = max(end_sec, min(start_sec + audio_duration, video_clip.duration))
+                video_clip = video_clip.subclipped(start_sec, conservative_trim_end)
+                video_duration = video_clip.duration
+                if video_duration < audio_duration:
+                    speed_factor = video_duration / audio_duration if audio_duration > 0 else 1
+                    video_clip = video_clip.with_effects([vfx.MultiplySpeed(speed_factor)])
+                clip_volume = video_clip.audio.max_volume().mean()
+                narration_volume = narration.max_volume().mean()
+                volume_multiplier = (narration_volume / clip_volume) if narration_volume != 0 and clip_volume != 0 else 1.0
 
-            # Priority handling
-            if not priority:
-                priority = "narration"
-            if priority == "clip_audio":
-                # Play twice: once with narration, then with original audio boosted
-                video_clip_copy = video_clip.with_effects([afx.MultiplyVolume(volume_multiplier)])
-                video_clip = video_clip.with_audio(narration)
-                if video_duration > audio_duration:
-                    video_clip = video_clip.subclipped(0, audio_duration)
-                return [video_clip, video_clip_copy]
-            elif priority == "clip_video":
-                video_clip = video_clip.with_audio(narration)
-                return [video_clip]
-            else:  # narration default
-                video_clip = video_clip.with_audio(narration)
-                if video_duration > audio_duration:
-                    video_clip = video_clip.subclipped(0, audio_duration)
-                return [video_clip]
-        else:
+                # Priority handling
+                if not priority:
+                    priority = "narration"
+                if priority == "clip_audio":
+                    # Play twice: once with narration, then with original audio boosted
+                    video_clip_copy = video_clip.with_effects([afx.MultiplyVolume(volume_multiplier)])
+                    video_clip = video_clip.with_audio(narration)
+                    if video_duration > audio_duration:
+                        video_clip = video_clip.subclipped(0, audio_duration)
+                    return [video_clip, video_clip_copy]
+                elif priority == "clip_video":
+                    video_clip = video_clip.with_audio(narration)
+                    return [video_clip]
+                else:  # narration default
+                    video_clip = video_clip.with_audio(narration)
+                    if video_duration > audio_duration:
+                        video_clip = video_clip.subclipped(0, audio_duration)
+                    return [video_clip]
+            except:
+                # try the clip again but dont use narration
+                narration_enabled = False
+                pass
+
+        if not narration_enabled:
             # No narration: Use original audio, as is
             video_clip = video_clip.subclipped(start_sec, end_sec)
             return [video_clip]
@@ -202,6 +213,7 @@ class EditVideoResponse:
         narration_dir,
         background_music_path=None,
         narration_enabled=True,
+        portrait=False
     ):
         print(f"[INFO] Processing {len(clips)} clips...")
 
@@ -214,8 +226,12 @@ class EditVideoResponse:
         # Process and assemble video clips
         processed_clips = []
         for clip in sorted(clips, key=lambda c: int(c["id"])):
-            new_clips = self._process_clip(clip, narration_dir, narration_enabled)
-            processed_clips.extend(new_clips)
+            try:
+                new_clips = self._process_clip(clip, narration_dir, narration_enabled, portrait)
+                processed_clips.extend(new_clips)
+            except Exception as e:
+                print(f"[ERROR] Failed to process clip {clip['id']}: {e}")
+                continue
 
         if not processed_clips:
             raise ValueError("No clips were processed successfully.")

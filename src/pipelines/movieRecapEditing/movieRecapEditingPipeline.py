@@ -89,7 +89,7 @@ class MovieRecapEditingPipeline:
         # 7. Choose Music
         if not user_music:
             full_plot_text = "\n".join([entry["sentence_text"] for entry in plot_json])
-            music_selector = MusicSelection(self.llm, self.workdir)
+            music_selector = MusicSelection(self.llm, self.workdir, user_prompt)
             chosen_music_path = await music_selector(full_plot_text)
         else:
             # If user provided specific music, download it

@@ -36,7 +36,7 @@ class MusicSelection:
             all_tracks.extend(tracks)
         return pd.DataFrame(all_tracks)
 
-    async def select_best_music(self, tracks_df, media_indexing_json):
+    async def select_best_music(self, tracks_df, media_indexing_json, user_prompt):
         # Extract music data for LLM
         music_data_list = []
         for item in tracks_df.to_dict("records"):
@@ -52,10 +52,12 @@ class MusicSelection:
 
         prompt = (
             "You are helping to select the best music track for a video editing project.\n\n"
-            "Below is the media indexing JSON, which summarizes all available plot, character, scene, and artistic details of the video. "
-            "Choose a music track (it can be any genre or mood) from the list that will best match the content, emotion, and energy of the media for the final edit.\n\n"
+            "Below is the media indexing JSON, which summarizes all available plot, character, scene, and artistic details of the video, and below that is the user's prompt."
+            "Choose a music trackfrom the list that will best match the content, emotion, and energy of the media as well as the user's preferences for the final edit.\n\n"
             "Media indexing JSON:\n"
             f"{json.dumps(media_indexing_json, indent=2, ensure_ascii=False)}\n\n"
+            "User prompt: \n"
+            f"{user_prompt}\n\n"
             "Available music tracks:\n"
             f"{json.dumps(music_data_list, indent=2, ensure_ascii=False)}\n\n"
             "Return your selection as a JSON with the following fields: id and title of the chosen track."
@@ -112,13 +114,13 @@ class MusicSelection:
         print(f"[INFO] 1-hour looped music saved to: {final_path}")
         return final_path
 
-    async def __call__(self, media_indexing_json):
+    async def __call__(self, media_indexing_json, user_prompt=""):
         print("[INFO] Fetching music library from Soundstripe...")
         tracks_df = self.fetch_tracks(page_count=10)
         print(f"[INFO] Retrieved {len(tracks_df)} tracks.")
 
         print("[INFO] Selecting the best music based on media indexing JSON...")
-        music_id, music_title = await self.select_best_music(tracks_df, media_indexing_json)
+        music_id, music_title = await self.select_best_music(tracks_df, media_indexing_json, user_prompt)
 
         print(f"[INFO] Chosen Track: {music_title} (ID: {music_id})")
         return self.download_music(music_id, music_title)

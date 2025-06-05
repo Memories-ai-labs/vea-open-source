@@ -98,7 +98,7 @@ async def flexible_respond(request: FlexibleResponseRequest):
     try:
         logger.info(f"Flexible response for: {request.blob_path} with prompt: {request.prompt}")
         pipeline = FlexibleResponsePipeline(request.blob_path)
-        response = await pipeline.run(request.prompt, request.video_response, request.narration)
+        response = await pipeline.run(request.prompt, request.video_response, request.narration, request.portrait)
 
         return response
     except Exception as e:
