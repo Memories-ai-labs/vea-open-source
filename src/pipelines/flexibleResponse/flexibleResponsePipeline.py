@@ -53,7 +53,7 @@ class FlexibleResponsePipeline:
         file_descriptions = self.media_indexing_json["manifest"]
         return indexing_data, file_descriptions
 
-    async def run(self, user_prompt: str, video_response: bool, narration_enabled: bool):
+    async def run(self, user_prompt: str, video_response: bool, narration_enabled: bool, portrait: bool):
         """
         Orchestrates the flexible response pipeline for a given media.
         Returns the output path(s) and metadata.
@@ -133,6 +133,8 @@ class FlexibleResponsePipeline:
                 print("[INFO] Skipping narration script generation as narration is disabled.")
                 refined_script = initial_response
 
+            print(portrait)
+
             # Generate the clip plan (either for narration or not)
             print("[INFO] Generating video clip plan...")
             clip_plan_task = GenerateVideoClipPlan(self.llm)
@@ -159,7 +161,7 @@ class FlexibleResponsePipeline:
             # Choose background music for the video
             music_selector = MusicSelection(self.llm, self.workdir)
             print("[INFO] Selecting background music based on media indexing...")
-            chosen_music_path = await music_selector(self.media_indexing_json)
+            chosen_music_path = await music_selector(self.media_indexing_json, user_prompt)
             print(f"[INFO] Chosen background music: {chosen_music_path}")
 
             # Assemble and render the final video
@@ -171,11 +173,13 @@ class FlexibleResponsePipeline:
                 bucket_name=BUCKET_NAME,
                 workdir=self.workdir
             )
+            
             await editor(
                 clips=selected_narrated_clips,
                 narration_dir=narration_audio_dir,
                 background_music_path=chosen_music_path,
-                narration_enabled=narration_enabled
+                narration_enabled=narration_enabled,
+                portrait=portrait
             )
             print("[INFO] Video response assembly complete.")
 

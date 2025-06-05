@@ -45,6 +45,7 @@ class FlexibleResponseRequest(BaseModel):
     prompt: str
     video_response: bool = False
     narration: bool = True
+    portrait: bool = False
 
 
 class FlexibleResponseResult(BaseModel):
