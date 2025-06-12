@@ -3,38 +3,18 @@
 from pydantic import BaseModel
 from typing import List, Optional
 
-
-
-class MovieRecapRequest(BaseModel):
-    blob_path: str
-    user_prompt: Optional[str] = None
-    user_context: Optional[str] = None
-    user_music_path: Optional[str] = None
-
-
-class MovieRecapResponse(BaseModel):
-    """
-    Response schema after video editing.
-    """
-    message: str
-    url: str
-
-
 class MovieFile(BaseModel):
     """
     Schema representing a movie file in GCS.
     """
     name: str
     blob_path: str
-
-class MovieIndexRequest(BaseModel):
+class IndexRequest(BaseModel):
     blob_path: str
     start_fresh: Optional[bool] = False
 
-class MovieIndexResponse(BaseModel):
-    """
-    Response schema after video editing.
-    """
+
+class IndexResponse(BaseModel):
     message: str
 
 class FlexibleResponseRequest(BaseModel):
@@ -44,9 +24,12 @@ class FlexibleResponseRequest(BaseModel):
     blob_path: str
     prompt: str
     video_response: bool = False
+    original_audio: bool = True
+    music: bool = True
     narration: bool = True
-    portrait: bool = False
-
+    aspect_ratio: float = 0
+    subtitles:bool = True
+    snap_to_beat: bool = False
 
 class FlexibleResponseResult(BaseModel):
     """
@@ -57,18 +40,8 @@ class FlexibleResponseResult(BaseModel):
     evidence_paths: List[str]
     run_id: str
 
-
-class IndexCheckRequest(BaseModel):
+class ShortsRequest(BaseModel):
     blob_path: str
-    required_files: List[str]
 
-class IndexCheckResponse(BaseModel):
-    blob_path: str
-    all_exist: bool
-
-class ShortFormIndexRequest(BaseModel):
-    blob_path: str  # GCS folder path containing short videos
-    start_fresh: Optional[bool] = False
-
-class ShortFormIndexResponse(BaseModel):
-    message: str
+class ShortsResponse(BaseModel):
+    shorts: List[dict]

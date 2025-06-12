@@ -5,6 +5,11 @@ from pathlib import Path
 
 # --- Static Constants ---
 API_PREFIX = "/video-edit/v1"
+VIDEO_EXTS = [
+    ".mp4", ".mov", ".mkv", ".avi", ".webm",
+    ".mpg", ".mpeg", ".m4v"
+]
+
 
 # --- Dynamic Constants (from environment) ---
 ENV = os.getenv("ENV", "development")

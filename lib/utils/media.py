@@ -213,3 +213,81 @@ def clean_stale_tempdirs():
                     print(f"Deleted: {path}")
                 except Exception as e:
                     print(f"Skipping {path}: {e}")
+
+def split_video_into_segments(video_path, output_dir, max_seconds=1200):
+    """
+    Splits a video into segments of max_seconds (default 20min) using ffmpeg.
+    Returns list of segment video paths.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    output_pattern = os.path.join(output_dir, "seg_%03d.mp4")
+    cmd = [
+        "ffmpeg", "-y", "-i", str(video_path),
+        "-c", "copy", "-map", "0",
+        "-f", "segment",
+        "-segment_time", str(max_seconds),
+        output_pattern
+    ]
+    print("[INFO] Running:", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+    return sorted(Path(output_dir).glob("seg_*.mp4"))
+
+def extract_audio_from_video(
+    video_path: str,
+    audio_output_path: str,
+    audio_format: str = "mp3",
+    bitrate: str = "64k",
+    sample_rate: int = 16000,
+    mono: bool = True,
+):
+    """
+    Extracts audio from a video file, compressing to save space.
+    """
+    # Output extension check
+    if not audio_output_path.lower().endswith(f".{audio_format}"):
+        raise ValueError(f"audio_output_path must end with .{audio_format}")
+
+    cmd = [
+        "ffmpeg", "-y", "-i", str(video_path),
+        "-vn",
+        "-acodec", "libmp3lame" if audio_format == "mp3" else audio_format,
+        "-b:a", bitrate,
+        "-ar", str(sample_rate),
+    ]
+    if mono:
+        cmd += ["-ac", "1"]  # force mono
+
+    cmd.append(str(audio_output_path))
+
+    print(f"[INFO] Extracting compressed audio: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(result.stderr)
+        raise RuntimeError(f"ffmpeg audio extraction failed for {video_path}")
+    return audio_output_path
+
+
+def extract_images_ffmpeg(
+    video_path: str, 
+    output_dir: str, 
+    fps: float = 0.25, 
+    target_height: int = 480, 
+    jpeg_quality: int = 10
+):
+    """
+    Extracts images from a video at the specified FPS using ffmpeg.
+    Saves frames at smaller resolution (preserves aspect) and lower JPEG quality.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    output_pattern = os.path.join(output_dir, "frame_%05d.jpg")
+    # -2 makes ffmpeg preserve aspect ratio
+    vf_str = f"fps={fps},scale=-2:{target_height}"
+    cmd = [
+        "ffmpeg", "-y", "-i", video_path,
+        "-vf", vf_str,
+        "-q:v", str(jpeg_quality),
+        output_pattern
+    ]
+    print("[INFO] Running:", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+    print("[INFO] Extraction complete.")

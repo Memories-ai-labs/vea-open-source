@@ -67,7 +67,6 @@ class GeminiGenaiManager:
                 parts.append(self._convert_path_to_blob_part(item))
             else:
                 parts.append(types.Part(text=item))
-
         attempt = 0
         while attempt < max_retries:
             response = None
@@ -117,11 +116,11 @@ class GeminiGenaiManager:
                     print("[INFO] Detected JSON decode error. Retrying in 10 seconds...")
                     time.sleep(10)
                 elif status == 429 or "429" in error_str:
-                    print("[INFO] Detected rate limit error (429). Retrying in 60 seconds...")
-                    time.sleep(60)
+                    print(f"[INFO] Detected rate limit error (429). Retrying in {60*attempt} seconds...")
+                    time.sleep(60*attempt)
                 elif status == 503 or "503" in error_str or "model is overloaded" in error_str.lower():
-                    print("[INFO] Detected model overload (503). Retrying in 60 seconds...")
-                    time.sleep(60)
+                    print(f"[INFO] Detected model overload (503). Retrying in {60*attempt} seconds...")
+                    time.sleep(60*attempt)
                 else:
                     if attempt == max_retries:
                         print("[ERROR] Final failure, printing traceback:")
