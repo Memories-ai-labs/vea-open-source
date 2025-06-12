@@ -6,7 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from lib.utils.media import seconds_to_hhmmss, parse_time_to_seconds
-from src.pipelines.longFormComprehension.schema import Scene
+from src.pipelines.videoComprehension.schema import Scene
 
 class SceneBySceneComprehension:
     def __init__(self, llm):
@@ -26,18 +26,26 @@ class SceneBySceneComprehension:
             prompt = (
                 f"{summary_draft}\n\n"
                 f"{characters}\n\n"
-                "Provided is a segment of a long-form narrative media, such as a movie, TV show, or documentary, along with two references: "
-                "- a JSON with the full plot summary and segment number, "
-                "- a character list with names, roles, and relationships. "
-                "Every 20 seconds, describe the scene in detail, such as the characters involved and their actions. "
-                "Use the plot and characters to help deduce who is in each scene and what is happening. "
-                "Ignore scenes that are just studio logo animation or end credits. "
+                "Provided is a segment of a long-form video. All videos, regardless of their content, convey a story or sequence of events—sometimes profound, sometimes simple or surface-level. "
+                "You are also given two references: "
+                "- a JSON with the full story summary and segment number, "
+                "- a list of people/characters with names, roles, and relationships. "
+                "\n\n"
+                "Depending on the type of media, you should adjust the scene descriptions accordingly:\n"
+                "- If the video is story-driven (e.g. movie, TV show, documentary), focus on story, characters, and actions, but you may briefly mention artistic elements such as camera angles, lighting, or music when relevant.\n"
+                "- If the media is content-driven (e.g. lecture, presentation, interview), include what content is being discussed or displayed, along with relevant context and key points.\n"
+                "- If the media is visually driven (e.g. travel footage, montage), focus on the visual content, notable scenes, locations, or changes in setting, and you may also note things like style, music, or atmosphere.\n"
+                "\n"
+                "Every 20 seconds, describe the scene in detail, such as the individuals involved and their actions. "
+                "Use the story and people/characters to help deduce who is in each scene and what is happening. "
+                "Ignore scenes that are just logo animation, credits, or unrelated filler. "
                 "Be sure to use the whole segment. Format each scene as JSON with: "
                 "- start_timestamp (HH:MM:SS)\n"
                 "- end_timestamp (HH:MM:SS)\n"
                 "- description\n"
                 "You should output in English except for character names, which should be in the original language."
             )
+
 
             scene_data = await asyncio.to_thread(
                 self.llm.LLM_request,

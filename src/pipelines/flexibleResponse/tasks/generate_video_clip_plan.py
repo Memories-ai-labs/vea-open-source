@@ -13,6 +13,16 @@ class GenerateVideoClipPlan:
             if "name" in entry and "cloud_storage_path" in entry
         }
 
+    def deduplicate_clips(self, clips):
+        seen = set()
+        deduped = []
+        for clip in clips:
+            key = (clip["file_name"], clip["start"], clip["end"])
+            if key not in seen:
+                seen.add(key)
+                deduped.append(clip)
+        return deduped
+
     async def __call__(
         self, 
         narration_script: str, 
@@ -30,7 +40,8 @@ class GenerateVideoClipPlan:
             prompt = (
                 "You are assisting in helping a user edit a video by using clips from a movie or a collection of video files to support a script that the user wrote for the video.\n"
                 "Below is the user's prompt, you should adhere to any requests and tailor the response to the user's preferences. You must retain narration content specifically asked for in the user prompt, and do your best to choose the most appropriate clip for user prompt specific narration texts.\n"
-                "You must not omit content from the narration script that is specifically requested by the user or is neccasary to customize the video for the user.\n"
+                "You must not omit content from the narration script that is specifically requested by the user or is necessary to customize the video for the user.\n"
+                "IMPORTANT: Do not output any duplicate clips. For each unique combination of file name, start, and end time, only include one entry in your output list.\n"
                 f"User prompt:\n---\n{user_prompt.strip()}\n---\n\n"
                 "For each clip, set a `priority` field (choose only one):\n"
                 "- `narration`: Use text-to-speech narration as primary audio. This is best when narration is more important than original audio, "
@@ -63,13 +74,12 @@ class GenerateVideoClipPlan:
                 }
             )
 
-            # print(f"[DEBUG] Initial clips from Gemini: {clips}")
-
             # Gemini pass 2: Clean up narration for TTS
             clean_prompt = (
                 "You are a narration script editor for text-to-speech. "
                 "You are given a JSON list of video clips, each with narration. "
                 "You must keep content and preferences from the user prompt."
+                "IMPORTANT: Do not output any duplicate clips. For each unique combination of file name, start, and end time, only include one entry in your output list.\n"
                 "For each narration sentence, ensure:\n"
                 "- No timestamps\n"
                 "- No file names or video file extensions\n"
@@ -91,13 +101,13 @@ class GenerateVideoClipPlan:
                     "response_schema": list[ChosenClip]
                 }
             )
-            # print(f"[DEBUG] Cleaned clips after narration editing: {cleaned_clips}")
             final_clips = cleaned_clips
         else:
             # No narration: select clips based on user prompt alone.
             prompt = (
                 "You are assisting in building a video from one or more media files. There is NO text-to-speech narration in this mode. "
                 "Your job is to select the most relevant video segments to directly answer or illustrate the user's prompt. "
+                "IMPORTANT: Do not output any duplicate clips. For each unique combination of file name, start, and end time, only include one entry in your output list.\n"
                 "For each selected clip, include the following fields:\n"
                 "- `id`: unique integer\n"
                 "- `file_name`: video file name\n"
@@ -130,4 +140,6 @@ class GenerateVideoClipPlan:
             if not clip["cloud_storage_path"]:
                 print(f"[WARN] No cloud_storage_path found for file: {fname}")
 
+        # Deduplicate by (file_name, start, end)
+        final_clips = self.deduplicate_clips(final_clips)
         return final_clips

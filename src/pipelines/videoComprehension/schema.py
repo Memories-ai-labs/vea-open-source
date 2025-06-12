@@ -10,8 +10,3 @@ class Scene(BaseModel):
     end_timestamp: str  # End time of scene (HH:MM:SS)
     scene_description: str  # Brief description of the action in the scene
 
-class ArtisticSegment(BaseModel):
-    start_timestamp: str
-    end_timestamp: str
-    visual_elements: str
-    audio_elements: str

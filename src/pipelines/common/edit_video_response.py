@@ -7,6 +7,7 @@ import librosa
 import numpy as np
 import subprocess
 from lib.utils.media import parse_time_to_seconds
+from src.pipelines.common.dynamic_cropping import DynamicCropping
 import whisper
 
 class EditVideoResponse:
@@ -17,7 +18,8 @@ class EditVideoResponse:
         gcs_client=None, 
         gcs_media_base_path=None, 
         bucket_name=None,
-        workdir=None
+        workdir=None,
+        llm=None
     ):
         self.output_path = output_path
         self.music_volume_multiplier = music_volume_multiplier
@@ -25,6 +27,7 @@ class EditVideoResponse:
         self.gcs_media_base_path = gcs_media_base_path
         self.bucket_name = bucket_name
         self.workdir = workdir or tempfile.mkdtemp()
+        self.llm = llm
         self._downloaded_files = {}
         self.whisper_model = whisper.load_model("base")  # You can choose 'tiny', 'base', 'small', 'medium', 'large'
 
@@ -40,7 +43,7 @@ class EditVideoResponse:
 
     # ---------- Video Clip Assembly ----------
     def _process_clip(
-        self, clip, narration_dir, narration_enabled=True, portrait=False
+        self, clip, narration_dir, narration_enabled=True, original_audio=True
     ):
         """
         Given a NarratedClip dict, returns a processed moviepy VideoClip.
@@ -53,12 +56,7 @@ class EditVideoResponse:
         end_sec = parse_time_to_seconds(clip["end"])
         priority = clip.get("priority", False)
 
-        if portrait:
-            resolution = (1080, 1920)
-        else:
-            resolution = (1920, 1080)
-
-        video_clip = VideoFileClip(video_path).resized(resolution)
+        video_clip = VideoFileClip(video_path)
 
         if narration_enabled:
             try:
@@ -74,6 +72,9 @@ class EditVideoResponse:
                 clip_volume = video_clip.audio.max_volume().mean()
                 narration_volume = narration.max_volume().mean()
                 volume_multiplier = (narration_volume / clip_volume) if narration_volume != 0 and clip_volume != 0 else 1.0
+
+                if not original_audio:
+                    video_clip.with_effects([afx.MultiplyVolume(0)])
 
                 # Priority handling
                 if not priority:
@@ -143,7 +144,7 @@ class EditVideoResponse:
         return adjusted_clips
 
     def _assemble_final_video(
-        self, processed_clips, background_music_path=None, narration_enabled=True
+        self, processed_clips, background_music_path=None
     ):
         """Concatenates all processed video clips and handles music mixing."""
         final_video = concatenate_videoclips(processed_clips)
@@ -157,11 +158,11 @@ class EditVideoResponse:
                 video_volume = video_audio.max_volume().mean()
                 # Adjust music relative to overall video/narration volume
                 if video_volume == 0 or music_volume == 0:
-                    volume_multiplier = 1.0
+                    volume_multiplier = self.music_volume_multiplier
                 else:
-                    volume_multiplier = video_volume / music_volume
+                    volume_multiplier = video_volume / music_volume * self.music_volume_multiplier
                 background_music = background_music.with_effects(
-                    [afx.MultiplyVolume(volume_multiplier * self.music_volume_multiplier)]
+                    [afx.MultiplyVolume(volume_multiplier)]
                 ).subclipped(0, final_video.duration)
                 final_audio = CompositeAudioClip([video_audio, background_music])
                 final_video = final_video.with_audio(final_audio)
@@ -206,14 +207,16 @@ class EditVideoResponse:
         ]
         subprocess.run(cmd, check=True)
 
-    # ---------- MAIN ENTRYPOINT ----------
     async def __call__(
         self,
         clips,
         narration_dir,
         background_music_path=None,
+        original_audio = True,
         narration_enabled=True,
-        portrait=False
+        aspect_ratio=16/9,
+        subtitles = True,
+        snap_to_beat = False
     ):
         print(f"[INFO] Processing {len(clips)} clips...")
 
@@ -225,51 +228,88 @@ class EditVideoResponse:
 
         # Process and assemble video clips
         processed_clips = []
+        aspect_ratios = []
         for clip in sorted(clips, key=lambda c: int(c["id"])):
             try:
-                new_clips = self._process_clip(clip, narration_dir, narration_enabled, portrait)
+                new_clips = self._process_clip(clip, narration_dir, narration_enabled, original_audio)
                 processed_clips.extend(new_clips)
+                # Track aspect ratio for each processed clip
+                for c in new_clips:
+                    w, h = c.size
+                    aspect_ratios.append(round(float(w) / float(h), 3))
             except Exception as e:
                 print(f"[ERROR] Failed to process clip {clip['id']}: {e}")
                 continue
 
         if not processed_clips:
             raise ValueError("No clips were processed successfully.")
-        
-        if background_music_path and not narration_enabled:
+
+        # --- Aspect Ratio Handling ---
+        if aspect_ratio == 0:
+            # Find most common aspect ratio among clips (rounded to 2 decimal places)
+            from collections import Counter
+            aspect_counter = Counter(aspect_ratios)
+            most_common_aspect, _ = aspect_counter.most_common(1)[0]
+            aspect_ratio = most_common_aspect
+            print(f"[INFO] Auto-detected aspect ratio: {aspect_ratio}")
+
+        # Calculate export width/height close to 1080p for at least one dimension
+        if aspect_ratio >= 1.0:
+            # Landscape: width = 1920, height = round(1920 / aspect)
+            export_width = 1920
+            export_height = int(round(1920 / aspect_ratio))
+        else:
+            # Portrait: height = 1920, width = round(1920 * aspect)
+            export_height = 1920
+            export_width = int(round(1920 * aspect_ratio))
+
+        print(f"[INFO] Target output resolution: {export_width}x{export_height}")
+
+        # --- Cropping ---
+        dc = DynamicCropping(self.llm, self.workdir, batch_size=8)
+        processed_clips = await dc(export_width, export_height, processed_clips)
+
+        if background_music_path and snap_to_beat:
             processed_clips = self.snap_clips_to_music_beats(processed_clips, background_music_path)
 
         # Concatenate, mix music, and export to temp mp4
         final_video = self._assemble_final_video(
-            processed_clips, background_music_path, narration_enabled
-        )
-        caption_dir = tempfile.mkdtemp()
-        tmp_srt_path = os.path.join(caption_dir, "captions.srt")
-        tmp_video_path = os.path.join(caption_dir, "no_caption.mp4")
-        await asyncio.to_thread(
-            final_video.write_videofile,
-            tmp_video_path,
-            preset='ultrafast',
-            fps=24, 
-            threads=8,
+            processed_clips, background_music_path
         )
 
-         # 1. Export combined audio for Whisper
-        audio_export_path = os.path.join(caption_dir, "final_audio.wav")
-        await asyncio.to_thread(
-            final_video.audio.write_audiofile,
-            audio_export_path
-        )
+        if subtitles:
+            caption_dir = tempfile.mkdtemp()
+            tmp_srt_path = os.path.join(caption_dir, "captions.srt")
+            tmp_video_path = os.path.join(caption_dir, "no_caption.mp4")
+            await asyncio.to_thread(
+                final_video.write_videofile,
+                tmp_video_path,
+                preset='ultrafast',
+                fps=24,
+                threads=8,
+            )
+            audio_export_path = os.path.join(caption_dir, "final_audio.wav")
+            await asyncio.to_thread(
+                final_video.audio.write_audiofile,
+                audio_export_path
+            )
+            self.generate_subtitles_with_whisper(audio_export_path, tmp_srt_path)
+            try:
+                self.burn_subtitles(tmp_video_path, tmp_srt_path, self.output_path)
+            except:
+                self.output_path = tmp_video_path
+        else:
+            await asyncio.to_thread(
+                final_video.write_videofile,
+                self.output_path,
+                preset='ultrafast',
+                fps=24,
+                threads=8,
+            )
 
         for clip in processed_clips:
             clip.close()
         final_video.close()
-
-        # 2. Run Whisper for SRT
-        self.generate_subtitles_with_whisper(audio_export_path, tmp_srt_path)
-
-        # 3. Burn subtitles with ffmpeg
-        self.burn_subtitles(tmp_video_path, tmp_srt_path, self.output_path)
 
         print(f"[INFO] Final video created: {self.output_path}")
         return self.output_path

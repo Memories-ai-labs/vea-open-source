@@ -5,7 +5,7 @@ import pandas as pd
 from pathlib import Path
 from pydub import AudioSegment
 import asyncio
-from src.pipelines.movieRecapEditing.schema import ChosenMusic
+from src.pipelines.common.schema import ChosenMusic
 
 class MusicSelection:
     def __init__(self, llm, output_dir):
@@ -52,26 +52,28 @@ class MusicSelection:
 
         prompt = (
             "You are helping to select the best music track for a video editing project.\n\n"
-            "Below is the media indexing JSON, which summarizes all available plot, character, scene, and artistic details of the video, and below that is the user's prompt."
-            "Choose a music trackfrom the list that will best match the content, emotion, and energy of the media as well as the user's preferences for the final edit.\n\n"
+            "Below is the media indexing JSON, which summarizes all available plot, character, scene, and artistic details of the video, and below that is the user's prompt.\n"
+            "Choose the TOP 5 music tracks from the list that will best match the content, emotion, and energy of the media as well as the user's preferences for the final edit. "
+            "Rank them in order from best to least.\n\n"
             "Media indexing JSON:\n"
             f"{json.dumps(media_indexing_json, indent=2, ensure_ascii=False)}\n\n"
             "User prompt: \n"
             f"{user_prompt}\n\n"
             "Available music tracks:\n"
             f"{json.dumps(music_data_list, indent=2, ensure_ascii=False)}\n\n"
-            "Return your selection as a JSON with the following fields: id and title of the chosen track."
+            "Return your selection as a JSON list with the following fields for each track: id and title."
         )
+
 
         result = await asyncio.to_thread(
             self.llm.LLM_request,
             [prompt],
             {
                 "response_mime_type": "application/json",
-                "response_schema": ChosenMusic
+                "response_schema": list[ChosenMusic]
             }
         )
-        return result["id"], result["title"]
+        return result
 
     def download_music(self, music_id, music_title):
         url = f"https://api.soundstripe.com/v1/songs/{music_id}"
@@ -119,8 +121,17 @@ class MusicSelection:
         tracks_df = self.fetch_tracks(page_count=10)
         print(f"[INFO] Retrieved {len(tracks_df)} tracks.")
 
-        print("[INFO] Selecting the best music based on media indexing JSON...")
-        music_id, music_title = await self.select_best_music(tracks_df, media_indexing_json, user_prompt)
+        print("[INFO] Selecting the top 5 music tracks based on media indexing JSON...")
+        top_tracks = await self.select_best_music(tracks_df, media_indexing_json, user_prompt)
 
-        print(f"[INFO] Chosen Track: {music_title} (ID: {music_id})")
-        return self.download_music(music_id, music_title)
+        for i, track in enumerate(top_tracks):
+            music_id, music_title = track.get("id"), track.get("title")
+            try:
+                print(f"[INFO] Attempting to download Track #{i+1}: {music_title} (ID: {music_id})")
+                return self.download_music(music_id, music_title)
+            except Exception as e:
+                print(f"[WARN] Failed to download {music_title} (ID: {music_id}): {e}")
+                continue
+
+        raise RuntimeError("Failed to download any of the top 5 recommended tracks from Soundstripe.")
+
