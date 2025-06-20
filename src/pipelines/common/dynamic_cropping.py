@@ -4,13 +4,17 @@ import tempfile
 import asyncio
 from pathlib import Path
 from PIL import Image
+from moviepy import VideoFileClip, concatenate_videoclips
+from scipy.interpolate import interp1d
 from src.pipelines.common.schema import CroppingResponse
 
+
 class DynamicCropping:
-    def __init__(self, llm, workdir=None, batch_size=5):
+    def __init__(self, llm, workdir=None, batch_size=5, crop_threshold=0.1):
         self.llm = llm
         self.workdir = workdir or tempfile.mkdtemp()
         self.batch_size = batch_size
+        self.crop_threshold = crop_threshold
 
     def _aspect_ratio(self, w, h):
         return float(w) / float(h)
@@ -18,117 +22,146 @@ class DynamicCropping:
     def _is_aspect_ratio_similar(self, w1, h1, w2, h2, threshold=0.06):
         r1 = self._aspect_ratio(w1, h1)
         r2 = self._aspect_ratio(w2, h2)
-        return abs(r1 - r2) / r2 < threshold
+        similar = abs(r1 - r2) / r2 < threshold
+        print(f"[DEBUG] Checking aspect similarity: {w1}x{h1} vs {w2}x{h2} -> {similar}")
+        return similar
 
-    def _extract_middle_frame_from_moviepy_clip(self, clip_obj, out_img_path):
-        """
-        Extract a frame from the middle of a MoviePy VideoClip and save as JPEG.
-        """
-        mid_t = 0.5 * (clip_obj.start + clip_obj.end) if clip_obj.end else 0.5 * clip_obj.duration
-        frame = clip_obj.get_frame(mid_t)
-        img = Image.fromarray(frame)
-        img.save(out_img_path)
-        return out_img_path
-    
-    def _extract_blended_frames_from_moviepy_clip(self, clip_obj, out_img_path, num_samples=3):
-        """
-        Evenly samples `num_samples` frames, blends them by averaging, and saves as JPEG.
-        """
-        duration = clip_obj.end - clip_obj.start if clip_obj.end else clip_obj.duration
-        ts = np.linspace(clip_obj.start, clip_obj.start + duration, num=num_samples+2)[1:-1]  # Exclude very start/end
-        frames = [clip_obj.get_frame(t) for t in ts]
-        blended = np.mean(frames, axis=0).astype(np.uint8)
-        img = Image.fromarray(blended)
-        img.save(out_img_path)
-        return out_img_path
+    def _extract_frames(self, clip_obj, clip_idx, every_n_seconds=2):
+        frames = []
+        duration = clip_obj.duration
+        times = [min(t, duration - 0.01) for t in np.arange(0, duration, every_n_seconds)]
+        for j, t in enumerate(times):
+            frame_id = f"{clip_idx}_{j}"
+            out_img_path = os.path.join(self.workdir, f"clip{clip_idx}_frame{j}.jpg")
+            frame = clip_obj.get_frame(t)
+            img = Image.fromarray(frame)
+            img.save(out_img_path)
+            frames.append({"frame_id": frame_id, "t": t, "img_path": out_img_path})
+        return frames
 
+    def _segment_crop_keyframes(self, times, cx, cy, threshold, input_duration):
+        # Segments logic, but last segment always ends at input_duration
+        segments = []
+        n = len(times)
+        seg_start = 0
+        for i in range(1, n):
+            dx = abs(cx[i] - cx[seg_start])
+            dy = abs(cy[i] - cy[seg_start])
+            if dx > threshold or dy > threshold:
+                avg_cx = float(np.mean(cx[seg_start:i]))
+                avg_cy = float(np.mean(cy[seg_start:i]))
+                segments.append({
+                    "start": float(times[seg_start]),
+                    "end": float(times[i]),
+                    "crop_x": avg_cx,
+                    "crop_y": avg_cy
+                })
+                seg_start = i
+        # Add last segment: make sure it ends exactly at the input clip duration
+        avg_cx = float(np.mean(cx[seg_start:]))
+        avg_cy = float(np.mean(cy[seg_start:]))
+        segments.append({
+            "start": float(times[seg_start]),
+            "end": float(input_duration),  # <-- make sure!
+            "crop_x": avg_cx,
+            "crop_y": avg_cy
+        })
+        return segments
 
     async def __call__(
-        self, 
-        desired_width: int, 
-        desired_height: int, 
-        processed_clips: list,  # [(clip: VideoFileClip, meta_dict: dict)]
+        self,
+        desired_width: int,
+        desired_height: int,
+        processed_clips: list,
         target_aspect_threshold=0.06
     ):
-        """
-        - processed_clips: list of tuples (moviepy clip object, original clip dict)
-        - desired_width/height: target export resolution
-        """
-        img_paths = []
-        original_idxs = []
-        crop_instructions = [None] * len(processed_clips)
+        print(f"[INFO] Starting DynamicCropping for {len(processed_clips)} clips. Target size: {desired_width}x{desired_height}")
+        all_frames = []
+        frames_by_clip = {}
 
-        # Prepare for cropping
+        # 1. Extract frames for all clips, keep mapping
         for i, clip_obj in enumerate(processed_clips):
             w, h = clip_obj.size
-            
             if self._is_aspect_ratio_similar(w, h, desired_width, desired_height, threshold=target_aspect_threshold):
                 continue
+            frames = self._extract_frames(clip_obj, i)
+            all_frames.extend([dict(frame, clip_idx=i) for frame in frames])
+            frames_by_clip.setdefault(i, []).extend(frames)
 
-            # Save mid frame as image for LLM
-            out_img_path = os.path.join(self.workdir, f"{i}_mid.jpg")
-            self._extract_middle_frame_from_moviepy_clip(clip_obj, out_img_path)
-            # self._extract_blended_frames_from_moviepy_clip(clip_obj, out_img_path)
-            img_paths.append(Path(out_img_path))
-            original_idxs.append(i)
-
-        # Batch Gemini calls
-        for i in range(0, len(img_paths), self.batch_size):
-            batch = img_paths[i:i+self.batch_size]
-            idxs = original_idxs[i:i+self.batch_size]
-
+        # 2. Batch Gemini predictions (batches of N)
+        crops_for_frames = {}
+        for i in range(0, len(all_frames), self.batch_size):
+            batch = all_frames[i:i+self.batch_size]
+            images = [Path(frame['img_path']) for frame in batch]
+            mapping = "\n".join([f"Image {j+1}: frame_id '{frame['frame_id']}'" for j, frame in enumerate(batch)])
             prompt = (
-                f"You are an expert video editor tasked with cropping video clips to a target aspect ratio of {desired_width}:{desired_height}.\n"
-                f"For each of the following images (center frames from their clips), pick the best crop for the new aspect ratio that frames the most important content in the frame\n"
-                "Return the crop center for each image as `crop_center_x` and `crop_center_y`, both as floats between 0 and 1 (0.5 means centered). "
-                "Choose the center that keeps the most important content, such as faces or subjects, in frame. "
-                "Output your crop decisions in a list of structured outputs, where entries are in the same order as the images\n"
-        
+                f"You are an expert video editor tasked with cropping video frames to a target aspect ratio of {desired_width}:{desired_height}.\n"
+                "You will be given a sequence of images. Each image is mapped to a frame_id as follows:\n"
+                f"{mapping}\n"
+                "For each image, return your crop center (x and y, between 0 and 1) for the most important content for the full scene.\n"
+                "Output a JSON list of objects, each with: frame_id (string), crop_center_x (float), crop_center_y (float). Use the provided frame_id for each result.\n"
+                "Entries must be in the same order as input images."
             )
-            
-            # prompt = (
-            #     f"You are an expert video editor tasked with cropping video clips to a target aspect ratio of {desired_width}:{desired_height}.\n"
-            #     f"Each image is a blend of three evenly sampled frames from the video clip (averaged together) to summarize the important content across the clip.\n"
-            #     "For each of the following images, pick the best crop for the new aspect ratio that frames the most important content for the entire clip—not just a single moment.\n"
-            #     "Return the crop center for each image as `crop_center_x` and `crop_center_y`, both as floats between 0 and 1 (0.5 means centered). "
-            #     "Choose the center that keeps the most important content, such as faces or subjects, in frame. "
-            #     "Output your crop decisions in a list of structured outputs, where entries are in the same order as the images.\n"
-            # )
-
             crops = await asyncio.to_thread(
                 self.llm.LLM_request,
-                [*batch, prompt],
+                [*images, prompt],
                 {
                     "response_mime_type": "application/json",
                     "response_schema": list[CroppingResponse]
                 }
             )
-            print(crops)
-            for j, crop in enumerate(crops):
-                crop_instructions[idxs[j]] = crop
+            for crop in crops:
+                crops_for_frames[crop["frame_id"]] = crop
 
-        for i, clip in enumerate(processed_clips):
-            if crop_instructions[i] is None:
-                processed_clips[i] = clip.resized((desired_width, desired_height))
-            else:
-                w, h = clip.size
-                scale_w = desired_width / w
-                scale_h = desired_height / h
-                scale = max(scale_w, scale_h)
-                scaled_w, scaled_h = int(w * scale), int(h * scale)
-                scaled_clip = clip.resized((scaled_w, scaled_h))
-                cx, cy = crop_instructions[i]["crop_center_x"], crop_instructions[i]["crop_center_y"]
-                crop_x = int(cx * scaled_w - desired_width / 2)
-                crop_y = int(cy * scaled_h - desired_height / 2)
-                crop_x = max(0, min(crop_x, scaled_w - desired_width))
-                crop_y = max(0, min(crop_y, scaled_h - desired_height))
+        # 3. For each clip, segment and crop (MoviePy only)
+        new_processed_clips = []
+        for clip_idx, clip_obj in enumerate(processed_clips):
+            w, h = clip_obj.size
+            if self._is_aspect_ratio_similar(w, h, desired_width, desired_height, threshold=target_aspect_threshold):
+                new_processed_clips.append(clip_obj.resized((desired_width, desired_height)))
+                continue
 
-                processed_clips[i] = scaled_clip.cropped(
-                    x1=crop_x,
-                    y1=crop_y,
-                    x2=crop_x + desired_width,
-                    y2=crop_y + desired_height,
+            frames = frames_by_clip.get(clip_idx, [])
+            if not frames:
+                new_processed_clips.append(clip_obj.resized((desired_width, desired_height)))
+                continue
+
+            ts = np.array([f["t"] for f in frames])
+            cx = np.array([crops_for_frames[f["frame_id"]]["crop_center_x"] for f in frames])
+            cy = np.array([crops_for_frames[f["frame_id"]]["crop_center_y"] for f in frames])
+
+            # Scaling logic: fit clip so desired crop fits inside original
+            scale_w = desired_width / w
+            scale_h = desired_height / h
+            scale = max(scale_w, scale_h)
+            scaled_w, scaled_h = int(w * scale), int(h * scale)
+            print(f"[DEBUG] Clip {clip_idx}: Scaling to {scaled_w}x{scaled_h}")
+
+            upscaled_clip = clip_obj.resized((scaled_w, scaled_h))
+
+            # --- Updated segment logic ---
+            segments = self._segment_crop_keyframes(ts, cx, cy, self.crop_threshold, upscaled_clip.duration)
+            seg_clips = []
+            for seg in segments:
+                crop_px = int(max(0, min(seg["crop_x"] * scaled_w - desired_width / 2, scaled_w - desired_width)))
+                crop_py = int(max(0, min(seg["crop_y"] * scaled_h - desired_height / 2, scaled_h - desired_height)))
+                start_time = max(0, seg["start"])
+                end_time = min(seg["end"], upscaled_clip.duration)
+                seg_video = (
+                    upscaled_clip
+                    .subclipped(start_time, end_time)
+                    .cropped(x1=crop_px, y1=crop_py, width=desired_width, height=desired_height)
                 )
-        
-        return processed_clips
+                # Re-attach the correct audio segment, if available
+                if upscaled_clip.audio is not None:
+                    audio_subclip = upscaled_clip.audio.subclipped(start_time, end_time)
+                    seg_video = seg_video.with_audio(audio_subclip)
+                seg_clips.append(seg_video)
+            final_clip = concatenate_videoclips(seg_clips)
+
+            new_processed_clips.append(final_clip)
+
+
+        print(f"[INFO] DynamicCropping complete. Returning {len(new_processed_clips)} clips.")
+        return new_processed_clips
 
