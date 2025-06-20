@@ -2,18 +2,23 @@ import os
 import json
 import asyncio
 import subprocess
-from whisper import load_model as load_whisper
-from lib.utils.media import parse_time_to_seconds, seconds_to_hhmmss
+import whisperx
+from whisperx import align
 
+from lib.utils.media import parse_time_to_seconds, seconds_to_hhmmss
 from src.pipelines.common.schema import RefinedClipTimestamps
 
 class RefineClipTimestamps:
-    def __init__(self, llm, workdir, gcs_client, bucket_name):
+    def __init__(self, llm, workdir, gcs_client, bucket_name, device="cpu"):
         self.llm = llm
         self.workdir = workdir
         self.gcs_client = gcs_client
         self.bucket_name = bucket_name
-        self.whisper_model = load_whisper("base")
+        self.device = device
+        print(f"[INFO] Loading WhisperX transcription model on {device}...")
+        self.whisperx_model = whisperx.load_model("base", self.device, compute_type="float32")
+        self.align_model = None
+        self.align_metadata = None
         self.downloaded_files = {}
 
     def _download_if_needed(self, cloud_path):
@@ -41,14 +46,28 @@ class RefineClipTimestamps:
             "-c", "copy", "-avoid_negative_ts", "make_zero", "-y", out_path
         ]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return out_path, start_sec  # also return start_sec for aligning segments
+        return out_path, start_sec
 
-    def _transcribe_clip(self, video_path):
-        print(f"[INFO] Running Whisper on: {video_path}")
-        result = self.whisper_model.transcribe(video_path)
-        print(f"[DEBUG] Transcript head: {result['text'][:100]}...")
-        # result["segments"] is a list of dicts, each with 'start', 'end', 'text'
-        return result
+    def _transcribe_and_align_clip(self, video_path):
+        print(f"[INFO] Running WhisperX transcription on: {video_path}")
+        audio = whisperx.load_audio(video_path)
+        result = self.whisperx_model.transcribe(audio)
+        language = result["language"]
+
+        if self.align_model is None or self.align_metadata is None or self.align_metadata["language"] != language:
+            print(f"[INFO] Loading WhisperX align model for language: {language}")
+            self.align_model, self.align_metadata = whisperx.load_align_model(language_code=language, device=self.device)
+
+        print(f"[INFO] Running forced alignment on: {video_path}")
+        aligned_segments = align(
+            result["segments"],
+            self.align_model,
+            self.align_metadata,
+            audio,
+            device=self.device
+        )
+
+        return aligned_segments
 
     def _format_segments_with_global_times(self, segments, expanded_clip_start_sec):
         lines = []
@@ -60,16 +79,15 @@ class RefineClipTimestamps:
         return lines
 
     async def __call__(self, chosen_clips):
-        print("[TASK] Refining timestamps using Whisper + Gemini...")
+        print("[TASK] Refining timestamps using WhisperX (with alignment) + Gemini...")
 
-        # First, preprocess (Whisper) all clips up front
         all_clips_for_prompt = []
         for i, clip in enumerate(chosen_clips):
             print(f"[INFO] Processing clip ID: {clip['id']} | {clip['start']}–{clip['end']}")
             expanded_path, expanded_start_sec = self._export_expanded_clip(clip, i)
-            whisper_result = self._transcribe_clip(expanded_path)
+            whisperx_result = self._transcribe_and_align_clip(expanded_path)
             segments_text_lines = self._format_segments_with_global_times(
-                whisper_result["segments"], max(0, parse_time_to_seconds(clip["start"]) - 10)
+                whisperx_result["segments"], max(0, parse_time_to_seconds(clip["start"]) - 10)
             )
             all_clips_for_prompt.append({
                 "id": clip["id"],
@@ -77,11 +95,11 @@ class RefineClipTimestamps:
                 "original_start": clip["start"],
                 "original_end": clip["end"],
                 "narration": clip.get("narration", ""),
-                "segments": segments_text_lines
+                "segments": segments_text_lines,
             })
 
-        # Now refine in batches of 8
-        BATCH_SIZE = 6
+        # Refine in batches of 8
+        BATCH_SIZE = 8
         refined_by_id = {}
         for batch_idx in range(0, len(all_clips_for_prompt), BATCH_SIZE):
             batch = all_clips_for_prompt[batch_idx:batch_idx + BATCH_SIZE]

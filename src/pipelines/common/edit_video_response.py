@@ -9,12 +9,13 @@ import subprocess
 from lib.utils.media import parse_time_to_seconds
 from src.pipelines.common.dynamic_cropping import DynamicCropping
 import whisper
+import whisperx
 
 class EditVideoResponse:
     def __init__(
         self, 
         output_path="video_response.mp4", 
-        music_volume_multiplier=0.5, 
+        music_volume_multiplier=0.3, 
         gcs_client=None, 
         gcs_media_base_path=None, 
         bucket_name=None,
@@ -29,7 +30,6 @@ class EditVideoResponse:
         self.workdir = workdir or tempfile.mkdtemp()
         self.llm = llm
         self._downloaded_files = {}
-        self.whisper_model = whisper.load_model("base")  # You can choose 'tiny', 'base', 'small', 'medium', 'large'
 
     # ---------- File Download Helpers ----------
     def _download_media_file(self, file_name, cloud_storage_path):
@@ -174,16 +174,19 @@ class EditVideoResponse:
     
     def generate_subtitles_with_whisper(self, audio_path, srt_output_path):
         """
-        Transcribes the given audio file using Whisper and saves the subtitles in SRT format.
+        Transcribes the given audio file using WhisperX and saves the subtitles in SRT format.
         """
-        result = self.whisper_model.transcribe(audio_path)
-        segments = result.get("segments", [])
+        self.whisperx_model = whisperx.load_model("base", "cpu", compute_type="float32")
+        result = self.whisperx_model.transcribe(audio_path)
+        segments = result["segments"]  # Each segment has start, end, text
+
         with open(srt_output_path, "w", encoding="utf-8") as f:
-            for i, segment in enumerate(segments, start=1):
+            for i, segment in enumerate(segments, 1):
                 start = self._format_timestamp(segment["start"])
                 end = self._format_timestamp(segment["end"])
                 text = segment["text"].strip()
                 f.write(f"{i}\n{start} --> {end}\n{text}\n\n")
+
 
     def _format_timestamp(self, seconds):
         """
