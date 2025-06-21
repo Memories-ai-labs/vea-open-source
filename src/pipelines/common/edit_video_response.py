@@ -172,20 +172,80 @@ class EditVideoResponse:
             print("[INFO] No background music provided. Exporting narration only.")
         return final_video
     
-    def generate_subtitles_with_whisper(self, audio_path, srt_output_path):
+    def segment_subtitle_by_aspect(self, text, start, end, aspect_ratio):
         """
-        Transcribes the given audio file using WhisperX and saves the subtitles in SRT format.
+        Splits subtitle text into smaller segments depending on aspect ratio.
+        - Horizontal (aspect >= 1.0): 2 lines × 10 words = 20 words max
+        - Vertical   (aspect <  1.0): 2 lines × 5  words = 10 words max
+        Each split segment shares the time interval evenly.
         """
-        self.whisperx_model = whisperx.load_model("base", "cpu", compute_type="float32")
-        result = self.whisperx_model.transcribe(audio_path)
+        if aspect_ratio >= 1.0:
+            max_words = 24
+            max_words_per_line = 12
+        else:
+            max_words = 12
+            max_words_per_line = 6
+
+        words = text.strip().split()
+        n_words = len(words)
+        if n_words <= max_words:
+            # No split needed
+            return [(start, end, text, max_words_per_line)]
+
+        # Split words into chunks
+        segments = []
+        n_segments = int(np.ceil(n_words / max_words))
+        chunk_size = int(np.ceil(n_words / n_segments))
+        total_duration = end - start
+
+        for i in range(n_segments):
+            chunk_words = words[i*chunk_size : (i+1)*chunk_size]
+            chunk_text = ' '.join(chunk_words)
+            chunk_start = start + i * total_duration / n_segments
+            chunk_end = start + (i+1) * total_duration / n_segments
+            segments.append((chunk_start, chunk_end, chunk_text, max_words_per_line))
+        return segments
+
+    def wrap_lines(self, text, max_per_line):
+        """
+        Wraps a string into two lines with a given max words per line.
+        """
+        words = text.split()
+        if len(words) <= max_per_line:
+            return text
+        # Allow only 2 lines
+        line1 = ' '.join(words[:max_per_line])
+        line2 = ' '.join(words[max_per_line:])
+        return line1 + "\n" + line2
+
+    
+    def generate_subtitles_with_whisper(self, audio_path, srt_output_path, aspect_ratio=16/9):
+        """
+        Transcribes the given audio file using WhisperX and saves the subtitles in SRT format,
+        adaptively splitting long subtitles by aspect ratio and wrapping to two lines.
+        """
+        model = whisperx.load_model("base", "cpu", compute_type="float32")
+        result = model.transcribe(audio_path)
         segments = result["segments"]  # Each segment has start, end, text
 
+        all_entries = []
+        for segment in segments:
+            # Split or keep as needed
+            segs = self.segment_subtitle_by_aspect(
+                segment["text"],
+                segment["start"],
+                segment["end"],
+                aspect_ratio
+            )
+            all_entries.extend(segs)
+
         with open(srt_output_path, "w", encoding="utf-8") as f:
-            for i, segment in enumerate(segments, 1):
-                start = self._format_timestamp(segment["start"])
-                end = self._format_timestamp(segment["end"])
-                text = segment["text"].strip()
-                f.write(f"{i}\n{start} --> {end}\n{text}\n\n")
+            for idx, (start, end, text, max_per_line) in enumerate(all_entries, 1):
+                start_ts = self._format_timestamp(start)
+                end_ts = self._format_timestamp(end)
+                wrapped_text = self.wrap_lines(text, max_per_line)
+                f.write(f"{idx}\n{start_ts} --> {end_ts}\n{wrapped_text}\n\n")
+
 
 
     def _format_timestamp(self, seconds):
@@ -296,7 +356,8 @@ class EditVideoResponse:
                 final_video.audio.write_audiofile,
                 audio_export_path
             )
-            self.generate_subtitles_with_whisper(audio_export_path, tmp_srt_path)
+            self.generate_subtitles_with_whisper(audio_export_path, tmp_srt_path, aspect_ratio)
+
             try:
                 self.burn_subtitles(tmp_video_path, tmp_srt_path, self.output_path)
             except:
