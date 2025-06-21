@@ -54,7 +54,9 @@ class FlexibleResponsePipeline:
         file_descriptions = self.media_indexing_json["manifest"]
         return indexing_data, file_descriptions
 
-    async def run(self, user_prompt: str, video_response: bool, original_audio: bool, music: bool, narration_enabled: bool, aspect_ratio: float, subtitles: bool, snap_to_beat: bool):
+    async def run(self, user_prompt: str, video_response: bool, original_audio: bool, music: bool,
+                  narration_enabled: bool, aspect_ratio: float, subtitles: bool, snap_to_beat: bool,
+                  output_path=None):
         """
         Orchestrates the flexible response pipeline for a given media.
         Returns the output path(s) and metadata.
@@ -196,6 +198,8 @@ class FlexibleResponsePipeline:
 
             # Upload the result to GCS
             final_gcs_path = f"outputs/{self.media_base_name}/{run_id}/video_response.mp4"
+            if output_path:
+                final_gcs_path = output_path
             print(f"[INFO] Uploading final video to: {final_gcs_path}")
             self.cloud_storage_client.upload_files(BUCKET_NAME, final_output_path, final_gcs_path)
             print(f"[SUCCESS] Video response uploaded to GCS.")

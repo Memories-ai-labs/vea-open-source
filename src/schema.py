@@ -31,6 +31,7 @@ class FlexibleResponseRequest(BaseModel):
     subtitles:bool = True
     snap_to_beat: bool = False
 
+
 class FlexibleResponseResult(BaseModel):
     """
     Output from flexible response pipeline.
