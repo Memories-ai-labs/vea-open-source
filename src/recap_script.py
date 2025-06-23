@@ -96,7 +96,7 @@ async def index_and_recap_all():
                 print(f"\n[INFO] Recapping {filename}...")
                 fr_pipeline = FlexibleResponsePipeline(ep_path)
                 await fr_pipeline.run(
-                    user_prompt="I am a youtube channel that creates movie/tv recap videos. Give me an engaging, clear, approximately 5-minute recap of this episode for viewers who don't have time to watch it. Focus on major plot points, main characters, and key events.",
+                    user_prompt="I am a youtube channel that creates movie/tv recap videos. Give me an engaging, clear, approximately 5-minute recap of this episode for viewers who don't have time to watch it. Focus on major plot points, main characters, and key events. include a short introduction and conclusion with each recap. ",
                     video_response=True,
                     original_audio=True,
                     music=True,
