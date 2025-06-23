@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 # --- Initialize GCP OSS client ---
 gcp_oss = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
 
+FAILED_LOG_PATH = "failed_recaps.txt"
+
 def list_all(folder):
     items = gcp_oss.list_folder(BUCKET_NAME, f"{folder}/")
     image_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff", ".svg"}
@@ -29,6 +31,18 @@ def list_all(folder):
         if ext not in image_exts and not any(excluded in path for excluded in exclude_names):
             paths.append(path)
     return paths
+
+def load_failed_episodes():
+    failed = set()
+    if os.path.exists(FAILED_LOG_PATH):
+        with open(FAILED_LOG_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split("|")
+                # Store both filename and full path for extra safety
+                if len(parts) >= 2:
+                    failed.add(parts[0].strip())   # filename
+                    failed.add(parts[1].strip())   # gcs path
+    return failed
 
 async def file_exists(gcs_path):
     return gcp_oss.path_exists(BUCKET_NAME, gcs_path)
@@ -48,7 +62,7 @@ async def index_and_recap_all():
     print(f"[INFO] Total episodes to check: {len(round_robin_eps)}")
 
     failed_episodes = []
-    failed_log_path = "failed_recaps.txt"
+    failed_set = load_failed_episodes()
 
     with tqdm(total=len(round_robin_eps), desc="Recapping episodes", ncols=90) as pbar:
         for ep_path in round_robin_eps:
@@ -57,6 +71,13 @@ async def index_and_recap_all():
                 continue
             filename = os.path.basename(ep_path)
             file_no_ext = os.path.splitext(filename)[0]
+
+            # Skip if failed previously
+            if filename in failed_set or ep_path in failed_set:
+                pbar.set_postfix({"episode": filename, "status": "skipped (failed before)"})
+                pbar.update(1)
+                continue
+
             recap_gcs_path = f"outputs/{file_no_ext}/recap.mp4"
             try:
                 if await file_exists(recap_gcs_path):
@@ -91,14 +112,14 @@ async def index_and_recap_all():
                 print(f"[ERROR] Failed to recap {filename}: {e}")
                 failed_episodes.append(error_msg)
                 # Immediately write to disk
-                with open(failed_log_path, "a", encoding="utf-8") as f:
+                with open(FAILED_LOG_PATH, "a", encoding="utf-8") as f:
                     f.write(error_msg + "\n")
                 pbar.set_postfix({"episode": filename, "status": "FAILED"})
             finally:
                 pbar.update(1)
 
     if failed_episodes:
-        print(f"\n[INFO] {len(failed_episodes)} episodes failed. See: {failed_log_path}")
+        print(f"\n[INFO] {len(failed_episodes)} episodes failed. See: {FAILED_LOG_PATH}")
     else:
         print("\n[INFO] All episodes recapped successfully!")
 
