@@ -1,0 +1,1 @@
+ReadMe!.txt | tv_show/Supernatural.S01-S15.COMPLETE.SERIES.1080p.Bluray.x265-HiQVE/ReadMe!.txt | IsADirectoryError: [Errno 21] Is a directory: '/tmp/tmpwn4qi50d/'
