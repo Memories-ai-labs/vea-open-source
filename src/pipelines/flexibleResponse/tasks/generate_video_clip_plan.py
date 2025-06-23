@@ -102,6 +102,18 @@ class GenerateVideoClipPlan:
                 }
             )
             final_clips = cleaned_clips
+            # Deduplicate clips that have the same narration sentence
+            narration_seen = set()
+            narration_deduped = []
+            for clip in final_clips:
+                narration = clip.get("narration", "").strip().lower()
+                if narration and narration not in narration_seen:
+                    narration_seen.add(narration)
+                    narration_deduped.append(clip)
+                elif not narration:
+                    # If narration is empty, allow through (for non-narration clips)
+                    narration_deduped.append(clip)
+            final_clips = narration_deduped
         else:
             # No narration: select clips based on user prompt alone.
             prompt = (
@@ -142,4 +154,5 @@ class GenerateVideoClipPlan:
 
         # Deduplicate by (file_name, start, end)
         final_clips = self.deduplicate_clips(final_clips)
+
         return final_clips
