@@ -1,25 +1,23 @@
 import os
-import json
 import asyncio
 import subprocess
-import whisperx
-from whisperx import align
-
-from lib.utils.media import parse_time_to_seconds, seconds_to_hhmmss
 from src.pipelines.common.schema import RefinedClipTimestamps
+from lib.utils.media import parse_time_to_seconds, seconds_to_hhmmss
+from src.pipelines.common.generate_subtitles import GenerateSubtitles
 
 class RefineClipTimestamps:
-    def __init__(self, llm, workdir, gcs_client, bucket_name, device="cpu"):
+    def __init__(self, llm, workdir, gcs_client, bucket_name):
         self.llm = llm
         self.workdir = workdir
         self.gcs_client = gcs_client
         self.bucket_name = bucket_name
-        self.device = device
-        print(f"[INFO] Loading WhisperX transcription model on {device}...")
-        self.whisperx_model = whisperx.load_model("base", self.device, compute_type="float32")
-        self.align_model = None
-        self.align_metadata = None
         self.downloaded_files = {}
+
+        # Initialize ElevenLabs subtitle generator
+        self.subtitle_generator = GenerateSubtitles(
+            output_dir=os.path.join(self.workdir, "subs"),
+            model_id="scribe_v1",
+        )
 
     def _download_if_needed(self, cloud_path):
         filename = os.path.basename(cloud_path)
@@ -48,59 +46,37 @@ class RefineClipTimestamps:
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return out_path, start_sec
 
-    def _transcribe_and_align_clip(self, video_path):
-        print(f"[INFO] Running WhisperX transcription on: {video_path}")
-        audio = whisperx.load_audio(video_path)
-        result = self.whisperx_model.transcribe(audio)
-        language = result["language"]
-
-        if self.align_model is None or self.align_metadata is None or self.align_metadata["language"] != language:
-            print(f"[INFO] Loading WhisperX align model for language: {language}")
-            self.align_model, self.align_metadata = whisperx.load_align_model(language_code=language, device=self.device)
-
-        print(f"[INFO] Running forced alignment on: {video_path}")
-        aligned_segments = align(
-            result["segments"],
-            self.align_model,
-            self.align_metadata,
-            audio,
-            device=self.device
-        )
-
-        return aligned_segments
-
-    def _format_segments_with_global_times(self, segments, expanded_clip_start_sec):
-        lines = []
-        for seg in segments:
-            global_start = expanded_clip_start_sec + seg['start']
-            global_end = expanded_clip_start_sec + seg['end']
-            line = f"{seconds_to_hhmmss(global_start)} - {seconds_to_hhmmss(global_end)}: {seg['text'].strip()}"
-            lines.append(line)
-        return lines
-
     async def __call__(self, chosen_clips):
-        print("[TASK] Refining timestamps using WhisperX (with alignment) + Gemini...")
+        print("[TASK] Refining timestamps using ElevenLabs + Gemini...")
 
         all_clips_for_prompt = []
         for i, clip in enumerate(chosen_clips):
             print(f"[INFO] Processing clip ID: {clip['id']} | {clip['start']}–{clip['end']}")
             expanded_path, expanded_start_sec = self._export_expanded_clip(clip, i)
-            whisperx_result = self._transcribe_and_align_clip(expanded_path)
-            segments_text_lines = self._format_segments_with_global_times(
-                whisperx_result["segments"], max(0, parse_time_to_seconds(clip["start"]) - 10)
+
+            # Run ElevenLabs transcription and apply global offset
+            transcription_result = self.subtitle_generator(
+                audio_path=expanded_path,
+                global_start_time=expanded_start_sec
             )
+            words = transcription_result.get("words", [])
+
+            # Get pretty-printed text for Gemini
+            pretty_transcript = self.subtitle_generator.pretty_print_words(words)
+
             all_clips_for_prompt.append({
                 "id": clip["id"],
                 "file_name": clip["file_name"],
                 "original_start": clip["start"],
                 "original_end": clip["end"],
                 "narration": clip.get("narration", ""),
-                "segments": segments_text_lines,
+                "pretty_transcript": pretty_transcript
             })
 
-        # Refine in batches of 8
-        BATCH_SIZE = 8
+        # --- Batch Gemini refinement ---
+        BATCH_SIZE = 1
         refined_by_id = {}
+
         for batch_idx in range(0, len(all_clips_for_prompt), BATCH_SIZE):
             batch = all_clips_for_prompt[batch_idx:batch_idx + BATCH_SIZE]
 
@@ -110,24 +86,54 @@ class RefineClipTimestamps:
                     f"Clip ID {clip_info['id']} (file: {clip_info['file_name']})\n"
                     f"Original range: {clip_info['original_start']} - {clip_info['original_end']}\n"
                     f"Narration: {clip_info['narration']}\n"
-                    f"Transcript segments:\n" +
-                    "\n".join(clip_info['segments'])
+                    f"Transcript word timings:\n" +
+                    clip_info["pretty_transcript"]
                 )
+
             prompt = (
-                "You are refining the start and end times of selected video clips so that they do not cut off spoken dialogue or important sentences, and so the content is well-aligned with the provided narration. "
-                "For each clip, use the transcript segments with their global timecodes to make sure you do not start or end a clip in the middle of someone's sentence or important action. "
-                "Make sure your cut points are natural breaks in people's speech, this is the most important! "
-                "Try to match the narration, but always avoid cutting off spoken audio.\n\n"
-                "For each clip, return a JSON object with these fields:\n"
-                "- `id`: integer\n"
-                "- `refined_start`: adjusted global start time (HH:MM:SS)\n"
-                "- `refined_end`: adjusted global end time (HH:MM:SS)\n"
-                "The new refined range must be within the padded range you see above (never before or after the transcript's earliest/latest segment).\n\n"
-                "Here are the clips and their transcript segments:\n\n" +
-                "\n\n".join(prompt_lines)
+                f"""
+                \n\n
+                You are refining the start and end times of selected video clips to ensure they align naturally with spoken sentences.
+                ### How to Read the Transcript Timings Below:
+                - The transcript for each clip is formatted as a **word-level pretty print list**.
+                - Each line represents either a word or a pause (spacing) from the speech-to-text output.
+                #### Example line format:
+                [Word Text]        start: HH:MM:SS,mmm, end: HH:MM:SS,mmm, type: word    , speaker: None  
+                [Spacing]          start: HH:MM:SS,mmm, end: HH:MM:SS,mmm, type: spacing , speaker: None  
+                - Lines with `type: word` represent spoken words, with exact start and end timestamps.
+                - Lines with `type: spacing` represent silent gaps between words, also with start and end times.
+                ---
+                ### Your Refinement Rules:
+                1. **Start Time Rule:**  
+                For each clip, set the `refined_start` **at the timestamp from a word's `start` time that occurs before the beginning of a sentence**, leaving **~0.5 seconds of buffer** before the sentence starts if space allows within the original clip range.  
+                If no buffer is available, then start exactly at the first word's `start` timestamp.
+                ---
+                2. **End Time Rule:**  
+                Set the `refined_end` **at the timestamp from a word's `end` time that falls after the end of the final sentence in the clip**, leaving **~0.5 seconds of buffer** after the sentence if space allows.  
+                If no room for buffer, end exactly after the final word of the sentence.
+                ---
+                3. **Identifying Sentences:**  
+                - Use the `spacing` lines as clues for sentence breaks:  
+                - **Short gaps (under ~500 ms)** mean words are part of the same sentence.  
+                - **Longer gaps (more than ~500 ms)** likely indicate the end of a sentence.
+                - **Do not start or end a clip in the middle of a spoken sentence.**  
+                - **It's acceptable to include multiple full sentences in one clip.**
+                ---
+                4. **Narration Reference:**  
+                Use the `narration` field as a hint for what content the clip is meant to cover.
+                ---
+                "### Clip Details:\n\n"
+                {"".join(prompt_lines)}
+                ### Output format:  
+                For each clip, output a JSON object like:  
+                "id": "clip_id",  
+                "refined_start": "HH:MM:SS",  
+                "refined_end": "HH:MM:SS"  
+                \n\n\n
+                """
             )
 
-            print(f"[LLM] Sending batch {batch_idx // BATCH_SIZE + 1} to Gemini for refinement...")
+            print(f"[LLM] Sending batch {batch_idx // BATCH_SIZE + 1} to Gemini...")
             refined = await asyncio.to_thread(
                 self.llm.LLM_request,
                 [prompt],
@@ -136,15 +142,16 @@ class RefineClipTimestamps:
                     "response_schema": list[RefinedClipTimestamps]
                 }
             )
-            print(f"[LLM] Gemini batch {batch_idx // BATCH_SIZE + 1} refinement complete.")
+            print(f"[LLM] Gemini batch {batch_idx // BATCH_SIZE + 1} complete.")
 
-            # Accept both dicts and models
+            # Parse results
             if refined and isinstance(refined[0], dict):
                 refined = [RefinedClipTimestamps(**c) for c in refined]
+
             for ref in refined:
                 refined_by_id[ref.id] = ref
 
-        # Apply refinements
+        # --- Apply refinements back to clips ---
         for clip in chosen_clips:
             ref = refined_by_id.get(clip["id"])
             if ref:

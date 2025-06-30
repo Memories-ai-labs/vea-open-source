@@ -1,59 +1,138 @@
 import math
+import os
+import json
+import asyncio
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
-from src.config import CREDENTIAL_PATH
-from src.config import BUCKET_NAME
-
+from src.config import CREDENTIAL_PATH, BUCKET_NAME
 from src.pipelines.flexibleResponse.flexibleResponsePipeline import FlexibleResponsePipeline
-from lib.utils.media import seconds_to_hhmmss, get_video_duration  # you may already have get_video_duration
-
+from lib.utils.media import seconds_to_hhmmss, get_video_duration
+from src.pipelines.movieToShort.schema import ShortsPlan
 class MovieToShortsPipeline:
     """
-    Generates all 1-minute shorts from a movie, each covering the best moments from sequential 5-minute windows.
+    Generates a set of 1-minute shorts for a movie, using a global plan and strict index prompts.
     """
-    def __init__(self, blob_path: str, short_duration: int = 60, window_size: int = 900, aspect_ratio: float = 1):
+    def __init__(self, blob_path: str, short_duration: int = 60, aspect_ratio: float = 9/16):
         self.blob_path = blob_path
-        self.short_duration = short_duration  # Output short length in seconds (1 min)
-        self.window_size = window_size        # Movie window per short (5 min)
+        self.short_duration = short_duration  # Output short length in seconds
         self.aspect_ratio = aspect_ratio
         self.flexible_pipeline = FlexibleResponsePipeline(blob_path)
         self.gcs_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
 
     async def run(self):
-        # Download the movie to get total duration
         print("[SHORTS] Getting movie duration...")
         local_path = await self._download_movie()
         total_duration = get_video_duration(local_path)
         print(f"[SHORTS] Total duration: {total_duration:.2f} sec")
 
+        movie_name = os.path.splitext(os.path.basename(self.blob_path))[0]
+
+        # ---- STEP 1: Generate a plan for the shorts ----
+        plan_prompt = (
+            "I am an online creator making 1-minute addictive shorts edits of the movie. Your task is to divide the movie into sections of digestible story points, "
+            "each suitable for a 1-minute short (typically 5-15 min of story, depending on the movie pace). "
+            "Plan out the shorts so the viewing experience is cohesive and entertaining, the story is easy to follow, and the series of shorts saves time compared to watching the movie. "
+            "For each short, describe what should be covered and provide a rough in/out timestamp (HH:MM:SS) if possible. "
+            "Return a numbered list, one short per line, like: '1: [description and suggested timestamps]'. "
+            "IMPORTANT: This is a text-only request—do not suggest specific clips or evidence, just plan the content for each short. "
+            f"Movie duration: {int(total_duration//60)} min {int(total_duration%60)} sec."
+        )
+        print("[SHORTS] Generating plan for shorts (text-only response)...")
+        plan_result = await self.flexible_pipeline.run(
+            user_prompt=plan_prompt,
+            video_response=False,
+            original_audio=True,
+            music=False,
+            narration_enabled=False,
+            aspect_ratio=self.aspect_ratio,
+            subtitles=False,
+            snap_to_beat=False,
+        )
+        shorts_plan_text = plan_result.get("response", "")
+
+        print("\n[SHORTS PLAN]\n", shorts_plan_text)
+        if not shorts_plan_text.strip():
+            raise RuntimeError("Failed to generate a shorts plan!")
+
+        # ---- STEP 1B: Clean up and structure plan for parsing ----
+        format_prompt = (
+            "Format the following shorts plan into a JSON list. For each short, extract:\n"
+            "- short_index: integer (the number at the start of the line)\n"
+            "- description: the full sentence(s) describing what to cover in this short\n"
+            "- start: the first timestamp (HH:MM:SS) mentioned for this short, or null if none\n"
+            "- end: the second timestamp (HH:MM:SS) mentioned for this short, or null if none\n"
+            "If only one timestamp is present, treat it as 'start' and leave 'end' as null. If no timestamps, set both to null. "
+            "Respond ONLY with a valid JSON list, no explanation or comments.\n"
+            "Shorts plan:\n"
+            "-------------------\n"
+            f"{shorts_plan_text}\n"
+            "-------------------"
+        )
+
+        shorts_plan_json = await asyncio.to_thread(
+            self.flexible_pipeline.llm.LLM_request,
+            [format_prompt],
+            {
+                "response_mime_type": "application/json",
+                "response_schema": list[ShortsPlan]
+            }
+        )
+
+  
+        print("\n[SHORTS PLAN STRUCTURED JSON]\n", json.dumps(shorts_plan_json, indent=2))
+        lines = shorts_plan_json
+        n_shorts = len(lines)
+        print(f"[SHORTS] Targeting {n_shorts} shorts (based on plan).")
+
+        # ---- STEP 2: Generate each short using the plan ----
         shorts = []
-        n_shorts = math.ceil(total_duration / self.window_size)
-        for i in range(n_shorts):
-            window_start = i * self.window_size
-            window_end = min(window_start + self.window_size, total_duration)
-            prompt = (
-                f"I am creating a short video from a movie. Select the most important and interesting moments from {seconds_to_hhmmss(window_start)} "
-                f"to {seconds_to_hhmmss(window_end)} of the original movie. pick clips and dialogue that effectively tell the story, and do not cut off speech. "
-                f"The goal is to create a highly engaging, approximately {self.short_duration}-second short using original video and audio for people to become interested in the movie and binge watch the shorts."
-                f"Do not overlap in your clip selections, and avoid duplication. Edit together the best dialogue or visuals from this window into a {self.short_duration}-second short. each short should be somewhat "
-                "self contained as a story that delivers satisfaction. Avoid recap or summary—just deliver the most exciting original content for short-form consumption."
+        for i, plan_entry in enumerate(lines):
+            print(f"\n[SHORTS] Generating short #{i+1}")
+            gcs_output_path = f"outputs/movie2short/{movie_name}/{i}.mp4"
+            plan_desc = plan_entry.get("description", "")
+            plan_start = plan_entry.get("start")
+            plan_end = plan_entry.get("end")
+
+            per_short_prompt = (
+                f"You are to create short #{i+1} for a movie-to-shorts series. "
+                "Below is the global plan for all shorts:\n"
+                "-------------------\n"
+                f"{shorts_plan_text}\n"
+                "-------------------\n"
+                f"Short description for this short: {plan_desc}\n"
             )
-            print(f"[SHORTS] Generating short #{i+1} for window {seconds_to_hhmmss(window_start)} - {seconds_to_hhmmss(window_end)}")
+            if plan_start or plan_end:
+                per_short_prompt += f"Suggested timestamps for this short: start={plan_start}, end={plan_end}\n"
+            per_short_prompt += (
+                f"Edit together original clips to compactly tell the story of this segment in about {self.short_duration} seconds. "
+                "Prioritize scenes with dialogue, especially dialogue that is engaging, clear, and moves the story forward. "
+                "If no timestamps are provided, choose the most fitting segment. Deliver a satisfying, highly engaging short with subtitles. "
+                "Do not recap previous shorts, focus only on this segment."
+                "IMPORTANT: the short should be no longer than 1 minute."
+            )
+
+            # try:
             result = await self.flexible_pipeline.run(
-                user_prompt=prompt,
+                user_prompt=per_short_prompt,
                 video_response=True,
                 original_audio=True,
                 music=False,
                 narration_enabled=False,
                 aspect_ratio=self.aspect_ratio,
-                subtitles=True
+                subtitles=True,
+                snap_to_beat=False,
+                output_path=gcs_output_path
             )
             shorts.append({
                 "short_index": i,
-                "window_start": seconds_to_hhmmss(window_start),
-                "window_end": seconds_to_hhmmss(window_end),
-                "response": result
+                "gcs_output_path": gcs_output_path,
+                "plan_entry": plan_entry,
+                "response": result,
             })
+            # except:
+            #     pass
+
+        print(f"[SHORTS] Generation complete! {len(shorts)} shorts created.")
         return shorts
 
     async def _download_movie(self):
@@ -61,7 +140,6 @@ class MovieToShortsPipeline:
         Downloads the movie file from GCS to a temp location if not already present, returns local path.
         """
         import tempfile
-        import os
         fname = os.path.basename(self.blob_path)
         tmp_dir = tempfile.gettempdir()
         local_path = os.path.join(tmp_dir, fname)
@@ -71,3 +149,7 @@ class MovieToShortsPipeline:
         else:
             print(f"[SHORTS] Using cached {local_path}")
         return local_path
+
+# Usage:
+# pipeline = MovieToShortsPipeline("your/gcs/path/to/movie.mp4")
+# asyncio.run(pipeline.run())

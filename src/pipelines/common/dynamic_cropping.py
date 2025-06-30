@@ -10,7 +10,7 @@ from src.pipelines.common.schema import CroppingResponse
 
 
 class DynamicCropping:
-    def __init__(self, llm, workdir=None, batch_size=5, crop_threshold=0.1):
+    def __init__(self, llm, workdir=None, batch_size=5, crop_threshold=0.05):
         self.llm = llm
         self.workdir = workdir or tempfile.mkdtemp()
         self.batch_size = batch_size
