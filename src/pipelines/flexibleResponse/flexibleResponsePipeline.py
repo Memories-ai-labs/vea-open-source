@@ -95,30 +95,38 @@ class FlexibleResponsePipeline:
                 }
 
             elif response_type == "text_and_evidence":
-                print("[INFO] Retrieving evidence clips from Gemini...")
-                evidence_task = EvidenceRetrieval(self.llm)
-                selected_clips = await evidence_task(
-                    initial_response=initial_response,
-                    indexing_data=indexing_data,
-                    file_descriptions=file_descriptions
-                )
-                print(f"[INFO] {len(selected_clips)} evidence clips selected.")
+                try: 
+                    print("[INFO] Retrieving evidence clips from Gemini...")
+                    evidence_task = EvidenceRetrieval(self.llm)
+                    selected_clips = await evidence_task(
+                        initial_response=initial_response,
+                        indexing_data=indexing_data,
+                        file_descriptions=file_descriptions
+                    )
+                    print(f"[INFO] {len(selected_clips)} evidence clips selected.")
 
-                print("[INFO] Extracting and uploading evidence clips...")
-                clipper = ClipExtractor(
-                    workdir=self.workdir,
-                    gcs_client=self.cloud_storage_client,
-                    bucket_name=BUCKET_NAME
-                )
-                gcs_clip_paths = clipper.extract_and_upload_clips(selected_clips, run_id)
-                print(f"[INFO] Uploaded {len(gcs_clip_paths)} evidence clips to GCS.")
+                    print("[INFO] Extracting and uploading evidence clips...")
+                    clipper = ClipExtractor(
+                        workdir=self.workdir,
+                        gcs_client=self.cloud_storage_client,
+                        bucket_name=BUCKET_NAME
+                    )
+                    gcs_clip_paths = clipper.extract_and_upload_clips(selected_clips, run_id)
+                    print(f"[INFO] Uploaded {len(gcs_clip_paths)} evidence clips to GCS.")
 
-                return {
-                    "response": initial_response,
-                    "response_type": "text_and_evidence",
-                    "evidence_paths": gcs_clip_paths,
-                    "run_id": run_id
-                }
+                    return {
+                        "response": initial_response,
+                        "response_type": "text_and_evidence",
+                        "evidence_paths": gcs_clip_paths,
+                        "run_id": run_id
+                    }
+                except:
+                    return {
+                        "response": initial_response,
+                        "response_type": "text_only",
+                        "evidence_paths": [],
+                        "run_id": run_id
+                    }
         else:
             # --- Video Response Path ---
             if narration_enabled:
@@ -147,7 +155,7 @@ class FlexibleResponsePipeline:
                 narration_enabled=narration_enabled
             )
             print(f"[INFO] Video clip plan generated. {len(selected_narrated_clips)} clips planned.")
-
+            print(selected_narrated_clips)
             # refine trim timestamps for clips
             refiner = RefineClipTimestamps(self.llm, self.workdir, self.cloud_storage_client, BUCKET_NAME)
             selected_narrated_clips = await refiner(selected_narrated_clips)

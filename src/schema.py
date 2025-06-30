@@ -30,6 +30,7 @@ class FlexibleResponseRequest(BaseModel):
     aspect_ratio: float = 0
     subtitles:bool = True
     snap_to_beat: bool = False
+    output_path: str = None
 
 
 class FlexibleResponseResult(BaseModel):

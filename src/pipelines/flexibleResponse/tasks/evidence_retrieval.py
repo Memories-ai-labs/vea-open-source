@@ -35,7 +35,7 @@ class EvidenceRetrieval:
             f"{context_description}\n\n"
             "Below are the contents of the files (each section is for a particular file and index type):\n"
             f"{content_dump}\n\n"
-            "Your task is to select relevant scenes that could serve as **visual evidence** for points made in the response.\n"
+            "Your task is to select relevant scenes that could serve as **visual evidence** for points made in the response. you may choose up to 5 clips as evidence, so choose the most important ones. \n"
             "For each evidence clip you select, always include:\n"
             "- `file_name`: the name of the source video file for this clip (e.g., mymovie.mp4, travel1.mov, etc)\n"
             "- `start`: timestamp (HH:MM:SS)\n"

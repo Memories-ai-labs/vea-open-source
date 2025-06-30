@@ -8,6 +8,7 @@ import numpy as np
 import subprocess
 from lib.utils.media import parse_time_to_seconds
 from src.pipelines.common.dynamic_cropping import DynamicCropping
+from src.pipelines.common.generate_subtitles import GenerateSubtitles
 import whisper
 import whisperx
 
@@ -356,12 +357,21 @@ class EditVideoResponse:
                 final_video.audio.write_audiofile,
                 audio_export_path
             )
-            self.generate_subtitles_with_whisper(audio_export_path, tmp_srt_path, aspect_ratio)
+            # Generate subtitles using ElevenLabs
+            subtitle_generator = GenerateSubtitles(output_dir=caption_dir)
+            transcription_result = subtitle_generator(audio_export_path)
 
-            try:
-                self.burn_subtitles(tmp_video_path, tmp_srt_path, self.output_path)
-            except:
-                self.output_path = tmp_video_path
+            words = transcription_result.get("words", [])
+            if words:
+                srt_entries = subtitle_generator.words_to_srt_entries(words, max_words=12)
+                subtitle_generator.write_srt(srt_entries, tmp_srt_path)
+
+                # Burn subtitles
+                try:
+                    self.burn_subtitles(tmp_video_path, tmp_srt_path, self.output_path)
+                except Exception as e:
+                    print(f"[WARN] Failed to burn subtitles: {e}")
+                    self.output_path = tmp_video_path
         else:
             await asyncio.to_thread(
                 final_video.write_videofile,
