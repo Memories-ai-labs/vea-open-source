@@ -330,7 +330,7 @@ class EditVideoResponse:
         print(f"[INFO] Target output resolution: {export_width}x{export_height}")
 
         # --- Cropping ---
-        dc = DynamicCropping(self.llm, self.workdir, batch_size=8)
+        dc = DynamicCropping(self.llm, self.workdir)
         processed_clips = await dc(export_width, export_height, processed_clips)
 
         if background_music_path and snap_to_beat:

@@ -94,43 +94,42 @@ class MovieToShortsPipeline:
             plan_end = plan_entry.get("end")
 
             per_short_prompt = (
+                "you are a professional video editor. Your task is to edit the movie into compact and digestible shorts that are fun and addictive, but also tells the story of the movie. "
                 f"You are to create short #{i+1} for a movie-to-shorts series. "
-                "Below is the global plan for all shorts:\n"
-                "-------------------\n"
-                f"{shorts_plan_text}\n"
                 "-------------------\n"
                 f"Short description for this short: {plan_desc}\n"
             )
             if plan_start or plan_end:
-                per_short_prompt += f"Suggested timestamps for this short: start={plan_start}, end={plan_end}\n"
+                per_short_prompt += f"Suggested movie timestamps for this short: start={plan_start}, end={plan_end}\n"
             per_short_prompt += (
-                f"Edit together original clips to compactly tell the story of this segment in about {self.short_duration} seconds. "
+                f"You should create a 1-minute short (60 seconds) that is highly engaging and entertaining, choosing the most poignant clips to best tell the story.  "
                 "Prioritize scenes with dialogue, especially dialogue that is engaging, clear, and moves the story forward. "
                 "If no timestamps are provided, choose the most fitting segment. Deliver a satisfying, highly engaging short with subtitles. "
                 "Do not recap previous shorts, focus only on this segment."
-                "IMPORTANT: the short should be no longer than 1 minute."
+                "IMPORTANT: the short should be approximately 1 minute long, no longer than 1.5 minutes and no shorter than 40 seconds. "
+                "dont choose timestamps that makes clips so short that its jarring to watch. maintain a fluid and natural viewing experience\n"
             )
 
-            # try:
-            result = await self.flexible_pipeline.run(
-                user_prompt=per_short_prompt,
-                video_response=True,
-                original_audio=True,
-                music=False,
-                narration_enabled=False,
-                aspect_ratio=self.aspect_ratio,
-                subtitles=True,
-                snap_to_beat=False,
-                output_path=gcs_output_path
-            )
-            shorts.append({
-                "short_index": i,
-                "gcs_output_path": gcs_output_path,
-                "plan_entry": plan_entry,
-                "response": result,
-            })
-            # except:
-            #     pass
+            try:
+                result = await self.flexible_pipeline.run(
+                    user_prompt=per_short_prompt,
+                    video_response=True,
+                    original_audio=True,
+                    music=False,
+                    narration_enabled=False,
+                    aspect_ratio=self.aspect_ratio,
+                    subtitles=True,
+                    snap_to_beat=False,
+                    output_path=gcs_output_path
+                )
+                shorts.append({
+                    "short_index": i,
+                    "gcs_output_path": gcs_output_path,
+                    "plan_entry": plan_entry,
+                    "response": result,
+                })
+            except:
+                pass
 
         print(f"[SHORTS] Generation complete! {len(shorts)} shorts created.")
         return shorts

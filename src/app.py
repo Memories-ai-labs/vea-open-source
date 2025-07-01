@@ -87,14 +87,15 @@ async def flexible_respond(request: FlexibleResponseRequest):
 
 @app.post(f"{API_PREFIX}/movie_to_shorts", response_model=ShortsResponse)
 async def movie_to_shorts(request: ShortsRequest):
-        """
-        Generate all 1-minute shorts for a movie using the MovieToShortsPipeline.
-        """
-    # try:
+    """
+    Generate all 1-minute shorts for a movie using the MovieToShortsPipeline.
+    """
+    try:
         pipeline = MovieToShortsPipeline(request.blob_path)
         shorts = await pipeline.run()
         return ShortsResponse(shorts=shorts)
-    # except Except
+    except:
+        pass
     
     
 if __name__ == "__main__":
