@@ -1,20 +1,19 @@
 import os
 import numpy as np
 import tempfile
-import asyncio
 from pathlib import Path
 from PIL import Image
 from moviepy import VideoFileClip, concatenate_videoclips
-from scipy.interpolate import interp1d
 from src.pipelines.common.schema import CroppingResponse
-
+from lib.utils.media import parse_time_to_seconds
+import asyncio
 
 class DynamicCropping:
-    def __init__(self, llm, workdir=None, batch_size=5, crop_threshold=0.05):
+    def __init__(self, llm, workdir=None, crop_threshold=0.05, max_concurrency=6):
         self.llm = llm
         self.workdir = workdir or tempfile.mkdtemp()
-        self.batch_size = batch_size
         self.crop_threshold = crop_threshold
+        self.semaphore = asyncio.Semaphore(max_concurrency)
 
     def _aspect_ratio(self, w, h):
         return float(w) / float(h)
@@ -40,7 +39,6 @@ class DynamicCropping:
         return frames
 
     def _segment_crop_keyframes(self, times, cx, cy, threshold, input_duration):
-        # Segments logic, but last segment always ends at input_duration
         segments = []
         n = len(times)
         seg_start = 0
@@ -57,16 +55,39 @@ class DynamicCropping:
                     "crop_y": avg_cy
                 })
                 seg_start = i
-        # Add last segment: make sure it ends exactly at the input clip duration
         avg_cx = float(np.mean(cx[seg_start:]))
         avg_cy = float(np.mean(cy[seg_start:]))
         segments.append({
             "start": float(times[seg_start]),
-            "end": float(input_duration),  # <-- make sure!
+            "end": float(input_duration),
             "crop_x": avg_cx,
             "crop_y": avg_cy
         })
         return segments
+
+    async def _get_crop_for_frame(self, frame, desired_width, desired_height):
+        async with self.semaphore:
+            img_path = Path(frame["img_path"])
+            frame_id = frame["frame_id"]
+            prompt = (
+                f"You are a professional video editor. Your task is to find the best crop center for this single frame to fit a target aspect ratio of {desired_width}:{desired_height}.\n"
+                "Return a JSON object with:\n"
+                "- `frame_id`: string (must match the frame_id below)\n"
+                "- `crop_center_x`: float (between 0 and 1)\n"
+                "- `crop_center_y`: float (between 0 and 1)\n\n"
+                f"Frame ID: '{frame_id}'\n"
+                "Only output the JSON object for this frame. Do not include any other text."
+            )
+
+            response = await asyncio.to_thread(
+                self.llm.LLM_request,
+                [img_path, prompt],
+                {
+                    "response_mime_type": "application/json",
+                    "response_schema": CroppingResponse
+                }
+            )
+            return frame_id, response
 
     async def __call__(
         self,
@@ -76,44 +97,29 @@ class DynamicCropping:
         target_aspect_threshold=0.06
     ):
         print(f"[INFO] Starting DynamicCropping for {len(processed_clips)} clips. Target size: {desired_width}x{desired_height}")
-        all_frames = []
+        crops_for_frames = {}
         frames_by_clip = {}
 
-        # 1. Extract frames for all clips, keep mapping
-        for i, clip_obj in enumerate(processed_clips):
+        # 1. Extract frames for all clips and prepare per-frame crop tasks
+        crop_tasks = []
+        for clip_idx, clip_obj in enumerate(processed_clips):
             w, h = clip_obj.size
             if self._is_aspect_ratio_similar(w, h, desired_width, desired_height, threshold=target_aspect_threshold):
                 continue
-            frames = self._extract_frames(clip_obj, i)
-            all_frames.extend([dict(frame, clip_idx=i) for frame in frames])
-            frames_by_clip.setdefault(i, []).extend(frames)
 
-        # 2. Batch Gemini predictions (batches of N)
-        crops_for_frames = {}
-        for i in range(0, len(all_frames), self.batch_size):
-            batch = all_frames[i:i+self.batch_size]
-            images = [Path(frame['img_path']) for frame in batch]
-            mapping = "\n".join([f"Image {j+1}: frame_id '{frame['frame_id']}'" for j, frame in enumerate(batch)])
-            prompt = (
-                f"You are an expert video editor tasked with cropping video frames to a target aspect ratio of {desired_width}:{desired_height}.\n"
-                "You will be given a sequence of images. Each image is mapped to a frame_id as follows:\n"
-                f"{mapping}\n"
-                "For each image, return your crop center (x and y, between 0 and 1) for the most important content for the full scene.\n"
-                "Output a JSON list of objects, each with: frame_id (string), crop_center_x (float), crop_center_y (float). Use the provided frame_id for each result.\n"
-                "Entries must be in the same order as input images."
-            )
-            crops = await asyncio.to_thread(
-                self.llm.LLM_request,
-                [*images, prompt],
-                {
-                    "response_mime_type": "application/json",
-                    "response_schema": list[CroppingResponse]
-                }
-            )
-            for crop in crops:
-                crops_for_frames[crop["frame_id"]] = crop
+            frames = self._extract_frames(clip_obj, clip_idx)
+            frames_by_clip[clip_idx] = frames
 
-        # 3. For each clip, segment and crop (MoviePy only)
+            for frame in frames:
+                task = self._get_crop_for_frame(frame, desired_width, desired_height)
+                crop_tasks.append(task)
+
+        # 2. Run all Gemini crop calls (up to 6 concurrent)
+        crop_results = await asyncio.gather(*crop_tasks)
+        for frame_id, response in crop_results:
+            crops_for_frames[frame_id] = response
+
+        # 3. Apply crops and rebuild final clips
         new_processed_clips = []
         for clip_idx, clip_obj in enumerate(processed_clips):
             w, h = clip_obj.size
@@ -130,7 +136,6 @@ class DynamicCropping:
             cx = np.array([crops_for_frames[f["frame_id"]]["crop_center_x"] for f in frames])
             cy = np.array([crops_for_frames[f["frame_id"]]["crop_center_y"] for f in frames])
 
-            # Scaling logic: fit clip so desired crop fits inside original
             scale_w = desired_width / w
             scale_h = desired_height / h
             scale = max(scale_w, scale_h)
@@ -138,9 +143,8 @@ class DynamicCropping:
             print(f"[DEBUG] Clip {clip_idx}: Scaling to {scaled_w}x{scaled_h}")
 
             upscaled_clip = clip_obj.resized((scaled_w, scaled_h))
-
-            # --- Updated segment logic ---
             segments = self._segment_crop_keyframes(ts, cx, cy, self.crop_threshold, upscaled_clip.duration)
+
             seg_clips = []
             for seg in segments:
                 crop_px = int(max(0, min(seg["crop_x"] * scaled_w - desired_width / 2, scaled_w - desired_width)))
@@ -152,16 +156,13 @@ class DynamicCropping:
                     .subclipped(start_time, end_time)
                     .cropped(x1=crop_px, y1=crop_py, width=desired_width, height=desired_height)
                 )
-                # Re-attach the correct audio segment, if available
                 if upscaled_clip.audio is not None:
                     audio_subclip = upscaled_clip.audio.subclipped(start_time, end_time)
                     seg_video = seg_video.with_audio(audio_subclip)
                 seg_clips.append(seg_video)
+
             final_clip = concatenate_videoclips(seg_clips)
-
             new_processed_clips.append(final_clip)
-
 
         print(f"[INFO] DynamicCropping complete. Returning {len(new_processed_clips)} clips.")
         return new_processed_clips
-

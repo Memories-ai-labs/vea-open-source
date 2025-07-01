@@ -1,6 +1,7 @@
 import os
-import asyncio
 import subprocess
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from src.pipelines.common.schema import RefinedClipTimestamps
 from lib.utils.media import parse_time_to_seconds, seconds_to_hhmmss
 from src.pipelines.common.generate_subtitles import GenerateSubtitles
@@ -12,8 +13,10 @@ class RefineClipTimestamps:
         self.gcs_client = gcs_client
         self.bucket_name = bucket_name
         self.downloaded_files = {}
+        self.semaphore = asyncio.Semaphore(6)  # Max 6 concurrent threads
+        self.executor = ThreadPoolExecutor(max_workers=6)
 
-        # Initialize ElevenLabs subtitle generator
+        # Init ElevenLabs subtitle generator
         self.subtitle_generator = GenerateSubtitles(
             output_dir=os.path.join(self.workdir, "subs"),
             model_id="scribe_v1",
@@ -22,7 +25,6 @@ class RefineClipTimestamps:
     def _download_if_needed(self, cloud_path):
         filename = os.path.basename(cloud_path)
         if filename in self.downloaded_files:
-            print(f"[DEBUG] Reusing cached: {filename}")
             return self.downloaded_files[filename]
         local_path = os.path.join(self.workdir, filename)
         print(f"[INFO] Downloading {cloud_path} → {local_path}")
@@ -30,13 +32,13 @@ class RefineClipTimestamps:
         self.downloaded_files[filename] = local_path
         return local_path
 
-    def _export_expanded_clip(self, clip, index):
+    def _export_expanded_clip(self, clip):
         start_sec = max(0, parse_time_to_seconds(clip["start"]) - 10)
         end_sec = parse_time_to_seconds(clip["end"]) + 10
         duration = end_sec - start_sec
 
         movie_path = self._download_if_needed(clip["cloud_storage_path"])
-        out_path = os.path.join(self.workdir, f"expanded_clip_{index}.mp4")
+        out_path = os.path.join(self.workdir, f"expanded_clip_{clip['id']}.mp4")
 
         print(f"[INFO] Exporting clip {clip['id']} with padding: {seconds_to_hhmmss(start_sec)}–{seconds_to_hhmmss(end_sec)}")
         cmd = [
@@ -46,119 +48,78 @@ class RefineClipTimestamps:
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return out_path, start_sec
 
-    async def __call__(self, chosen_clips):
-        print("[TASK] Refining timestamps using ElevenLabs + Gemini...")
+    async def _process_single_clip(self, clip):
+        async with self.semaphore:
+            print(f"[TASK] Refining timestamps for clip ID: {clip['id']} | {clip['start']}–{clip['end']}")
 
-        all_clips_for_prompt = []
-        for i, clip in enumerate(chosen_clips):
-            print(f"[INFO] Processing clip ID: {clip['id']} | {clip['start']}–{clip['end']}")
-            expanded_path, expanded_start_sec = self._export_expanded_clip(clip, i)
+            expanded_path, expanded_start_sec = await asyncio.to_thread(self._export_expanded_clip, clip)
 
-            # Run ElevenLabs transcription and apply global offset
-            transcription_result = self.subtitle_generator(
+            transcription_result = await asyncio.to_thread(
+                self.subtitle_generator,
                 audio_path=expanded_path,
                 global_start_time=expanded_start_sec
             )
             words = transcription_result.get("words", [])
+            if not words:
+                print(f"[WARN] No transcription words for clip ID: {clip['id']}")
+                return clip
 
-            # Get pretty-printed text for Gemini
             pretty_transcript = self.subtitle_generator.pretty_print_words(words)
 
-            all_clips_for_prompt.append({
-                "id": clip["id"],
-                "file_name": clip["file_name"],
-                "original_start": clip["start"],
-                "original_end": clip["end"],
-                "narration": clip.get("narration", ""),
-                "pretty_transcript": pretty_transcript
-            })
-
-        # --- Batch Gemini refinement ---
-        BATCH_SIZE = 1
-        refined_by_id = {}
-
-        for batch_idx in range(0, len(all_clips_for_prompt), BATCH_SIZE):
-            batch = all_clips_for_prompt[batch_idx:batch_idx + BATCH_SIZE]
-
-            prompt_lines = []
-            for clip_info in batch:
-                prompt_lines.append(
-                    f"Clip ID {clip_info['id']} (file: {clip_info['file_name']})\n"
-                    f"Original range: {clip_info['original_start']} - {clip_info['original_end']}\n"
-                    f"Narration: {clip_info['narration']}\n"
-                    f"Transcript word timings:\n" +
-                    clip_info["pretty_transcript"]
-                )
-
             prompt = (
-                f"""
-                \n\n
-                You are refining the start and end times of selected video clips to ensure they align naturally with spoken sentences.
-                ### How to Read the Transcript Timings Below:
-                - The transcript for each clip is formatted as a **word-level pretty print list**.
-                - Each line represents either a word or a pause (spacing) from the speech-to-text output.
-                #### Example line format:
-                [Word Text]        start: HH:MM:SS,mmm, end: HH:MM:SS,mmm, type: word    , speaker: None  
-                [Spacing]          start: HH:MM:SS,mmm, end: HH:MM:SS,mmm, type: spacing , speaker: None  
-                - Lines with `type: word` represent spoken words, with exact start and end timestamps.
-                - Lines with `type: spacing` represent silent gaps between words, also with start and end times.
-                ---
-                ### Your Refinement Rules:
-                1. **Start Time Rule:**  
-                For each clip, set the `refined_start` **at the timestamp from a word's `start` time that occurs before the beginning of a sentence**, leaving **~0.5 seconds of buffer** before the sentence starts if space allows within the original clip range.  
-                If no buffer is available, then start exactly at the first word's `start` timestamp.
-                ---
-                2. **End Time Rule:**  
-                Set the `refined_end` **at the timestamp from a word's `end` time that falls after the end of the final sentence in the clip**, leaving **~0.5 seconds of buffer** after the sentence if space allows.  
-                If no room for buffer, end exactly after the final word of the sentence.
-                ---
-                3. **Identifying Sentences:**  
-                - Use the `spacing` lines as clues for sentence breaks:  
-                - **Short gaps (under ~500 ms)** mean words are part of the same sentence.  
-                - **Longer gaps (more than ~500 ms)** likely indicate the end of a sentence.
-                - **Do not start or end a clip in the middle of a spoken sentence.**  
-                - **It's acceptable to include multiple full sentences in one clip.**
-                ---
-                4. **Narration Reference:**  
-                Use the `narration` field as a hint for what content the clip is meant to cover.
-                ---
-                "### Clip Details:\n\n"
-                {"".join(prompt_lines)}
-                ### Output format:  
-                For each clip, output a JSON object like:  
-                "id": "clip_id",  
-                "refined_start": "HH:MM:SS",  
-                "refined_end": "HH:MM:SS"  
-                \n\n\n
-                """
+                "You are refining the start and end times of a single video clip so it aligns naturally with spoken sentences.\n\n"
+                "Transcript format explanation:\n"
+                "- Each line represents a word or a pause (spacing).\n"
+                "- Lines with `type: word` are spoken words with exact start and end timestamps.\n"
+                "- Lines with `type: spacing` represent silent gaps between words, also with start/end times.\n\n"
+                "Refinement Rules:\n"
+                "- avoid starting the clip in the middle of a sentence or ending the clip in the middle of a sentence. cutting off speech is jarring\n"
+                "- leave some buffer time before the first word and after the last word if space allows\n"
+                "- try to keep full sentences if possible, avoid super short clips, and make sure the refined clip isnt too much shorter or longer than the original\n"
+                "- if the clip does not contain any spoken words, you can leave the timestamps unchanged\n"
+                "- try to respect the natural pace and flow of the spoken content\n\n"
+                
+                "Output JSON format:\n"
+                "{\n"
+                "  \"id\": integer,\n"
+                "  \"refined_start\": \"HH:MM:SS\",\n"
+                "  \"refined_end\": \"HH:MM:SS\"\n"
+                "}\n\n"
+                f"Clip ID: {clip['id']}\n"
+                f"File: {clip['file_name']}\n"
+                f"Original range: {clip['start']} - {clip['end']}\n"
+                f"Narration: {clip.get('narration', '')}\n\n"
+                "Transcript word timings:\n"
+                f"{pretty_transcript}"
             )
 
-            print(f"[LLM] Sending batch {batch_idx // BATCH_SIZE + 1} to Gemini...")
             refined = await asyncio.to_thread(
                 self.llm.LLM_request,
                 [prompt],
                 {
                     "response_mime_type": "application/json",
-                    "response_schema": list[RefinedClipTimestamps]
+                    "response_schema": RefinedClipTimestamps
                 }
             )
-            print(f"[LLM] Gemini batch {batch_idx // BATCH_SIZE + 1} complete.")
 
-            # Parse results
-            if refined and isinstance(refined[0], dict):
-                refined = [RefinedClipTimestamps(**c) for c in refined]
+            print(f"[UPDATE] Clip {clip['id']}: {clip['start']}–{clip['end']} → {refined['refined_start']}–{refined['refined_end']}")
+            clip["start"] = refined["refined_start"]
+            clip["end"] = refined["refined_end"]
+            return clip
 
-            for ref in refined:
-                refined_by_id[ref.id] = ref
+    async def __call__(self, clips):
+        tasks = [self._process_single_clip(clip) for clip in clips]
+        refined_clips = await asyncio.gather(*tasks)
 
-        # --- Apply refinements back to clips ---
-        for clip in chosen_clips:
-            ref = refined_by_id.get(clip["id"])
-            if ref:
-                print(f"[UPDATE] Clip {clip['id']}: {clip['start']}–{clip['end']} → {ref.refined_start}–{ref.refined_end}")
-                clip["start"] = ref.refined_start
-                clip["end"] = ref.refined_end
-            else:
-                print(f"[WARN] No refined timestamps returned for clip ID: {clip['id']}")
+        # --- Ensure no overlaps between adjacent clips ---
+        refined_clips.sort(key=lambda c: parse_time_to_seconds(c["start"]))
+        for i in range(1, len(refined_clips)):
+            prev_end = parse_time_to_seconds(refined_clips[i - 1]["end"])
+            current_start = parse_time_to_seconds(refined_clips[i]["start"])
+            if current_start < prev_end:
+                # Push start forward by 0.1s after previous end
+                new_start_sec = prev_end + 0.1
+                refined_clips[i]["start"] = seconds_to_hhmmss(new_start_sec)
+                print(f"[FIX] Adjusted clip {refined_clips[i]['id']} start to avoid overlap: {refined_clips[i]['start']}")
 
-        return chosen_clips
+        return refined_clips
