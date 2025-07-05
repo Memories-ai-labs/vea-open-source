@@ -30,9 +30,10 @@ class MovieToShortsPipeline:
         # ---- STEP 1: Generate a plan for the shorts ----
         plan_prompt = (
             "I am an online creator making 1-minute addictive shorts edits of the movie. Your task is to divide the movie into sections of digestible story points, "
-            "each suitable for a 1-minute short (typically 5-15 min of story, depending on the movie pace). "
+            "each suitable for a 1-minute short (typically 5-10 min of story, depending on the movie pace). "
             "Plan out the shorts so the viewing experience is cohesive and entertaining, the story is easy to follow, and the series of shorts saves time compared to watching the movie. "
             "For each short, describe what should be covered and provide a rough in/out timestamp (HH:MM:SS) if possible. "
+            "For each short, also inlude 4 or 5 keypoints of events or visuals that should be included. these are points that are essential for understanding the story and the next short. "
             "Return a numbered list, one short per line, like: '1: [description and suggested timestamps]'. "
             "IMPORTANT: This is a text-only request—do not suggest specific clips or evidence, just plan the content for each short. "
             f"Movie duration: {int(total_duration//60)} min {int(total_duration%60)} sec."
@@ -58,7 +59,7 @@ class MovieToShortsPipeline:
         format_prompt = (
             "Format the following shorts plan into a JSON list. For each short, extract:\n"
             "- short_index: integer (the number at the start of the line)\n"
-            "- description: the full sentence(s) describing what to cover in this short\n"
+            "- description: the full sentence(s) describing what to cover in this short, including the point forms of key events and visuals mentioned\n"
             "- start: the first timestamp (HH:MM:SS) mentioned for this short, or null if none\n"
             "- end: the second timestamp (HH:MM:SS) mentioned for this short, or null if none\n"
             "If only one timestamp is present, treat it as 'start' and leave 'end' as null. If no timestamps, set both to null. "
@@ -103,10 +104,13 @@ class MovieToShortsPipeline:
                 per_short_prompt += f"Suggested movie timestamps for this short: start={plan_start}, end={plan_end}\n"
             per_short_prompt += (
                 f"You should create a 1-minute short (60 seconds) that is highly engaging and entertaining, choosing the most poignant clips to best tell the story.  "
+                "you should try to choose clips that are consecutive in the original movie, as this makes the short natural to watch, but you are also allowed to jump "
+                "forward and choose clips later in the segment to tell the story. essentially, avoid large spaces between clips and prefer to have clips clumped together temporally. "
                 "Prioritize scenes with dialogue, especially dialogue that is engaging, clear, and moves the story forward. "
                 "If no timestamps are provided, choose the most fitting segment. Deliver a satisfying, highly engaging short with subtitles. "
                 "Do not recap previous shorts, focus only on this segment."
                 "IMPORTANT: the short should be approximately 1 minute long, no longer than 1.5 minutes and no shorter than 40 seconds. "
+                "do not miss important visuals or dialogue that will make it difficult for the viewer to understand the story and the next short."
                 "dont choose timestamps that makes clips so short that its jarring to watch. maintain a fluid and natural viewing experience\n"
             )
 

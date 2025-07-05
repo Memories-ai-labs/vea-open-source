@@ -37,7 +37,7 @@ class RefineClipTimestamps:
         end_sec = parse_time_to_seconds(clip["end"]) + 10
         duration = end_sec - start_sec
 
-        movie_path = self._download_if_needed(clip["cloud_storage_path"])
+        movie_path = self.downloaded_files[os.path.basename(clip["cloud_storage_path"])]
         out_path = os.path.join(self.workdir, f"expanded_clip_{clip['id']}.mp4")
 
         print(f"[INFO] Exporting clip {clip['id']} with padding: {seconds_to_hhmmss(start_sec)}–{seconds_to_hhmmss(end_sec)}")
@@ -78,7 +78,6 @@ class RefineClipTimestamps:
                 "- try to keep full sentences if possible, avoid super short clips, and make sure the refined clip isnt too much shorter or longer than the original\n"
                 "- if the clip does not contain any spoken words, you can leave the timestamps unchanged\n"
                 "- try to respect the natural pace and flow of the spoken content\n\n"
-                
                 "Output JSON format:\n"
                 "{\n"
                 "  \"id\": integer,\n"
@@ -108,6 +107,12 @@ class RefineClipTimestamps:
             return clip
 
     async def __call__(self, clips):
+        # Download each movie file once before threading
+        all_cloud_paths = {clip["cloud_storage_path"] for clip in clips}
+        for path in all_cloud_paths:
+            self._download_if_needed(path)
+
+        # Run clip refinements in parallel (max 6 threads)
         tasks = [self._process_single_clip(clip) for clip in clips]
         refined_clips = await asyncio.gather(*tasks)
 
@@ -117,7 +122,6 @@ class RefineClipTimestamps:
             prev_end = parse_time_to_seconds(refined_clips[i - 1]["end"])
             current_start = parse_time_to_seconds(refined_clips[i]["start"])
             if current_start < prev_end:
-                # Push start forward by 0.1s after previous end
                 new_start_sec = prev_end + 0.1
                 refined_clips[i]["start"] = seconds_to_hhmmss(new_start_sec)
                 print(f"[FIX] Adjusted clip {refined_clips[i]['id']} start to avoid overlap: {refined_clips[i]['start']}")

@@ -47,3 +47,10 @@ class ShortsRequest(BaseModel):
 
 class ShortsResponse(BaseModel):
     shorts: List[dict]
+
+class ScreenplayRequest(BaseModel):
+    blob_path: str
+
+class ScreenplayResponse(BaseModel):
+    message: str
+    output_path: str
