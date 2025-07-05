@@ -291,3 +291,37 @@ def extract_images_ffmpeg(
     print("[INFO] Running:", " ".join(cmd))
     subprocess.run(cmd, check=True)
     print("[INFO] Extraction complete.")
+
+
+def download_and_cache_video(gcs_client, bucket_name, cloud_path, local_dir):
+    """
+    Downloads a video file from GCS if not already cached locally.
+    Returns the local path.
+    """
+    filename = os.path.basename(cloud_path)
+    local_path = os.path.join(local_dir, filename)
+
+    if os.path.exists(local_path):
+        print(f"[CACHE] Video already downloaded: {local_path}")
+        return local_path
+
+    print(f"[DOWNLOAD] Downloading video from GCS: {cloud_path} → {local_path}")
+    gcs_client.download_files(bucket_name, cloud_path, local_path)
+    return local_path
+
+def extract_video_segment(full_video_path, output_dir, start_hhmmss, end_hhmmss, output_name="segment.mp4"):
+    """
+    Extracts a segment from a video using ffmpeg and saves it in output_dir.
+    Returns the path to the segment.
+    """
+    start_sec = parse_time_to_seconds(start_hhmmss)
+    end_sec = parse_time_to_seconds(end_hhmmss)
+    duration = max(0.1, end_sec - start_sec)
+
+    output_path = os.path.join(output_dir, output_name)
+    cmd = [
+        "ffmpeg", "-ss", str(start_sec), "-i", full_video_path, "-t", str(duration),
+        "-c", "copy", "-avoid_negative_ts", "make_zero", "-y", output_path
+    ]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return output_path

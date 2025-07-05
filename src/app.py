@@ -14,7 +14,9 @@ from src.schema import (
     FlexibleResponseRequest,
     FlexibleResponseResult,
     ShortsRequest,
-    ShortsResponse
+    ShortsResponse,
+    ScreenplayRequest,
+    ScreenplayResponse
 )
 
 from src.config import (
@@ -27,6 +29,8 @@ from src.config import (
 from src.pipelines.videoComprehension.comprehensionPipeline import ComprehensionPipeline
 from src.pipelines.flexibleResponse.flexibleResponsePipeline import FlexibleResponsePipeline
 from src.pipelines.movieToShort.movie_to_short_pipeline import MovieToShortsPipeline
+from src.pipelines.screenplay.screenplay_pipeline import ScreenplayPipeline
+
 
 # --- Initialize logging ---
 logging.basicConfig(level=logging.INFO)
@@ -95,7 +99,24 @@ async def movie_to_shorts(request: ShortsRequest):
         shorts = await pipeline.run()
         return ShortsResponse(shorts=shorts)
     except:
-        pass
+        logger.error(f"Error generating shorts for {request.blob_path}")
+        raise HTTPException(status_code=500, detail="Failed to generate shorts.")
+        
+@app.post(f"{API_PREFIX}/screenplay", response_model=ScreenplayResponse)
+async def generate_screenplay(request: ScreenplayRequest):
+    try:
+        logger.info(f"Starting screenplay generation for: {request.blob_path}")
+        pipeline = ScreenplayPipeline(request.blob_path)
+        gcs_output_path = await pipeline.run()
+
+        return ScreenplayResponse(
+            message=f"Screenplay generated for: {request.blob_path}",
+            output_path=gcs_output_path
+        )
+    except Exception as e:
+        logger.error(f"Screenplay generation failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate screenplay.")
+
     
     
 if __name__ == "__main__":

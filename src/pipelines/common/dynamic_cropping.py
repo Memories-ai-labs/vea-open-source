@@ -18,14 +18,14 @@ class DynamicCropping:
     def _aspect_ratio(self, w, h):
         return float(w) / float(h)
 
-    def _is_aspect_ratio_similar(self, w1, h1, w2, h2, threshold=0.06):
+    def _is_aspect_ratio_similar(self, w1, h1, w2, h2, threshold=0.1):
         r1 = self._aspect_ratio(w1, h1)
         r2 = self._aspect_ratio(w2, h2)
         similar = abs(r1 - r2) / r2 < threshold
         print(f"[DEBUG] Checking aspect similarity: {w1}x{h1} vs {w2}x{h2} -> {similar}")
         return similar
 
-    def _extract_frames(self, clip_obj, clip_idx, every_n_seconds=2):
+    def _extract_frames(self, clip_obj, clip_idx, every_n_seconds=3):
         frames = []
         duration = clip_obj.duration
         times = [min(t, duration - 0.01) for t in np.arange(0, duration, every_n_seconds)]
@@ -71,6 +71,7 @@ class DynamicCropping:
             frame_id = frame["frame_id"]
             prompt = (
                 f"You are a professional video editor. Your task is to find the best crop center for this single frame to fit a target aspect ratio of {desired_width}:{desired_height}.\n"
+                "You should prioritize faces and people, especially main characters or the person speaking in the frame. if there are no people are many, focus on the most important part of the frame.\n"
                 "Return a JSON object with:\n"
                 "- `frame_id`: string (must match the frame_id below)\n"
                 "- `crop_center_x`: float (between 0 and 1)\n"
