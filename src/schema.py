@@ -2,6 +2,7 @@
 
 from pydantic import BaseModel
 from typing import List, Optional
+from src.pipelines.qualityAnalysis.schema import QualityAssessmentResult
 
 class MovieFile(BaseModel):
     """
@@ -54,3 +55,12 @@ class ScreenplayRequest(BaseModel):
 class ScreenplayResponse(BaseModel):
     message: str
     output_path: str
+
+class QualityAssessmentRequest(BaseModel):
+    blob_path: str
+    ground_truth: str
+    user_prompt: str
+    
+class QualityAssessmentResponse(BaseModel):
+    message: str
+    result: QualityAssessmentResult

@@ -41,7 +41,8 @@ class ComprehensionPipeline:
         self.cloud_storage_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
         self.llm = GeminiGenaiManager()
 
-        if start_fresh:
+        self.start_fresh = start_fresh
+        if self.start_fresh:
             print(f"[INFO] start_fresh enabled. Deleting: {self.cloud_storage_indexing_dir}")
             self.cloud_storage_client.delete_folder(BUCKET_NAME, self.cloud_storage_indexing_dir)
 
@@ -68,6 +69,12 @@ class ComprehensionPipeline:
         print("[INFO] Preprocessing long segments...")
         long_segments = await preprocess_long_video(
             local_media_path, long_segments_dir, interval_seconds=15 * 60, fps=1, crf=30)
+        # Store GCS URIs for LLM input
+        # for segment in long_segments:
+        #     gcs_path = f"{self.cloud_storage_indexing_dir}segments/{segment["segment_number"]}"
+        #     self.cloud_storage_client.upload_files(BUCKET_NAME, segment["path"], gcs_path)
+        #     segment["gcs_uri"] = f"gs://{BUCKET_NAME}/{gcs_path}"
+
         print(f"[INFO] Generated {len(long_segments)} long segments.")
 
         print("[INFO] Preprocessing short segments...")
