@@ -41,7 +41,8 @@ def downsample_video(input_path: str, output_path: str, crf: int = 30, target_he
         "-c:v", "libx264",
         "-crf", str(crf),
         "-preset", "ultrafast",
-        "-c:a", "copy",
+         "-c:a", "aac",
+        "-b:a", "128k",  #compress audio
         # "-strict -2",
         output_path
     ]

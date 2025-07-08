@@ -27,34 +27,61 @@ class GeminiGenaiManager:
         else:
             print("Warning: config.json not found. API keys not loaded.")
             
-    def _convert_path_to_blob_part(self, file_path: Path) -> types.Part:
-        """
-        Converts a file at the given path into a Gemini-compatible Part containing an inline Blob.
+    # def _convert_path_to_blob_part(self, file_path: Path) -> types.Part:
+    #     """
+    #     Converts a file at the given path into a Gemini-compatible Part containing an inline Blob.
 
-        Args:
-            file_path (Path): Path to the media file.
+    #     Args:
+    #         file_path (Path): Path to the media file.
 
-        Returns:
-            types.Part: A Gemini Part containing the file blob with correct mime_type.
+    #     Returns:
+    #         types.Part: A Gemini Part containing the file blob with correct mime_type.
 
-        Raises:
-            FileNotFoundError: If the file does not exist.
-            ValueError: If MIME type cannot be determined or file is too large.
-        """
-        if not file_path.exists() or not file_path.is_file():
-            raise FileNotFoundError(f"File not found: {file_path}")
+    #     Raises:
+    #         FileNotFoundError: If the file does not exist.
+    #         ValueError: If MIME type cannot be determined or file is too large.
+    #     """
+    #     if not file_path.exists() or not file_path.is_file():
+    #         raise FileNotFoundError(f"File not found: {file_path}")
 
-        file_size = file_path.stat().st_size
+    #     file_size = file_path.stat().st_size
     
-        mime_type, _ = mimetypes.guess_type(file_path)
-        if mime_type is None:
-            raise ValueError(f"Could not determine MIME type for: {file_path}")
+    #     mime_type, _ = mimetypes.guess_type(file_path)
+    #     if mime_type is None:
+    #         raise ValueError(f"Could not determine MIME type for: {file_path}")
 
-        file_bytes = file_path.read_bytes()
+    #     file_bytes = file_path.read_bytes()
 
-        return types.Part(
-            inline_data=types.Blob(data=file_bytes, mime_type=mime_type)
-        )
+    #     return types.Part(
+    #         inline_data=types.Blob(data=file_bytes, mime_type=mime_type)
+    #     )
+
+    def _convert_input_to_part(self, item) -> types.Part:
+        """
+        Converts various input types (Path, GCS URI string, or prompt text) into Gemini-compatible Part.
+        """
+        from google.genai import types
+
+        # If Path (local file)
+        if isinstance(item, Path):
+            if not item.exists() or not item.is_file():
+                raise FileNotFoundError(f"File not found: {item}")
+
+            mime_type, _ = mimetypes.guess_type(item)
+            if mime_type is None:
+                raise ValueError(f"Could not determine MIME type for: {item}")
+
+            file_bytes = item.read_bytes()
+            return types.Part(inline_data=types.Blob(data=file_bytes, mime_type=mime_type))
+
+        # If GCS URI or public HTTPS URI
+        elif isinstance(item, str) and (
+            item.startswith("gs://") or item.startswith("https://storage.googleapis.com/")
+        ):
+            return types.Part(file_data=types.FileData(file_uri=item))
+
+        # Otherwise treat as text
+        return types.Part(text=str(item))
 
     def LLM_request(self, prompt_contents, config=None, retry_delay=60, max_retries=3):
         """
@@ -63,10 +90,12 @@ class GeminiGenaiManager:
         """
         parts = []
         for item in prompt_contents:
-            if isinstance(item, Path):
-                parts.append(self._convert_path_to_blob_part(item))
-            else:
-                parts.append(types.Part(text=item))
+            parts.append(self._convert_input_to_part(item))
+
+            # if isinstance(item, Path):
+            #     parts.append(self._convert_path_to_blob_part(item))
+            # else:
+            #     parts.append(types.Part(text=item))
         attempt = 0
         while attempt < max_retries:
             response = None

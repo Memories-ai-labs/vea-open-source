@@ -16,7 +16,9 @@ from src.schema import (
     ShortsRequest,
     ShortsResponse,
     ScreenplayRequest,
-    ScreenplayResponse
+    ScreenplayResponse,
+    QualityAssessmentRequest,
+    QualityAssessmentResponse,
 )
 
 from src.config import (
@@ -30,6 +32,7 @@ from src.pipelines.videoComprehension.comprehensionPipeline import Comprehension
 from src.pipelines.flexibleResponse.flexibleResponsePipeline import FlexibleResponsePipeline
 from src.pipelines.movieToShort.movie_to_short_pipeline import MovieToShortsPipeline
 from src.pipelines.screenplay.screenplay_pipeline import ScreenplayPipeline
+from src.pipelines.qualityAnalysis.quality_assesment_pipeline import QualityAssessmentPipeline
 
 
 # --- Initialize logging ---
@@ -117,7 +120,27 @@ async def generate_screenplay(request: ScreenplayRequest):
         logger.error(f"Screenplay generation failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate screenplay.")
 
-    
+@app.post(f"{API_PREFIX}/quality_assessment", response_model=QualityAssessmentResponse)
+async def assess_quality(request: QualityAssessmentRequest):
+    """
+    Assess the quality of a generated video using LLM.
+    """
+    try:
+        logger.info(f"Starting quality assessment for: {request.blob_path}")
+        pipeline = QualityAssessmentPipeline(
+            cloud_storage_video_path=request.blob_path,
+            ground_truth_text=request.ground_truth,
+            user_prompt=request.user_prompt,
+        )
+        result = await pipeline.run()
+
+        return QualityAssessmentResponse(
+            message=f"Quality assessment completed for: {request.blob_path}",
+            result=result,
+        )
+    except Exception as e:
+        logger.error(f"Quality assessment failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to assess video quality.")
     
 if __name__ == "__main__":
     import uvicorn

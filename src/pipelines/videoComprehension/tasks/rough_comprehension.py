@@ -12,7 +12,9 @@ class RoughComprehension:
         compact_context = ""
 
         for seg in long_segments:
+            # path = Path(seg["gcs_uri"])
             path = Path(seg["path"])
+
             print(f"[INFO] Processing segment {segment_num}: {path.name}")
 
             if segment_num == 1:
