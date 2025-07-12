@@ -183,11 +183,14 @@ async def preprocess_short_video(
         "parent_path": str(input_path)
     }
 
-def parse_time_to_seconds(t: str) -> int:
-    """
-    Converts a timestamp string (HH:MM:SS or MM:SS) to total seconds.
-    """
-    parts = list(map(int, t.split(":")))
+def parse_time_to_seconds(t: str) -> float:
+    # Accepts HH:MM:SS or HH:MM:SS,mmm
+    if ',' in t:
+        hms, ms = t.split(',')
+        ms = int(ms)
+    else:
+        hms, ms = t, 0
+    parts = list(map(int, hms.split(':')))
     if len(parts) == 3:
         h, m, s = parts
     elif len(parts) == 2:
@@ -195,13 +198,14 @@ def parse_time_to_seconds(t: str) -> int:
         m, s = parts
     else:
         raise ValueError(f"Invalid timestamp format: {t}")
-    return h * 3600 + m * 60 + s
+    return h * 3600 + m * 60 + s + ms / 1000.0
 
-def seconds_to_hhmmss(seconds: int) -> str:
-    """
-    Converts seconds to HH:MM:SS format.
-    """
-    return str(timedelta(seconds=int(seconds)))
+def seconds_to_hhmmss(seconds) -> str:
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int(round((seconds - int(seconds)) * 1000))
+    return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
 def clean_stale_tempdirs():
         print("Cleaning stale temp directories...")

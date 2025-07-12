@@ -81,29 +81,29 @@ async def index_longform(request: IndexRequest):
     
 @app.post(f"{API_PREFIX}/flexible_respond", response_model=FlexibleResponseResult)
 async def flexible_respond(request: FlexibleResponseRequest):
-    try:
+    # try:
         logger.info(f"Flexible response for: {request.blob_path} with prompt: {request.prompt}")
         pipeline = FlexibleResponsePipeline(request.blob_path)
         response = await pipeline.run(request.prompt, request.video_response, request.narration, request.music, request.narration, request.aspect_ratio, request.subtitles, request.snap_to_beat, request.output_path)
 
         return response
-    except Exception as e:
-        logger.error(f"Flexible response error: {e}")
-        raise HTTPException(status_code=500, detail="Flexible response failed.")
+    # except Exception as e:
+    #     logger.error(f"Flexible response error: {e}")
+    #     raise HTTPException(status_code=500, detail="Flexible response failed.")
     
 
 @app.post(f"{API_PREFIX}/movie_to_shorts", response_model=ShortsResponse)
 async def movie_to_shorts(request: ShortsRequest):
-    """
-    Generate all 1-minute shorts for a movie using the MovieToShortsPipeline.
-    """
-    try:
+    # """
+    # Generate all 1-minute shorts for a movie using the MovieToShortsPipeline.
+    # """
+    # try:
         pipeline = MovieToShortsPipeline(request.blob_path)
         shorts = await pipeline.run()
         return ShortsResponse(shorts=shorts)
-    except:
-        logger.error(f"Error generating shorts for {request.blob_path}")
-        raise HTTPException(status_code=500, detail="Failed to generate shorts.")
+    # except:
+    #     logger.error(f"Error generating shorts for {request.blob_path}")
+    #     raise HTTPException(status_code=500, detail="Failed to generate shorts.")
         
 @app.post(f"{API_PREFIX}/screenplay", response_model=ScreenplayResponse)
 async def generate_screenplay(request: ScreenplayRequest):
