@@ -1,169 +1,262 @@
 import os
+import cv2
 import numpy as np
-import tempfile
-from pathlib import Path
 from PIL import Image
-from moviepy import VideoFileClip, concatenate_videoclips
-from src.pipelines.common.schema import CroppingResponse
-from lib.utils.media import parse_time_to_seconds
+from pathlib import Path
+from moviepy import VideoFileClip, ImageSequenceClip
+import tempfile
 import asyncio
+from ultralytics import YOLO
+from src.pipelines.common.schema import CropModeResponse, GeneralCropCenterResponse
+import uuid
+
 
 class DynamicCropping:
-    def __init__(self, llm, workdir=None, crop_threshold=0.05, max_concurrency=6):
+    def __init__(self, llm, workdir=None):
         self.llm = llm
-        self.workdir = workdir or tempfile.mkdtemp()
-        self.crop_threshold = crop_threshold
-        self.semaphore = asyncio.Semaphore(max_concurrency)
+        self.workdir = Path(workdir or tempfile.mkdtemp())
+        self.yolo_model = YOLO("yolov8n.pt")
 
-    def _aspect_ratio(self, w, h):
-        return float(w) / float(h)
+    def _sample_frames(self, clip, num=5):
+        duration = clip.duration
+        times = np.linspace(0, duration, num=num + 2)[1:-1]
+        sampled = []
+        for i, t in enumerate(times):
+            frame = clip.get_frame(t)
+            path = self.workdir / f"sample_{i}.jpg"
+            Image.fromarray(frame).save(path)
+            sampled.append({"frame_id": f"frame_{i}", "t": t, "path": path})
+        return sampled
 
-    def _is_aspect_ratio_similar(self, w1, h1, w2, h2, threshold=0.1):
-        r1 = self._aspect_ratio(w1, h1)
-        r2 = self._aspect_ratio(w2, h2)
-        similar = abs(r1 - r2) / r2 < threshold
-        print(f"[DEBUG] Checking aspect similarity: {w1}x{h1} vs {w2}x{h2} -> {similar}")
-        return similar
-
-    def _extract_frames(self, clip_obj, clip_idx, every_n_seconds=3):
-        frames = []
-        duration = clip_obj.duration
-        times = [min(t, duration - 0.01) for t in np.arange(0, duration, every_n_seconds)]
-        for j, t in enumerate(times):
-            frame_id = f"{clip_idx}_{j}"
-            out_img_path = os.path.join(self.workdir, f"clip{clip_idx}_frame{j}.jpg")
-            frame = clip_obj.get_frame(t)
-            img = Image.fromarray(frame)
-            img.save(out_img_path)
-            frames.append({"frame_id": frame_id, "t": t, "img_path": out_img_path})
-        return frames
-
-    def _segment_crop_keyframes(self, times, cx, cy, threshold, input_duration):
-        segments = []
-        n = len(times)
-        seg_start = 0
-        for i in range(1, n):
-            dx = abs(cx[i] - cx[seg_start])
-            dy = abs(cy[i] - cy[seg_start])
-            if dx > threshold or dy > threshold:
-                avg_cx = float(np.mean(cx[seg_start:i]))
-                avg_cy = float(np.mean(cy[seg_start:i]))
-                segments.append({
-                    "start": float(times[seg_start]),
-                    "end": float(times[i]),
-                    "crop_x": avg_cx,
-                    "crop_y": avg_cy
-                })
-                seg_start = i
-        avg_cx = float(np.mean(cx[seg_start:]))
-        avg_cy = float(np.mean(cy[seg_start:]))
-        segments.append({
-            "start": float(times[seg_start]),
-            "end": float(input_duration),
-            "crop_x": avg_cx,
-            "crop_y": avg_cy
-        })
-        return segments
-
-    async def _get_crop_for_frame(self, frame, desired_width, desired_height):
-        async with self.semaphore:
-            img_path = Path(frame["img_path"])
-            frame_id = frame["frame_id"]
-            prompt = (
-                f"You are a professional video editor. Your task is to find the best crop center for this single frame to fit a target aspect ratio of {desired_width}:{desired_height}.\n"
-                "You should prioritize faces and people, especially main characters or the person speaking in the frame. if there are no people are many, focus on the most important part of the frame.\n"
-                "Return a JSON object with:\n"
-                "- `frame_id`: string (must match the frame_id below)\n"
-                "- `crop_center_x`: float (between 0 and 1)\n"
-                "- `crop_center_y`: float (between 0 and 1)\n\n"
-                f"Frame ID: '{frame_id}'\n"
-                "Only output the JSON object for this frame. Do not include any other text."
-            )
-
-            response = await asyncio.to_thread(
+    async def _decide_crop_mode(self, frames):
+        prompt = (
+            "You are analyzing a sequence of video frames to decide the best cropping strategy.\n"
+            "There are two modes:\n"
+            "- `general`: Use this when there is no clear main character or there are many people (like crowds or background scenes).\n"
+            "- `character_tracking`: Use this when there is a clear main person or subject that appears across the frames.\n\n"
+            "Return a JSON object with a single key `mode`, with value either 'general' or 'character_tracking'."
+        )
+        try:
+            images = [Path(f["path"]) for f in frames]
+            resp = await asyncio.to_thread(
                 self.llm.LLM_request,
-                [img_path, prompt],
+                images + [prompt],
                 {
                     "response_mime_type": "application/json",
-                    "response_schema": CroppingResponse
-                }
+                    "response_schema": CropModeResponse,
+                },
             )
-            return frame_id, response
+            print(f"[DEBUG] Gemini crop mode decision: {resp}")
+            return resp["mode"]
+        except Exception as e:
+            print(f"[ERROR] Failed to decide crop mode: {e}")
+            return "general"
 
-    async def __call__(
-        self,
-        desired_width: int,
-        desired_height: int,
-        processed_clips: list,
-        target_aspect_threshold=0.06
-    ):
-        print(f"[INFO] Starting DynamicCropping for {len(processed_clips)} clips. Target size: {desired_width}x{desired_height}")
-        crops_for_frames = {}
-        frames_by_clip = {}
-
-        # 1. Extract frames for all clips and prepare per-frame crop tasks
-        crop_tasks = []
-        for clip_idx, clip_obj in enumerate(processed_clips):
-            w, h = clip_obj.size
-            if self._is_aspect_ratio_similar(w, h, desired_width, desired_height, threshold=target_aspect_threshold):
-                continue
-
-            frames = self._extract_frames(clip_obj, clip_idx)
-            frames_by_clip[clip_idx] = frames
-
-            for frame in frames:
-                task = self._get_crop_for_frame(frame, desired_width, desired_height)
-                crop_tasks.append(task)
-
-        # 2. Run all Gemini crop calls (up to 6 concurrent)
-        crop_results = await asyncio.gather(*crop_tasks)
-        for frame_id, response in crop_results:
-            crops_for_frames[frame_id] = response
-
-        # 3. Apply crops and rebuild final clips
-        new_processed_clips = []
-        for clip_idx, clip_obj in enumerate(processed_clips):
-            w, h = clip_obj.size
-            if self._is_aspect_ratio_similar(w, h, desired_width, desired_height, threshold=target_aspect_threshold):
-                new_processed_clips.append(clip_obj.resized((desired_width, desired_height)))
-                continue
-
-            frames = frames_by_clip.get(clip_idx, [])
-            if not frames:
-                new_processed_clips.append(clip_obj.resized((desired_width, desired_height)))
-                continue
-
-            ts = np.array([f["t"] for f in frames])
-            cx = np.array([crops_for_frames[f["frame_id"]]["crop_center_x"] for f in frames])
-            cy = np.array([crops_for_frames[f["frame_id"]]["crop_center_y"] for f in frames])
-
-            scale_w = desired_width / w
-            scale_h = desired_height / h
-            scale = max(scale_w, scale_h)
-            scaled_w, scaled_h = int(w * scale), int(h * scale)
-            print(f"[DEBUG] Clip {clip_idx}: Scaling to {scaled_w}x{scaled_h}")
-
-            upscaled_clip = clip_obj.resized((scaled_w, scaled_h))
-            segments = self._segment_crop_keyframes(ts, cx, cy, self.crop_threshold, upscaled_clip.duration)
-
-            seg_clips = []
-            for seg in segments:
-                crop_px = int(max(0, min(seg["crop_x"] * scaled_w - desired_width / 2, scaled_w - desired_width)))
-                crop_py = int(max(0, min(seg["crop_y"] * scaled_h - desired_height / 2, scaled_h - desired_height)))
-                start_time = max(0, seg["start"])
-                end_time = min(seg["end"], upscaled_clip.duration)
-                seg_video = (
-                    upscaled_clip
-                    .subclipped(start_time, end_time)
-                    .cropped(x1=crop_px, y1=crop_py, width=desired_width, height=desired_height)
+    async def _get_general_crop_center(self, frames, w, h):
+        centers = []
+        for frame in frames:
+            try:
+                prompt = (
+                    "You are a professional video editor. Determine the crop center for this frame.\n"
+                    "Return a JSON object with `crop_center_x` and `crop_center_y` between 0 and 1."
                 )
-                if upscaled_clip.audio is not None:
-                    audio_subclip = upscaled_clip.audio.subclipped(start_time, end_time)
-                    seg_video = seg_video.with_audio(audio_subclip)
-                seg_clips.append(seg_video)
+                img_path = Path(frame["path"])
+                result = await asyncio.to_thread(
+                    self.llm.LLM_request,
+                    [img_path, prompt],
+                    {
+                        "response_mime_type": "application/json",
+                        "response_schema": GeneralCropCenterResponse,
+                    },
+                )
+                print(f"[DEBUG] Gemini general crop center result: {result}")
+                centers.append((result["crop_center_x"], result["crop_center_y"]))
+            except Exception as e:
+                print(f"[ERROR] Failed to get crop center for frame {frame['frame_id']}: {e}")
+        if not centers:
+            return 0.5, 0.5
+        avg_x = float(np.mean([c[0] for c in centers]))
+        avg_y = float(np.mean([c[1] for c in centers]))
+        print(f"[DEBUG] Averaged crop center: ({avg_x}, {avg_y})")
+        return avg_x, avg_y
 
-            final_clip = concatenate_videoclips(seg_clips)
-            new_processed_clips.append(final_clip)
+    def _smooth_centers(self, centers, alpha=0.8):
+        smoothed = [centers[0]]
+        for i in range(1, len(centers)):
+            prev = smoothed[-1]
+            new = (
+                alpha * prev[0] + (1 - alpha) * centers[i][0],
+                alpha * prev[1] + (1 - alpha) * centers[i][1],
+            )
+            smoothed.append(new)
+        return smoothed
+    
+    def _detect_and_fix_outliers(self, centers, jerk_threshold=0.25, window=1):
+        centers = np.array(centers)
+        diffs = np.linalg.norm(np.diff(centers, axis=0), axis=1)
 
-        print(f"[INFO] DynamicCropping complete. Returning {len(new_processed_clips)} clips.")
-        return new_processed_clips
+        outliers = []
+        for i, d in enumerate(diffs):
+            if d > jerk_threshold:
+                outliers.append(i + 1)  # Mark the frame after the jump
+
+        for i in outliers:
+            start = max(0, i - window)
+            end = min(len(centers) - 1, i + window)
+            if start < i < end:
+                prev = centers[start]
+                next = centers[end]
+                interp = (prev + next) / 2
+                centers[i] = interp
+                print(f"[DEBUG] Replaced outlier at index {i} with interpolated center: {interp.tolist()}")
+
+        return centers.tolist()
+
+
+    def _track_character(self, clip, desired_width, desired_height):
+        fps = clip.fps
+        original_w, original_h = clip.size
+        scale = max(desired_width / original_w, desired_height / original_h)
+        scaled_w, scaled_h = int(original_w * scale), int(original_h * scale)
+
+        frames = []
+        bboxes_per_frame = []
+
+        print(f"[INFO] Running YOLO tracking with ByteTrack...")
+
+        for t in np.arange(0, clip.duration, 1 / fps):
+            frame = clip.get_frame(t)
+            frame = cv2.resize(frame, (scaled_w, scaled_h))
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+            result = self.yolo_model.track(
+                frame_rgb,
+                tracker="bytetrack.yaml",
+                persist=True,
+                imgsz=640,
+                conf=0.3,
+                verbose=False,
+            )[0]
+
+            detections = []
+            if result is not None and result.boxes is not None:
+                for box, cls in zip(result.boxes.xyxy, result.boxes.cls):
+                    x1, y1, x2, y2 = box.tolist()
+                    area = (x2 - x1) * (y2 - y1)
+                    cx = (x1 + x2) / 2 / scaled_w
+                    cy = (y1 + y2) / 2 / scaled_h
+                    label = self.yolo_model.names[int(cls)]
+                    if label in {"face", "person"}:
+                        detections.append((label, area, cx, cy))
+
+            frames.append(frame)
+            bboxes_per_frame.append(detections)
+
+        # --- First pass: select target per frame ---
+        targets = []
+        last_target = None
+        for i, detections in enumerate(bboxes_per_frame):
+            if not detections:
+                targets.append(None)
+                continue
+
+            detections.sort(key=lambda x: x[1], reverse=True)  # Sort by area
+            best = detections[0]
+            if len(detections) > 1:
+                second = detections[1]
+                if abs(best[1] - second[1]) / best[1] < 0.1 and last_target:
+                    best = last_target
+                else:
+                    last_target = best
+            else:
+                last_target = best
+            targets.append(best)
+
+        # --- Second pass: enforce 30-frame stability ---
+        stable_targets = []
+        i = 0
+        while i < len(targets):
+            current = targets[i]
+            j = i + 1
+            while j < len(targets) and targets[j] == current:
+                j += 1
+            segment_len = j - i
+            if segment_len < 16:
+                prev = stable_targets[i - 1] if i > 0 else None
+                next = targets[j] if j < len(targets) else None
+                replacement = prev if prev and (not next or prev[1] > next[1]) else next
+                stable_targets.extend([replacement] * segment_len)
+            else:
+                stable_targets.extend([current] * segment_len)
+            i = j
+
+        # --- Apply cropping based on smoothed center points ---
+        centers = [(t[2], t[3]) if t else (0.5, 0.5) for t in stable_targets]
+
+        if not centers:
+            centers = [(0.5, 0.5)] * len(frames)
+
+        smoothed_centers = self._smooth_centers(centers)
+        smoothed_centers = self._detect_and_fix_outliers(smoothed_centers)
+
+        crop_frames = []
+        for frame, (cx, cy) in zip(frames, smoothed_centers):
+            crop_x = int(max(0, min(cx * scaled_w - desired_width / 2, scaled_w - desired_width)))
+            crop_y = int(max(0, min(cy * scaled_h - desired_height / 2, scaled_h - desired_height)))
+            cropped = frame[crop_y:crop_y + desired_height, crop_x:crop_x + desired_width]
+            crop_frames.append(cropped)
+
+        return crop_frames, fps
+
+    async def __call__(self, desired_width, desired_height, clips):
+        print(f"[INFO] Starting advanced DynamicCropping for {len(clips)} clips.")
+        final_clips = []
+
+        for idx, clip in enumerate(clips):
+            print(f"\n[INFO] Processing clip {idx}")
+            sampled = self._sample_frames(clip)
+            mode = await self._decide_crop_mode(sampled)
+            print(f"[INFO] Clip {idx} crop mode: {mode}")
+
+            if mode == "general":
+                center_x, center_y = await self._get_general_crop_center(sampled, *clip.size)
+                w, h = clip.size
+                scale = max(desired_width / w, desired_height / h)
+                clip_resized = clip.resized(scale)
+                sw, sh = clip_resized.size
+
+                crop_x = int(max(0, min(center_x * sw - desired_width / 2, sw - desired_width)))
+                crop_y = int(max(0, min(center_y * sh - desired_height / 2, sh - desired_height)))
+
+                final = clip_resized.cropped(x1=crop_x, y1=crop_y, width=desired_width, height=desired_height)
+                final_clips.append(final)
+
+            elif mode == "character_tracking":
+                # Save crop_frames to a temporary video file using OpenCV
+                crop_frames, fps = self._track_character(clip, desired_width, desired_height)
+
+                temp_video_path = str(self.workdir / f"tracked_{uuid.uuid4().hex}.mp4")
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                out = cv2.VideoWriter(temp_video_path, fourcc, fps, (desired_width, desired_height))
+
+                for frame in crop_frames:
+                    out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                out.release()
+
+                # Load compressed clip with VideoFileClip (disk-backed)
+                img_clip = VideoFileClip(temp_video_path)
+
+                if clip.audio:
+                    safe_duration = min(clip.audio.duration, img_clip.duration)
+                    audio = clip.audio.subclipped(0, safe_duration)
+                    img_clip = img_clip.with_audio(audio)
+
+                final_clips.append(img_clip)
+
+
+            else:
+                print(f"[WARN] Unknown crop mode for clip {idx}, skipping.")
+                continue
+
+        print(f"[INFO] DynamicCropping complete.")
+        return final_clips

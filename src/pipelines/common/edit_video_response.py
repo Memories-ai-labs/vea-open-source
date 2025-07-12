@@ -1,16 +1,22 @@
 import os
 import tempfile
 import asyncio
+import gc
 from moviepy import *
-from pydub.utils import mediainfo
 import librosa
 import numpy as np
 import subprocess
+import sys
+import json
+import whisperx
+
+from lib.oss.gcp_oss import GoogleCloudStorage
+from lib.oss.auth import credentials_from_file
+from lib.llm.GeminiGenaiManager import GeminiGenaiManager
+from src.config import CREDENTIAL_PATH, BUCKET_NAME
 from lib.utils.media import parse_time_to_seconds
 from src.pipelines.common.dynamic_cropping import DynamicCropping
 from src.pipelines.common.generate_subtitles import GenerateSubtitles
-import whisper
-import whisperx
 
 class EditVideoResponse:
     def __init__(
@@ -270,17 +276,17 @@ class EditVideoResponse:
             output_path
         ]
         subprocess.run(cmd, check=True)
-
+        
     async def __call__(
         self,
         clips,
         narration_dir,
         background_music_path=None,
-        original_audio = True,
+        original_audio=True,
         narration_enabled=True,
         aspect_ratio=16/9,
-        subtitles = True,
-        snap_to_beat = False
+        subtitles=True,
+        snap_to_beat=False
     ):
         print(f"[INFO] Processing {len(clips)} clips...")
 
@@ -291,13 +297,12 @@ class EditVideoResponse:
             self._downloaded_files[fname] = original_path
 
         # Process and assemble video clips
-        processed_clips = []
+        original_clips = []
         aspect_ratios = []
         for clip in sorted(clips, key=lambda c: int(c["id"])):
             try:
                 new_clips = self._process_clip(clip, narration_dir, narration_enabled, original_audio)
-                processed_clips.extend(new_clips)
-                # Track aspect ratio for each processed clip
+                original_clips.extend(new_clips)
                 for c in new_clips:
                     w, h = c.size
                     aspect_ratios.append(round(float(w) / float(h), 3))
@@ -305,25 +310,21 @@ class EditVideoResponse:
                 print(f"[ERROR] Failed to process clip {clip['id']}: {e}")
                 continue
 
-        if not processed_clips:
+        if not original_clips:
             raise ValueError("No clips were processed successfully.")
 
         # --- Aspect Ratio Handling ---
         if aspect_ratio == 0:
-            # Find most common aspect ratio among clips (rounded to 2 decimal places)
             from collections import Counter
             aspect_counter = Counter(aspect_ratios)
             most_common_aspect, _ = aspect_counter.most_common(1)[0]
             aspect_ratio = most_common_aspect
             print(f"[INFO] Auto-detected aspect ratio: {aspect_ratio}")
 
-        # Calculate export width/height close to 1080p for at least one dimension
         if aspect_ratio >= 1.0:
-            # Landscape: width = 1920, height = round(1920 / aspect)
             export_width = 1920
             export_height = int(round(1920 / aspect_ratio))
         else:
-            # Portrait: height = 1920, width = round(1920 * aspect)
             export_height = 1920
             export_width = int(round(1920 * aspect_ratio))
 
@@ -331,15 +332,13 @@ class EditVideoResponse:
 
         # --- Cropping ---
         dc = DynamicCropping(self.llm, self.workdir)
-        processed_clips = await dc(export_width, export_height, processed_clips)
+        cropped_clips = await dc(export_width, export_height, original_clips)
 
         if background_music_path and snap_to_beat:
-            processed_clips = self.snap_clips_to_music_beats(processed_clips, background_music_path)
+            cropped_clips = self.snap_clips_to_music_beats(cropped_clips, background_music_path)
 
-        # Concatenate, mix music, and export to temp mp4
-        final_video = self._assemble_final_video(
-            processed_clips, background_music_path
-        )
+        # Concatenate and export
+        final_video = self._assemble_final_video(cropped_clips, background_music_path)
 
         if subtitles:
             caption_dir = tempfile.mkdtemp()
@@ -357,7 +356,7 @@ class EditVideoResponse:
                 final_video.audio.write_audiofile,
                 audio_export_path
             )
-            # Generate subtitles using ElevenLabs
+
             subtitle_generator = GenerateSubtitles(output_dir=caption_dir)
             transcription_result = subtitle_generator(audio_export_path)
 
@@ -366,7 +365,6 @@ class EditVideoResponse:
                 srt_entries = subtitle_generator.words_to_srt_entries(words, max_words=12)
                 subtitle_generator.write_srt(srt_entries, tmp_srt_path)
 
-                # Burn subtitles
                 try:
                     self.burn_subtitles(tmp_video_path, tmp_srt_path, self.output_path)
                 except Exception as e:
@@ -381,9 +379,67 @@ class EditVideoResponse:
                 threads=8,
             )
 
-        for clip in processed_clips:
-            clip.close()
-        final_video.close()
+        # Clean up memory: close clips
+        print("[INFO] Cleaning up memory...")
+        for clip in original_clips:
+            try:
+                clip.close()
+            except Exception as e:
+                print(f"[WARN] Failed to close original clip: {e}")
+        for clip in cropped_clips:
+            try:
+                clip.close()
+            except Exception as e:
+                print(f"[WARN] Failed to close cropped clip: {e}")
+        try:
+            final_video.close()
+        except Exception as e:
+            print(f"[WARN] Failed to close final video: {e}")
+
+        # Explicit garbage collection
+        gc.collect()
 
         print(f"[INFO] Final video created: {self.output_path}")
         return self.output_path
+    
+
+if __name__ == "__main__":
+    input_path = sys.argv[1]
+    with open(input_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+
+    # Reconstruct arguments
+    clips = config["clips"]
+    narration_dir = config["narration_dir"]
+    background_music_path = config["background_music_path"]
+    original_audio = config["original_audio"]
+    narration_enabled = config["narration_enabled"]
+    aspect_ratio = config["aspect_ratio"]
+    subtitles = config["subtitles"]
+    snap_to_beat = config["snap_to_beat"]
+    workdir = config["workdir"]
+    output_path = config["output_path"]
+    bucket_name = config["bucket_name"]
+
+    # Reinstantiate GCS and LLM
+    gcs_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
+    llm = GeminiGenaiManager(model="gemini-2.5-flash")
+
+    editor = EditVideoResponse(
+        output_path=output_path,
+        gcs_client=gcs_client,
+        bucket_name=bucket_name,
+        workdir=workdir,
+        llm=llm
+    )
+
+    asyncio.run(editor(
+        clips=clips,
+        narration_dir=narration_dir,
+        background_music_path=background_music_path,
+        original_audio=original_audio,
+        narration_enabled=narration_enabled,
+        aspect_ratio=aspect_ratio,
+        subtitles=subtitles,
+        snap_to_beat=snap_to_beat
+    ))

@@ -3,6 +3,9 @@ import json
 import tempfile
 import random
 import string
+import gc
+import subprocess
+import uuid
 
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.oss.gcp_oss import GoogleCloudStorage
@@ -182,34 +185,35 @@ class FlexibleResponsePipeline:
                 chosen_music_path = None
 
             # Assemble and render the final video
-            final_output_path = os.path.join(self.workdir, "video_response.mp4")
-            print("[INFO] Assembling final video using editor...")
-            editor = EditVideoResponse(
-                output_path=final_output_path,
-                gcs_client=self.cloud_storage_client,
-                bucket_name=BUCKET_NAME,
-                workdir=self.workdir,
-                llm=self.llm
-            )
-            
-            await editor(
-                clips=selected_narrated_clips,
-                narration_dir=narration_audio_dir,
-                background_music_path=chosen_music_path,
-                original_audio=original_audio,
-                narration_enabled=narration_enabled,
-                aspect_ratio=aspect_ratio,
-                subtitles = subtitles,
-                snap_to_beat= snap_to_beat
-            )
-            print("[INFO] Video response assembly complete.")
+            editor_input = {
+                "clips": selected_narrated_clips,
+                "narration_dir": narration_audio_dir,
+                "background_music_path": chosen_music_path,
+                "original_audio": original_audio,
+                "narration_enabled": narration_enabled,
+                "aspect_ratio": aspect_ratio,
+                "subtitles": subtitles,
+                "snap_to_beat": snap_to_beat,
+                "workdir": self.workdir,
+                "bucket_name": BUCKET_NAME,
+                "output_path": f"{self.workdir}/video_response.mp4"
+            }
+
+            editor_input_path = os.path.join(self.workdir, f"edit_input_{uuid.uuid4().hex}.json")
+            with open(editor_input_path, "w", encoding="utf-8") as f:
+                json.dump(editor_input, f, indent=2)
+
+            # --- Call CLI subprocess
+            print("[INFO] Running EditVideoResponse as subprocess to free memory...")
+            subprocess.run(["python", "-m","src.pipelines.common.edit_video_response", editor_input_path], check=True)
+            print("[INFO] EditVideoResponse subprocess complete.")
 
             # Upload the result to GCS
             final_gcs_path = f"outputs/{self.media_base_name}/{run_id}/video_response.mp4"
             if output_path:
                 final_gcs_path = output_path
             print(f"[INFO] Uploading final video to: {final_gcs_path}")
-            self.cloud_storage_client.upload_files(BUCKET_NAME, final_output_path, final_gcs_path)
+            self.cloud_storage_client.upload_files(BUCKET_NAME, f"{self.workdir}/video_response.mp4", final_gcs_path)
             print(f"[SUCCESS] Video response uploaded to GCS.")
 
             return {

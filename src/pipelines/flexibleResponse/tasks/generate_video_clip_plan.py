@@ -124,7 +124,7 @@ class GenerateVideoClipPlan:
                 "- `id`: unique integer\n"
                 "- `file_name`: video file name\n"
                 "- `start`, `end`: timestamps\n"
-                "- `narration`: leave as an empty string, or a very brief description for reference\n"
+                "- `narration`: since narration is not in use, leave a very brief description of the scene, and a very short reason for why it is chosen\n"
                 "- `priority`: choose `clip_audio` if the original clip audio is important, or `clip_video` if the entire video segment should be used without audio editing. Avoid `narration`.\n"
                 f"User prompt:\n---\n{user_prompt.strip()}\n---\n\n"
                 "The following indexing files have been provided:\n"
