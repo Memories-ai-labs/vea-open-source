@@ -10,7 +10,7 @@ import mimetypes
 from src.config import API_KEYS_PATH
 
 class GeminiGenaiManager:
-    def __init__(self, model = "gemini-2.0-flash"):
+    def __init__(self, model = "gemini-2.5-flash"):
         self.load_api_keys()
         self.gemini_api_key = os.getenv("GENAI_API_KEY")
         self.genai_client = genai.Client(api_key=self.gemini_api_key)

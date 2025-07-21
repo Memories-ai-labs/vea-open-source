@@ -9,7 +9,6 @@ import subprocess
 import sys
 import json
 import whisperx
-import pyloudnorm as pyln
 
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
@@ -23,7 +22,7 @@ class EditVideoResponse:
     def __init__(
         self, 
         output_path="video_response.mp4", 
-        music_volume_multiplier=0.5, 
+        music_volume_multiplier=0.3, 
         gcs_client=None, 
         gcs_media_base_path=None, 
         bucket_name=None,
@@ -48,30 +47,6 @@ class EditVideoResponse:
         self.gcs_client.download_files(self.bucket_name, cloud_storage_path, local_path)
         self._downloaded_files[file_name] = local_path
         return local_path
-
-
-    def get_loudness(self, audio_clip, sample_rate=44100):
-        """
-        Calculate integrated LUFS loudness of an audio clip using pyloudnorm.
-        
-        Parameters:
-        - audio_clip: a moviepy AudioClip (e.g., AudioFileClip)
-        - sample_rate: sample rate in Hz (default is 44100)
-        
-        Returns:
-        - Integrated LUFS loudness (float)
-        """
-        samples = audio_clip.to_soundarray(fps=sample_rate)
-
-        # Convert stereo to mono by averaging channels if needed
-        if samples.ndim > 1:
-            samples = np.mean(samples, axis=1)
-
-        meter = pyln.Meter(sample_rate)  # ITU-R BS.1770 loudness meter
-        loudness = meter.integrated_loudness(samples)
-
-        return loudness
-
 
     # ---------- Video Clip Assembly ----------
     def _process_clip(
@@ -101,12 +76,12 @@ class EditVideoResponse:
                 if video_duration < audio_duration:
                     speed_factor = video_duration / audio_duration if audio_duration > 0 else 1
                     video_clip = video_clip.with_effects([vfx.MultiplySpeed(speed_factor)])
-                clip_volume = self.get_loudness(video_clip.audio)
-                narration_volume = self.get_loudness(narration)
+                clip_volume = video_clip.audio.max_volume().mean()
+                narration_volume = narration.max_volume().mean()
                 volume_multiplier = (narration_volume / clip_volume) if narration_volume != 0 and clip_volume != 0 else 1.0
 
                 if not original_audio:
-                    video_clip = video_clip.with_effects([afx.MultiplyVolume(0)])
+                    video_clip.with_effects([afx.MultiplyVolume(0)])
 
                 # Priority handling
                 if not priority:
@@ -132,13 +107,9 @@ class EditVideoResponse:
                 pass
 
         if not narration_enabled:
-            # Reload original full-length clip
-            video_clip = VideoFileClip(video_path)
-            if not original_audio:
-                video_clip = video_clip.with_effects([afx.MultiplyVolume(0)])
+            # No narration: Use original audio, as is
             video_clip = video_clip.subclipped(start_sec, end_sec)
             return [video_clip]
-
             
     def snap_clips_to_music_beats(self, processed_clips, background_music_path, sr=22050, strong_snap_sec=1.0):
         """Adjusts each clip so the end lands on the nearest strong/weak beat, by changing its speed."""
@@ -190,8 +161,8 @@ class EditVideoResponse:
         if background_music_path:
             try:
                 background_music = AudioFileClip(background_music_path)
-                music_volume = self.get_loudness(background_music)
-                video_volume = self.get_loudness(video_audio)
+                music_volume = background_music.max_volume().mean()
+                video_volume = video_audio.max_volume().mean()
                 # Adjust music relative to overall video/narration volume
                 if video_volume == 0 or music_volume == 0:
                     volume_multiplier = self.music_volume_multiplier
@@ -472,3 +443,8 @@ if __name__ == "__main__":
         subtitles=subtitles,
         snap_to_beat=snap_to_beat
     ))
+    
+
+
+
+

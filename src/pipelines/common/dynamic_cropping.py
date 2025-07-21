@@ -1,23 +1,36 @@
 import os
 import cv2
+import uuid
 import numpy as np
 from PIL import Image
 from pathlib import Path
-from moviepy import VideoFileClip, ImageSequenceClip
+from moviepy import VideoFileClip
 import tempfile
 import asyncio
-from ultralytics import YOLO
+import mediapipe as mp
 from src.pipelines.common.schema import CropModeResponse, GeneralCropCenterResponse
-import uuid
+from scipy.signal import medfilt, savgol_filter
+import gc
+
+mp_drawing = mp.solutions.drawing_utils
+mp_pose = mp.solutions.pose
 
 
 class DynamicCropping:
-    def __init__(self, llm, workdir=None):
+    def __init__(self, llm, workdir=None, debug=False):
         self.llm = llm
         self.workdir = Path(workdir or tempfile.mkdtemp())
-        self.yolo_model = YOLO("yolov8n.pt")
+        self.debug = debug
+        self.overlay_font = cv2.FONT_HERSHEY_SIMPLEX
+        self.pose = mp_pose.Pose(
+            static_image_mode=False,
+            model_complexity=2,
+            enable_segmentation=False,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
 
-    def _sample_frames(self, clip, num=5):
+    def _sample_frames(self, clip, num=8):
         duration = clip.duration
         times = np.linspace(0, duration, num=num + 2)[1:-1]
         sampled = []
@@ -32,8 +45,9 @@ class DynamicCropping:
         prompt = (
             "You are analyzing a sequence of video frames to decide the best cropping strategy.\n"
             "There are two modes:\n"
-            "- `general`: Use this when there is no clear main character or there are many people (like crowds or background scenes).\n"
-            "- `character_tracking`: Use this when there is a clear main person or subject that appears across the frames.\n\n"
+            "- `character_tracking`: Use this when there is a clear face or person that appears in at least some of the frames.\n"
+            "- `general`: Use this when the frame contains no prominent subject (landscapes, buildings, crowds, or vehicles).\n\n"
+            "Prefer `character_tracking` if a prominent face or body is present in most frames. Prefer `general` if there’s no primary visual subject.\n"
             "Return a JSON object with a single key `mode`, with value either 'general' or 'character_tracking'."
         )
         try:
@@ -80,183 +94,125 @@ class DynamicCropping:
         print(f"[DEBUG] Averaged crop center: ({avg_x}, {avg_y})")
         return avg_x, avg_y
 
-    def _smooth_centers(self, centers, alpha=0.8):
-        smoothed = [centers[0]]
-        for i in range(1, len(centers)):
-            prev = smoothed[-1]
-            new = (
-                alpha * prev[0] + (1 - alpha) * centers[i][0],
-                alpha * prev[1] + (1 - alpha) * centers[i][1],
-            )
-            smoothed.append(new)
-        return smoothed
-    
-    def _detect_and_fix_outliers(self, centers, jerk_threshold=0.25, window=1):
-        centers = np.array(centers)
-        diffs = np.linalg.norm(np.diff(centers, axis=0), axis=1)
+    def _extract_bbox(self, landmarks, indices, image_shape):
+        h, w, _ = image_shape
+        xs = [landmarks[i].x * w for i in indices if landmarks[i].visibility > 0.5]
+        ys = [landmarks[i].y * h for i in indices if landmarks[i].visibility > 0.5]
+        if not xs or not ys:
+            return None
+        return int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))
 
-        outliers = []
-        for i, d in enumerate(diffs):
-            if d > jerk_threshold:
-                outliers.append(i + 1)  # Mark the frame after the jump
+    def _add_mode_watermark(self, frame, mode):
+        overlay = frame.copy()
+        text = f"Mode: {mode}"
+        for y in range(0, frame.shape[0], 100):
+            for x in range(0, frame.shape[1], 300):
+                cv2.putText(overlay, text, (x, y + 30), self.overlay_font, 1, (255, 255, 255), 2, lineType=cv2.LINE_AA)
+        return cv2.addWeighted(overlay, 0.3, frame, 0.7, 0)
 
-        for i in outliers:
-            start = max(0, i - window)
-            end = min(len(centers) - 1, i + window)
-            if start < i < end:
-                prev = centers[start]
-                next = centers[end]
-                interp = (prev + next) / 2
-                centers[i] = interp
-                print(f"[DEBUG] Replaced outlier at index {i} with interpolated center: {interp.tolist()}")
+    def _smooth_centers(self, centers):
+        xs = [c[0] for c in centers]
+        ys = [c[1] for c in centers]
+        xs_med = medfilt(xs, kernel_size=35)
+        ys_med = medfilt(ys, kernel_size=35)
+        window = min(len(xs_med) // 2 * 2 + 1, 51)
+        poly = 2 if window >= 5 else 1
+        xs_smooth = savgol_filter(xs_med, window_length=window, polyorder=poly)
+        ys_smooth = savgol_filter(ys_med, window_length=window, polyorder=poly)
+        return list(zip(xs_smooth, ys_smooth))
 
-        return centers.tolist()
-
-
-    def _track_character(self, clip, desired_width, desired_height):
+    def _track_subject_streaming(self, clip, desired_width, desired_height, mode, out_path):
         fps = clip.fps
-        original_w, original_h = clip.size
-        scale = max(desired_width / original_w, desired_height / original_h)
-        scaled_w, scaled_h = int(original_w * scale), int(original_h * scale)
+        w, h = clip.size
+        scale = max(desired_width / w, desired_height / h)
+        sw, sh = int(w * scale), int(h * scale)
 
-        frames = []
-        bboxes_per_frame = []
+        last_valid = (0.5, 0.5)
+        centers = []
 
-        print(f"[INFO] Running YOLO tracking with ByteTrack...")
-
+        # First pass: extract focus centers
         for t in np.arange(0, clip.duration, 1 / fps):
             frame = clip.get_frame(t)
-            frame = cv2.resize(frame, (scaled_w, scaled_h))
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            frame = cv2.resize(frame, (sw, sh))
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            result = self.yolo_model.track(
-                frame_rgb,
-                tracker="bytetrack.yaml",
-                persist=True,
-                imgsz=640,
-                conf=0.3,
-                verbose=False,
-            )[0]
+            results = self.pose.process(frame_rgb)
+            if results.pose_landmarks:
+                landmarks = results.pose_landmarks.landmark
+                face_bbox = self._extract_bbox(landmarks, [0, 1, 2, 3, 4], frame.shape)
+                body_bbox = self._extract_bbox(landmarks, [11, 12, 23, 24], frame.shape)
+                target = face_bbox or body_bbox
+                if target:
+                    x1, y1, x2, y2 = target
+                    cx = (x1 + x2) / 2 / sw
+                    cy = (y1 + y2) / 2 / sh
+                    last_valid = (cx, cy)
+            centers.append(last_valid)
 
-            detections = []
-            if result is not None and result.boxes is not None:
-                for box, cls in zip(result.boxes.xyxy, result.boxes.cls):
-                    x1, y1, x2, y2 = box.tolist()
-                    area = (x2 - x1) * (y2 - y1)
-                    cx = (x1 + x2) / 2 / scaled_w
-                    cy = (y1 + y2) / 2 / scaled_h
-                    label = self.yolo_model.names[int(cls)]
-                    if label in {"face", "person"}:
-                        detections.append((label, area, cx, cy))
+        smoothed = self._smooth_centers(centers)
 
-            frames.append(frame)
-            bboxes_per_frame.append(detections)
+        # Second pass: write cropped frames
+        out = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (desired_width, desired_height))
+        for i, t in enumerate(np.arange(0, clip.duration, 1 / fps)):
+            frame = clip.get_frame(t)
+            frame = cv2.resize(frame, (sw, sh))
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            if self.debug:
+                frame = self._add_mode_watermark(frame, mode)
 
-        # --- First pass: select target per frame ---
-        targets = []
-        last_target = None
-        for i, detections in enumerate(bboxes_per_frame):
-            if not detections:
-                targets.append(None)
-                continue
+            cx, cy = smoothed[i]
+            center_x = int(cx * sw)
+            center_y = int(cy * sh)
+            x1 = max(0, min(center_x - desired_width // 2, sw - desired_width))
+            y1 = max(0, min(center_y - desired_height // 2, sh - desired_height))
+            crop = frame[y1:y1 + desired_height, x1:x1 + desired_width]
+            out.write(crop)
 
-            detections.sort(key=lambda x: x[1], reverse=True)  # Sort by area
-            best = detections[0]
-            if len(detections) > 1:
-                second = detections[1]
-                if abs(best[1] - second[1]) / best[1] < 0.1 and last_target:
-                    best = last_target
-                else:
-                    last_target = best
-            else:
-                last_target = best
-            targets.append(best)
-
-        # --- Second pass: enforce 30-frame stability ---
-        stable_targets = []
-        i = 0
-        while i < len(targets):
-            current = targets[i]
-            j = i + 1
-            while j < len(targets) and targets[j] == current:
-                j += 1
-            segment_len = j - i
-            if segment_len < 16:
-                prev = stable_targets[i - 1] if i > 0 else None
-                next = targets[j] if j < len(targets) else None
-                replacement = prev if prev and (not next or prev[1] > next[1]) else next
-                stable_targets.extend([replacement] * segment_len)
-            else:
-                stable_targets.extend([current] * segment_len)
-            i = j
-
-        # --- Apply cropping based on smoothed center points ---
-        centers = [(t[2], t[3]) if t else (0.5, 0.5) for t in stable_targets]
-
-        if not centers:
-            centers = [(0.5, 0.5)] * len(frames)
-
-        smoothed_centers = self._smooth_centers(centers)
-        smoothed_centers = self._detect_and_fix_outliers(smoothed_centers)
-
-        crop_frames = []
-        for frame, (cx, cy) in zip(frames, smoothed_centers):
-            crop_x = int(max(0, min(cx * scaled_w - desired_width / 2, scaled_w - desired_width)))
-            crop_y = int(max(0, min(cy * scaled_h - desired_height / 2, scaled_h - desired_height)))
-            cropped = frame[crop_y:crop_y + desired_height, crop_x:crop_x + desired_width]
-            crop_frames.append(cropped)
-
-        return crop_frames, fps
+        out.release()
 
     async def __call__(self, desired_width, desired_height, clips):
-        print(f"[INFO] Starting advanced DynamicCropping for {len(clips)} clips.")
+        print(f"[INFO] Starting DynamicCropping for {len(clips)} clips.")
         final_clips = []
 
         for idx, clip in enumerate(clips):
             print(f"\n[INFO] Processing clip {idx}")
             sampled = self._sample_frames(clip)
             mode = await self._decide_crop_mode(sampled)
-            print(f"[INFO] Clip {idx} crop mode: {mode}")
+            print(f"[INFO] Chosen mode: {mode}")
 
-            if mode == "general":
-                center_x, center_y = await self._get_general_crop_center(sampled, *clip.size)
+            temp_path = str(self.workdir / f"cropped_{uuid.uuid4().hex}.mp4")
+
+            if mode == "character_tracking":
+                self._track_subject_streaming(clip, desired_width, desired_height, mode, temp_path)
+            else:
+                cx, cy = await self._get_general_crop_center(sampled, *clip.size)
                 w, h = clip.size
                 scale = max(desired_width / w, desired_height / h)
-                clip_resized = clip.resized(scale)
-                sw, sh = clip_resized.size
+                sw, sh = int(w * scale), int(h * scale)
+                fps = clip.fps
 
-                crop_x = int(max(0, min(center_x * sw - desired_width / 2, sw - desired_width)))
-                crop_y = int(max(0, min(center_y * sh - desired_height / 2, sh - desired_height)))
+                out = cv2.VideoWriter(temp_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (desired_width, desired_height))
+                for t in np.arange(0, clip.duration, 1 / fps):
+                    frame = cv2.resize(clip.get_frame(t), (sw, sh))
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    if self.debug:
+                        frame = self._add_mode_watermark(frame, mode)
 
-                final = clip_resized.cropped(x1=crop_x, y1=crop_y, width=desired_width, height=desired_height)
-                final_clips.append(final)
-
-            elif mode == "character_tracking":
-                # Save crop_frames to a temporary video file using OpenCV
-                crop_frames, fps = self._track_character(clip, desired_width, desired_height)
-
-                temp_video_path = str(self.workdir / f"tracked_{uuid.uuid4().hex}.mp4")
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                out = cv2.VideoWriter(temp_video_path, fourcc, fps, (desired_width, desired_height))
-
-                for frame in crop_frames:
-                    out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                    center_x = int(cx * sw)
+                    center_y = int(cy * sh)
+                    x1 = max(0, min(center_x - desired_width // 2, sw - desired_width))
+                    y1 = max(0, min(center_y - desired_height // 2, sh - desired_height))
+                    crop = frame[y1:y1 + desired_height, x1:x1 + desired_width]
+                    out.write(crop)
                 out.release()
 
-                # Load compressed clip with VideoFileClip (disk-backed)
-                img_clip = VideoFileClip(temp_video_path)
+            video = VideoFileClip(temp_path)
+            if clip.audio:
+                safe_duration = min(video.duration, clip.audio.duration)
+                video = video.with_audio(clip.audio.subclipped(0, safe_duration))
+            final_clips.append(video)
 
-                if clip.audio:
-                    safe_duration = min(clip.audio.duration, img_clip.duration)
-                    audio = clip.audio.subclipped(0, safe_duration)
-                    img_clip = img_clip.with_audio(audio)
+            gc.collect()
 
-                final_clips.append(img_clip)
-
-
-            else:
-                print(f"[WARN] Unknown crop mode for clip {idx}, skipping.")
-                continue
-
-        print(f"[INFO] DynamicCropping complete.")
+        print("[INFO] DynamicCropping complete.")
         return final_clips
