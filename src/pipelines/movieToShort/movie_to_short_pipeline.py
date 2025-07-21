@@ -30,21 +30,26 @@ class MovieToShortsPipeline:
 
         # ---- STEP 1: Generate a plan for the shorts ----
         plan_prompt = (
-            "You are a professional social media video strategist. Your task is to extract iconic or highly entertaining 1-minute shorts from the movie. "
-            "These can be memorable or funny dialogue scenes, emotionally powerful moments, or visually striking action scenes. "
-            "Each short should be digestible on its own, requiring minimal context to understand. Favor scenes where the viewer can quickly grasp the stakes or meaning.\n"
-            "For example, choose: (1) funny or iconic dialogue that mostly takes place in a tight time span, with optional payoff scenes from later in the movie; (2) action scenes with just enough setup or reaction dialogue to give them meaning. "
-            "You can jump forward in time to include resolution or payoff moments if it improves the impact.\n"
+            "You are a professional video strategist. Your goal is to create a series of short clips that, when viewed in order, effectively retell the main story of the movie.\n"
+            "Each short should correspond to an important or emotionally impactful part of the plot. Avoid including boring or unimportant scenes. Focus on story progression, emotional development, key reveals, and satisfying resolutions.\n"
+            "\n"
+            "The shorts should:\n"
+            "- Be arranged chronologically according to the movie's timeline.\n"
+            "- Skip filler scenes or sections that don’t add much to the story.\n"
+            "- Highlight turning points, major conflicts, character growth, climactic moments, and payoffs.\n"
+            "\n"
             "For each short, provide:\n"
             "- short_index: number\n"
-            "- description: what the short contains in detail and why it's addictive, and give rough timestamps where the content can be found in the footage\n"
-            "- start: approximate start time (HH:MM:SS) of the main segment\n"
-            "- end: approximate end time (HH:MM:SS) of the main segment\n"
-            "- supporting_clips: list of additional timestamps (start/end pairs) to include payoff or resolution clips\n"
-            "for movies, aim for around 20 shorts, and for tv episodes, aim for around 8 shorts.\n"
-            # "Be very selective what which shorts to include, since we want to create the most engaging and addictive 1-minute shorts possible. "
-            f"Movie duration: {int(total_duration//60)} min {int(total_duration%60)} sec."
+            "- description: what the short is about and why it is an important part of the story\n"
+            "- start: approximate HH:MM:SS timestamp for the main segment of this short (i.e., where this story beat begins)\n"
+            "- end: approximate HH:MM:SS timestamp for the main segment’s end\n"
+            "- supporting_clips: optional list of HH:MM:SS start/end pairs for any other key moments that should be included to strengthen the short (e.g., payoffs, reactions, flashbacks)\n"
+            "\n"
+            "You are not required to use the entire movie. It’s okay to skip unimportant or dull scenes.\n"
+            "Make sure the total number of shorts allows the whole story to be followed in ~20 parts for a full movie, or ~8 for an TV episode.\n"
+            f"The movie duration is approximately {int(total_duration//60)} minutes {int(total_duration%60)} seconds.\n"
         )
+
 
         print("[SHORTS] Generating plan for shorts (text-only response)...")
         plan_result = await self.flexible_pipeline.run(
@@ -65,18 +70,20 @@ class MovieToShortsPipeline:
 
         # ---- STEP 1B: Clean up and structure plan for parsing ----
         format_prompt = (
-            "Format the following shorts plan into a JSON list. For each short, extract:\n"
-            "- short_index: integer\n"
-            "- description: the full sentence(s) describing the short\n"
-            "- start: main segment start timestamp (HH:MM:SS)\n"
-            "- end: main segment end timestamp (HH:MM:SS)\n"
-            "- supporting_clips: optional list of start/end timestamp pairs in HH:MM:SS format\n"
-            "Return only a JSON list, no explanation.\n"
+            "Format the following chronological shorts plan into a JSON list. Each short should include:\n"
+            "- short_index: integer (starts from 0)\n"
+            "- description: what this short contains and why it is important to the story, in detail\n"
+            "- start: HH:MM:SS timestamp for the main segment’s beginning\n"
+            "- end: HH:MM:SS timestamp for the main segment’s end\n"
+            "- supporting_clips: optional list of additional segments to include, each with a start and end in HH:MM:SS format\n"
+            "\n"
+            "Return only a JSON list of objects. Do not include any explanation.\n"
             "Shorts plan:\n"
             "-------------------\n"
             f"{shorts_plan_text}\n"
             "-------------------"
         )
+
 
         shorts_plan_json = await asyncio.to_thread(
             self.flexible_pipeline.llm.LLM_request,
@@ -113,10 +120,11 @@ class MovieToShortsPipeline:
                 per_short_prompt += f"Include supporting moment(s) at: {extras}\n"
 
             per_short_prompt += (
-                "Choose the most powerful 1-minute edit using clips that are close in time, but may include payoff or resolution clips later in the movie.\n"
-                "Avoid wide jumps unless there's a clear setup/payoff. Emphasize memorable dialogue or visually intense action.\n"
-                "Ensure the short is emotionally or narratively satisfying and easy to follow without prior context.\n"
-                "The final video should be between 40–90 seconds, engaging from the first second, with subtitles included."
+                "Choose the most powerful 1-minute edit using clips that reflect this part of the movie’s plot. "
+                "Keep the edit engaging and impactful while preserving the story flow. "
+                "You must choose clips in chronological order, and try your best to avoid choosing clips outside the time range specified in the plan.\n"
+                "Ensure the short is understandable on its own but contributes to the overall chronological storytelling across all shorts. "
+                "Final video should be between 40–90 seconds, with subtitles included."
             )
 
             try:

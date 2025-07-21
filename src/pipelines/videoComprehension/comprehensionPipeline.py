@@ -39,7 +39,7 @@ class ComprehensionPipeline:
         self.cloud_storage_indexing_dir = f"indexing/{self.media_folder_name}/"
         self.indexing_file_path = self.cloud_storage_indexing_dir + "media_indexing.json"
         self.cloud_storage_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
-        self.llm = GeminiGenaiManager()
+        self.llm = GeminiGenaiManager(model="gemini-2.5-flash")
 
         self.start_fresh = start_fresh
         if self.start_fresh:

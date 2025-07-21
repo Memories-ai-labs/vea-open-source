@@ -12,7 +12,7 @@ class GenerateNarrationAudio:
 
     async def __call__(self, narrated_clips):
         for clip in narrated_clips:
-            clip_id = f"{clip["id"]}"  # ensure consistent naming
+            clip_id = f"{clip['id']}"  # ensure consistent naming
             sentence = clip["narration"]
             output_path = os.path.join(self.voice_output_dir, f"{clip_id}.mp3")
 

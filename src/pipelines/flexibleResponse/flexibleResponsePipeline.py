@@ -20,9 +20,9 @@ from src.pipelines.flexibleResponse.tasks.clip_extraction import ClipExtractor
 from src.pipelines.flexibleResponse.tasks.generate_narration_script import GenerateNarrationScript
 from src.pipelines.flexibleResponse.tasks.generate_video_clip_plan import GenerateVideoClipPlan
 from src.pipelines.common.refine_clip_timestamps import RefineClipTimestamps
-from pipelines.common.generate_narration_audio import GenerateNarrationAudio
-from pipelines.common.music_selection import MusicSelection 
-from pipelines.common.edit_video_response import EditVideoResponse
+from src.pipelines.common.generate_narration_audio import GenerateNarrationAudio
+from src.pipelines.common.music_selection import MusicSelection 
+from src.pipelines.common.edit_video_response import EditVideoResponse
 
 class FlexibleResponsePipeline:
     def __init__(self, cloud_storage_media_path):
@@ -31,7 +31,7 @@ class FlexibleResponsePipeline:
         self.media_name = os.path.basename(cloud_storage_media_path.rstrip("/"))
         self.media_base_name = os.path.splitext(self.media_name)[0]
         self.cloud_storage_indexing_dir = f"indexing/{self.media_base_name}/"
-        self.llm = GeminiGenaiManager(model="gemini-2.5-flash-preview-04-17")
+        self.llm = GeminiGenaiManager(model="gemini-2.5-flash")
         self.cloud_storage_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
         self.workdir = tempfile.mkdtemp()
         self.media_indexing_json = None
@@ -160,9 +160,10 @@ class FlexibleResponsePipeline:
             print(f"[INFO] Video clip plan generated. {len(selected_narrated_clips)} clips planned.")
             print(selected_narrated_clips)
             # refine trim timestamps for clips
-            refiner = RefineClipTimestamps(self.llm, self.workdir, self.cloud_storage_client, BUCKET_NAME)
-            selected_narrated_clips = await refiner(selected_narrated_clips)
-            print("[INFO] Refined clip timestamps based on dialogue transcription.")
+            if original_audio:
+                refiner = RefineClipTimestamps(self.llm, self.workdir, self.cloud_storage_client, BUCKET_NAME)
+                selected_narrated_clips = await refiner(selected_narrated_clips)
+                print("[INFO] Refined clip timestamps based on dialogue transcription.")
 
             # Generate narration audio files if enabled
             if narration_enabled:
