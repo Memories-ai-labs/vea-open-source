@@ -27,34 +27,6 @@ class GeminiGenaiManager:
         else:
             print("Warning: config.json not found. API keys not loaded.")
             
-    # def _convert_path_to_blob_part(self, file_path: Path) -> types.Part:
-    #     """
-    #     Converts a file at the given path into a Gemini-compatible Part containing an inline Blob.
-
-    #     Args:
-    #         file_path (Path): Path to the media file.
-
-    #     Returns:
-    #         types.Part: A Gemini Part containing the file blob with correct mime_type.
-
-    #     Raises:
-    #         FileNotFoundError: If the file does not exist.
-    #         ValueError: If MIME type cannot be determined or file is too large.
-    #     """
-    #     if not file_path.exists() or not file_path.is_file():
-    #         raise FileNotFoundError(f"File not found: {file_path}")
-
-    #     file_size = file_path.stat().st_size
-    
-    #     mime_type, _ = mimetypes.guess_type(file_path)
-    #     if mime_type is None:
-    #         raise ValueError(f"Could not determine MIME type for: {file_path}")
-
-    #     file_bytes = file_path.read_bytes()
-
-    #     return types.Part(
-    #         inline_data=types.Blob(data=file_bytes, mime_type=mime_type)
-    #     )
 
     def _convert_input_to_part(self, item) -> types.Part:
         """
