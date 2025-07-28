@@ -62,16 +62,18 @@ class EditVideoResponse:
         - Integrated LUFS loudness (float)
         """
         samples = audio_clip.to_soundarray(fps=sample_rate)
-
         # Convert stereo to mono by averaging channels if needed
         if samples.ndim > 1:
             samples = np.mean(samples, axis=1)
-
         meter = pyln.Meter(sample_rate)  # ITU-R BS.1770 loudness meter
         loudness = meter.integrated_loudness(samples)
-
         return loudness
-
+    
+    def safe_subclip(self, clip, start_time, end_time, epsilon=0.01):
+        safe_end_time = max(start_time, end_time - epsilon)
+        if clip.duration is not None:
+            safe_end_time = min(safe_end_time, clip.duration)
+        return clip.subclipped(start_time, safe_end_time)
 
     # ---------- Video Clip Assembly ----------
     def _process_clip(
@@ -89,6 +91,13 @@ class EditVideoResponse:
         priority = clip.get("priority", False)
 
         video_clip = VideoFileClip(video_path)
+        if video_clip.audio is None:
+            silent_audio = AudioClip(
+                lambda t: [0, 0],
+                duration=video_clip.duration,
+                fps=44100,
+            )
+            video_clip = video_clip.with_audio(silent_audio)
 
         if narration_enabled:
             try:
@@ -96,14 +105,18 @@ class EditVideoResponse:
                 narration = AudioFileClip(audio_path)
                 audio_duration = narration.duration
                 conservative_trim_end = max(end_sec, min(start_sec + audio_duration, video_clip.duration))
-                video_clip = video_clip.subclipped(start_sec, conservative_trim_end)
+                video_clip = self.safe_subclip(video_clip, start_sec, conservative_trim_end)
                 video_duration = video_clip.duration
                 if video_duration < audio_duration:
                     speed_factor = video_duration / audio_duration if audio_duration > 0 else 1
                     video_clip = video_clip.with_effects([vfx.MultiplySpeed(speed_factor)])
                 clip_volume = self.get_loudness(video_clip.audio)
                 narration_volume = self.get_loudness(narration)
-                volume_multiplier = (narration_volume / clip_volume) if narration_volume != 0 and clip_volume != 0 else 1.0
+                volume_multiplier = (
+                    10 ** ((narration_volume - clip_volume) / 20)
+                    if narration_volume != 0 and clip_volume != 0
+                    else 1.0
+                )
 
                 if not original_audio:
                     video_clip = video_clip.with_effects([afx.MultiplyVolume(0)])
@@ -116,7 +129,7 @@ class EditVideoResponse:
                     video_clip_copy = video_clip.with_effects([afx.MultiplyVolume(volume_multiplier)])
                     video_clip = video_clip.with_audio(narration)
                     if video_duration > audio_duration:
-                        video_clip = video_clip.subclipped(0, audio_duration)
+                        video_clip = self.safe_subclip(video_clip, 0, audio_duration)
                     return [video_clip, video_clip_copy]
                 elif priority == "clip_video":
                     video_clip = video_clip.with_audio(narration)
@@ -124,7 +137,7 @@ class EditVideoResponse:
                 else:  # narration default
                     video_clip = video_clip.with_audio(narration)
                     if video_duration > audio_duration:
-                        video_clip = video_clip.subclipped(0, audio_duration)
+                        video_clip = self.safe_subclip(video_clip, 0, audio_duration)
                     return [video_clip]
             except:
                 # try the clip again but dont use narration
@@ -136,7 +149,7 @@ class EditVideoResponse:
             video_clip = VideoFileClip(video_path)
             if not original_audio:
                 video_clip = video_clip.with_effects([afx.MultiplyVolume(0)])
-            video_clip = video_clip.subclipped(start_sec, end_sec)
+            video_clip = self.safe_subclip(video_clip, start_sec, end_sec)
             return [video_clip]
 
             
@@ -171,7 +184,7 @@ class EditVideoResponse:
                     # This will speed up or slow down the clip so it ends on the beat
                     clip = clip.with_effects([vfx.MultiplySpeed(speed_factor)])
                     # Make absolutely sure duration matches
-                    clip = clip.subclipped(0, new_duration)
+                    clip = self.safe_subclip(clip, 0, new_duration)
                     orig_duration = new_duration
 
             adjusted_clips.append(clip)
@@ -185,28 +198,29 @@ class EditVideoResponse:
         """Concatenates all processed video clips and handles music mixing."""
         final_video = concatenate_videoclips(processed_clips)
         video_audio = final_video.audio
-
-        # If background music, mix it in at the correct level
         if background_music_path:
             try:
                 background_music = AudioFileClip(background_music_path)
                 music_volume = self.get_loudness(background_music)
                 video_volume = self.get_loudness(video_audio)
-                # Adjust music relative to overall video/narration volume
                 if video_volume == 0 or music_volume == 0:
                     volume_multiplier = self.music_volume_multiplier
                 else:
-                    volume_multiplier = video_volume / music_volume * self.music_volume_multiplier
+                    volume_multiplier = (
+                        10 ** ((video_volume - music_volume) / 20)
+                    ) * self.music_volume_multiplier
                 background_music = background_music.with_effects(
                     [afx.MultiplyVolume(volume_multiplier)]
                 ).subclipped(0, final_video.duration)
                 final_audio = CompositeAudioClip([video_audio, background_music])
                 final_video = final_video.with_audio(final_audio)
             except Exception as e:
-                pass
+                print(f"[WARN] Failed to mix background music: {e}")
         else:
             print("[INFO] No background music provided. Exporting narration only.")
+        
         return final_video
+
     
     def segment_subtitle_by_aspect(self, text, start, end, aspect_ratio):
         """
