@@ -7,7 +7,8 @@ from lib.oss.auth import credentials_from_file
 from src.config import CREDENTIAL_PATH, BUCKET_NAME
 from src.pipelines.flexibleResponse.flexibleResponsePipeline import FlexibleResponsePipeline
 from lib.utils.media import seconds_to_hhmmss, get_video_duration
-from src.pipelines.movieToShort.schema import ShortsPlan
+from src.pipelines.movieToShort.schema import ShortsPlans
+from typing import List
 
 class MovieToShortsPipeline:
     """
@@ -88,10 +89,7 @@ class MovieToShortsPipeline:
         shorts_plan_json = await asyncio.to_thread(
             self.flexible_pipeline.llm.LLM_request,
             [format_prompt],
-            {
-                "response_mime_type": "application/json",
-                "response_schema": list[ShortsPlan]
-            }
+            ShortsPlans
         )
 
         print("\n[SHORTS PLAN STRUCTURED JSON]\n", json.dumps(shorts_plan_json, indent=2))

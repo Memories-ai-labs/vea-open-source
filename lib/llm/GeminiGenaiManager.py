@@ -1,132 +1,99 @@
 from google import genai
-from tqdm import tqdm
-import os
+from google.genai.types import (
+    Part,
+    Blob,
+    FileData,
+    GenerateContentConfig,
+    HttpOptions,
+)
+from google.genai.types import SafetySetting, HarmCategory, HarmBlockThreshold
+
 from pathlib import Path
-import json
-import time 
-import traceback
-from google.genai import types
+from pydantic import BaseModel
 import mimetypes
+import json
+import os
+import time
+import traceback
 from src.config import API_KEYS_PATH
 
+
 class GeminiGenaiManager:
-    def __init__(self, model = "gemini-2.5-flash"):
+    def __init__(self, model="gemini-2.5-flash", location="us-central1", project="alex-oix"):
         self.load_api_keys()
-        self.gemini_api_key = os.getenv("GENAI_API_KEY")
-        self.genai_client = genai.Client(api_key=self.gemini_api_key)
         self.model = model
+        self.genai_client = genai.Client(
+            vertexai=True,
+            location=location,
+            project=project
+        )
 
     def load_api_keys(self):
-        """Loads API keys from a JSON file and sets them as environment variables."""
+        """Load API keys from JSON into env vars"""
         if os.path.exists(API_KEYS_PATH):
             with open(API_KEYS_PATH, "r") as file:
                 api_keys = json.load(file)
                 for key, value in api_keys.items():
                     os.environ[key] = value
-                    print(f"Loaded API key: {key}")  # not printing actual values for security
+                    print(f"Loaded API key: {key}")
         else:
-            print("Warning: config.json not found. API keys not loaded.")
-            
+            print("Warning: API key file not found.")
 
-    def _convert_input_to_part(self, item) -> types.Part:
-        """
-        Converts various input types (Path, GCS URI string, or prompt text) into Gemini-compatible Part.
-        """
-        from google.genai import types
-
-        # If Path (local file)
+    def _convert_to_part(self, item) -> Part:
+        """Convert Path, GCS URI, or string into Gemini-compatible Part"""
         if isinstance(item, Path):
-            if not item.exists() or not item.is_file():
+            if not item.exists():
                 raise FileNotFoundError(f"File not found: {item}")
-
             mime_type, _ = mimetypes.guess_type(item)
             if mime_type is None:
-                raise ValueError(f"Could not determine MIME type for: {item}")
+                raise ValueError(f"Could not guess MIME type for: {item}")
+            return Part(inline_data=Blob(data=item.read_bytes(), mime_type=mime_type))
+        elif isinstance(item, str) and (item.startswith("gs://") or item.startswith("https://")):
+            return Part(file_data=FileData(file_uri=item))
+        else:
+            return Part(text=str(item))
 
-            file_bytes = item.read_bytes()
-            return types.Part(inline_data=types.Blob(data=file_bytes, mime_type=mime_type))
-
-        # If GCS URI or public HTTPS URI
-        elif isinstance(item, str) and (
-            item.startswith("gs://") or item.startswith("https://storage.googleapis.com/")
-        ):
-            return types.Part(file_data=types.FileData(file_uri=item))
-
-        # Otherwise treat as text
-        return types.Part(text=str(item))
-
-    def LLM_request(self, prompt_contents, config=None, retry_delay=60, max_retries=3):
+    def LLM_request(self, prompt_contents: list, schema: BaseModel = None, retry_delay=60, max_retries=3):
         """
-        Sends prompt_contents to Gemini. Converts Path objects to inline file blobs.
-        Handles JSON parse errors, blank responses, rate limits (429), model overloads (503), and retries.
+        Call Gemini with prompt and optional structured output schema.
         """
-        parts = []
-        for item in prompt_contents:
-            parts.append(self._convert_input_to_part(item))
+        parts = [self._convert_to_part(p) for p in prompt_contents]
 
-            # if isinstance(item, Path):
-            #     parts.append(self._convert_path_to_blob_part(item))
-            # else:
-            #     parts.append(types.Part(text=item))
-        attempt = 0
-        while attempt < max_retries:
-            response = None
+        response_schema = None
+        response_mime_type = None
+        if schema is not None:
+            response_schema = schema.model_json_schema()
+            response_mime_type = "application/json"
+
+        safety_settings = [
+                    SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=HarmBlockThreshold.BLOCK_NONE),
+                    SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=HarmBlockThreshold.BLOCK_NONE),
+                    SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=HarmBlockThreshold.BLOCK_NONE),
+                    SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=HarmBlockThreshold.BLOCK_NONE),
+                    SafetySetting(category=HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold=HarmBlockThreshold.BLOCK_NONE),
+                ]
+        config = GenerateContentConfig(
+            response_schema=response_schema,
+            response_mime_type=response_mime_type,
+            safety_settings=safety_settings,
+        )
+        for attempt in range(max_retries):
             try:
                 response = self.genai_client.models.generate_content(
                     model=self.model,
-                    contents=types.Content(parts=parts),
-                    config=config or {}
+                    contents=[{"role": "user", "parts": parts}],
+                    config=config,
                 )
 
-                # Handle JSON config separately
-                if config and config.get("response_mime_type") == "application/json":
-                    if not response.text or not response.text.strip():
-                        raise ValueError("Blank JSON response from Gemini.")
-                    return json.loads(response.text)
-
-                # Handle plain text
-                if not response.text or not response.text.strip():
-                    print("[INFO] Detected blank response.")
-                    raise ValueError("Blank response from Gemini.")
-
+                if response_mime_type == "application/json":
+                    return response.parsed  # Already parsed
                 return response.text
 
             except Exception as e:
-                attempt += 1
-                error_str = str(e)
-                status = None
-                # Try to extract HTTP status code
-                try:
-                    # For google.genai error format
-                    if hasattr(e, "args") and e.args and isinstance(e.args[0], dict):
-                        status = e.args[0].get('error', {}).get('code')
-                except Exception:
-                    status = None
-
-                print(f"[ERROR] Gemini call failed: {error_str} (Attempt {attempt}/{max_retries})")
-
-                # Only print response if it exists
-                if response is not None:
-                    print("[DEBUG] Gemini raw response:", response)
-
-                # Print prompt for debugging
-                print("[DEBUG] Prompt contents:", prompt_contents)
-
-                # Retry logic
-                if isinstance(e, json.JSONDecodeError):
-                    print("[INFO] Detected JSON decode error. Retrying in 10 seconds...")
-                    time.sleep(10)
-                elif status == 429 or "429" in error_str:
-                    print(f"[INFO] Detected rate limit error (429). Retrying in {60*attempt} seconds...")
-                    time.sleep(60*attempt)
-                elif status == 503 or "503" in error_str or "model is overloaded" in error_str.lower():
-                    print(f"[INFO] Detected model overload (503). Retrying in {60*attempt} seconds...")
-                    time.sleep(60*attempt)
-                else:
-                    if attempt == max_retries:
-                        print("[ERROR] Final failure, printing traceback:")
-                        traceback.print_exc()
+                print(f"[ERROR] Gemini call failed: {e} (Attempt {attempt + 1}/{max_retries})")
+                traceback.print_exc()
+                if attempt + 1 < max_retries:
                     print(f"[INFO] Retrying in {retry_delay} seconds...")
                     time.sleep(retry_delay)
-
-        raise RuntimeError(f"[FAILURE] Gemini failed after {max_retries} attempts.")
+                else:
+                    raise RuntimeError("Gemini failed after all retries.") from e

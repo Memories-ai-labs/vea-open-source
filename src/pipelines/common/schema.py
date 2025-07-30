@@ -1,7 +1,7 @@
 from enum import Enum
 from google import genai
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, RootModel
+from typing import Optional, List
 
 class CroppingResponse(BaseModel):
     frame_id: str
@@ -32,3 +32,6 @@ class RefinedClipTimestamps(BaseModel):
 class ChosenMusic(BaseModel):
     id: str 
     title: str 
+
+class ChosenMusicResponse(RootModel(List[ChosenMusic])):
+    pass

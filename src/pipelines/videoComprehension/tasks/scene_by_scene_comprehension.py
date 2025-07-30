@@ -4,9 +4,10 @@ import time
 import asyncio
 from datetime import timedelta
 from pathlib import Path
+from typing import List
 
 from lib.utils.media import seconds_to_hhmmss, parse_time_to_seconds
-from src.pipelines.videoComprehension.schema import Scene
+from src.pipelines.videoComprehension.schema import Scenes
 
 class SceneBySceneComprehension:
     def __init__(self, llm):
@@ -43,6 +44,7 @@ class SceneBySceneComprehension:
                 "- start_timestamp (HH:MM:SS)\n"
                 "- end_timestamp (HH:MM:SS)\n"
                 "- description\n"
+                "IMPORTANT: you must use the HH:MM:SS format for timestamps."
                 "You should output in English except for character names, which should be in the original language."
             )
 
@@ -50,10 +52,7 @@ class SceneBySceneComprehension:
             scene_data = await asyncio.to_thread(
                 self.llm.LLM_request,
                 [file_path, prompt],
-                config={
-                    "response_mime_type": "application/json",
-                    "response_schema": list[Scene],
-                }
+                Scenes
             )
 
             for scene in scene_data:

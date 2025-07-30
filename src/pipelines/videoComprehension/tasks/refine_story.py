@@ -1,7 +1,8 @@
 import asyncio
 from collections import defaultdict
+from typing import List
 
-from src.pipelines.videoComprehension.schema import RecapSentence
+from src.pipelines.videoComprehension.schema import RecapSentences
 
 class RefineStory:
     def __init__(self, llm):
@@ -72,8 +73,5 @@ class RefineStory:
         return await asyncio.to_thread(
             self.llm.LLM_request,
             [text, convert_prompt],
-            {
-                "response_mime_type": "application/json",
-                "response_schema": list[RecapSentence]
-            }
+            RecapSentences
         )

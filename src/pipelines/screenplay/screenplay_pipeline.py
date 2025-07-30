@@ -5,6 +5,8 @@ import tempfile
 import time
 import shutil
 import subprocess
+from typing import List
+
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
@@ -16,7 +18,7 @@ from lib.utils.media import (
 )
 from src.config import CREDENTIAL_PATH, BUCKET_NAME
 from src.pipelines.common.generate_subtitles import GenerateSubtitles
-from src.pipelines.screenplay.schema import SegmentTimestamps, SectionScreenplay, FinalScreenplay
+from src.pipelines.screenplay.schema import SegmentTimestamp, SegmentTimestamps, SectionScreenplay, FinalScreenplay
 
 
 class ScreenplayPipeline:
@@ -46,8 +48,8 @@ class ScreenplayPipeline:
             raise ValueError("Missing 'media_files' in indexing file.")
         return data["media_files"][0]  # Assume one media file per indexing
 
-    def _dict_to_segment(self, seg_dict) -> SegmentTimestamps:
-        return SegmentTimestamps(start=seg_dict["start"], end=seg_dict["end"])
+    def _dict_to_segment(self, seg_dict):
+        return SegmentTimestamp(start=seg_dict["start"], end=seg_dict["end"])
 
     async def _segment_video(self, plot_text, story_sentences, scenes):
         plot_summary = "\n".join([f"(Segment {s['segment_num']}): {s['sentence_text']}" for s in story_sentences])
@@ -59,13 +61,10 @@ class ScreenplayPipeline:
             f"Detailed Plot Breakdown:\n{plot_summary}\n\n"
             f"Scene List:\n{json.dumps(scenes, indent=2, ensure_ascii=False)}"
         )
-        segment_dicts = self.llm.LLM_request([prompt], {
-            "response_mime_type": "application/json",
-            "response_schema": list[SegmentTimestamps]
-        })
+        segment_dicts = self.llm.LLM_request([prompt], SegmentTimestamps)
         return [self._dict_to_segment(d) for d in segment_dicts]
 
-    async def _generate_screenplay_for_segment(self, segment: SegmentTimestamps, movie_path: str):
+    async def _generate_screenplay_for_segment(self, segment, movie_path: str):
         segment_video_path = extract_video_segment(
             movie_path, self.workdir, segment.start, segment.end,
             output_name=f"segment_{segment.start.replace(':','')}.mp4"

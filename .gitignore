@@ -40,3 +40,4 @@ indexed_files.txt
 monitor_tmp_size.sh
 src/debug.py
 yolov8n.pt
+benchmark_outputs

@@ -1,8 +1,8 @@
 from enum import Enum
 from google import genai
-from pydantic import BaseModel
+from pydantic import BaseModel, RootModel
 from typing import Optional
-
+from typing import List
 
 class ResponseForm(Enum):
     TEXT_ONLY = "text_only"
@@ -14,6 +14,9 @@ class EvidenceClip(BaseModel):
     end: str                 # e.g., "00:13:45"
     description: str         # visual scene description
     reason: str              # why this clip supports the response
+
+class EvidenceClips(RootModel[List[EvidenceClip]]):
+    pass
 
 class ClipPriority(str, Enum):
     NARRATION = "narration"      # prioritize narration voiceover
@@ -27,3 +30,6 @@ class ChosenClip(BaseModel):
     end: str
     narration: str
     priority: ClipPriority = ClipPriority.NARRATION  # defau
+
+class ChosenClips(RootModel[List[ChosenClip]]):
+    pass
