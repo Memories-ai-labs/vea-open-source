@@ -55,10 +55,7 @@ class DynamicCropping:
             resp = await asyncio.to_thread(
                 self.llm.LLM_request,
                 images + [prompt],
-                {
-                    "response_mime_type": "application/json",
-                    "response_schema": CropModeResponse,
-                },
+                CropModeResponse
             )
             print(f"[DEBUG] Gemini crop mode decision: {resp}")
             return resp["mode"]
@@ -78,10 +75,7 @@ class DynamicCropping:
                 result = await asyncio.to_thread(
                     self.llm.LLM_request,
                     [img_path, prompt],
-                    {
-                        "response_mime_type": "application/json",
-                        "response_schema": GeneralCropCenterResponse,
-                    },
+                    GeneralCropCenterResponse
                 )
                 print(f"[DEBUG] Gemini general crop center result: {result}")
                 centers.append((result["crop_center_x"], result["crop_center_y"]))

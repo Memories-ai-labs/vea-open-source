@@ -27,10 +27,7 @@ class ClassifyResponseType:
         response = await asyncio.to_thread(
             self.llm.LLM_request,
             [prompt],
-            config={
-                "response_mime_type": "text/x.enum",
-                "response_schema": ResponseForm
-            }
+            ResponseForm
         )
 
         print(f"[DEBUG] Classified response type: {response}")

@@ -1,12 +1,15 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, RootModel
 from typing import List
 
-class SegmentTimestamps(BaseModel):
+class SegmentTimestamp(BaseModel):
     start: str  # HH:MM:SS
     end: str    # HH:MM:SS
 
+class SegmentTimestamps(RootModel[List[SegmentTimestamp]]):
+    pass
+
 class SectionScreenplay(BaseModel):
-    segment: SegmentTimestamps
+    segment: SegmentTimestamp
     screenplay: str
 
 class FinalScreenplay(BaseModel):

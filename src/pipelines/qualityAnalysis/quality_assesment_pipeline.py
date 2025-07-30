@@ -51,10 +51,7 @@ class QualityAssessmentPipeline:
             "Return a single integer from 1 to 5."
         )
 
-        score = self.llm.LLM_request([video_path, prompt], {
-            "response_mime_type": "application/json",
-            "response_schema": int
-        })
+        score = self.llm.LLM_request([video_path, prompt], int)
         print(f"[DEBUG] Plot fidelity score: {score}")
         return score
 
@@ -73,10 +70,7 @@ class QualityAssessmentPipeline:
             "Return only a single integer score from 1 to 5."
         )
 
-        score = self.llm.LLM_request([video_path, prompt], {
-            "response_mime_type": "application/json",
-            "response_schema": int
-        })
+        score = self.llm.LLM_request([video_path, prompt], int)
         print(f"[DEBUG] User prompt alignment score: {score}")
         return score
 
@@ -96,10 +90,7 @@ class QualityAssessmentPipeline:
             "Return only a single integer score from 1 to 5."
         )
 
-        score = self.llm.LLM_request([video_path, prompt], {
-            "response_mime_type": "application/json",
-            "response_schema": int
-        })
+        score = self.llm.LLM_request([video_path, prompt], int)
         print(f"[DEBUG] Video quality score: {score}")
         return score
 
@@ -125,10 +116,7 @@ class QualityAssessmentPipeline:
             "}"
         )
 
-        result = self.llm.LLM_request([video_path, prompt], {
-            "response_mime_type": "application/json",
-            "response_schema": BrandSafetyScores
-        })
+        result = self.llm.LLM_request([video_path, prompt], BrandSafetyScores)
         print(f"[DEBUG] Brand safety scores: {result}")
         return BrandSafetyScores(**result)
 

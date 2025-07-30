@@ -1,6 +1,7 @@
 import asyncio
 import json
-from src.pipelines.flexibleResponse.schema import EvidenceClip
+from src.pipelines.flexibleResponse.schema import EvidenceClips
+from typing import List
 
 class EvidenceRetrieval:
     def __init__(self, llm):
@@ -49,10 +50,7 @@ class EvidenceRetrieval:
         clips = await asyncio.to_thread(
             self.llm.LLM_request,
             [prompt],
-            {
-                "response_mime_type": "application/json",
-                "response_schema": list[EvidenceClip]
-            }
+            EvidenceClips
         )
 
         # Post-process: Attach cloud_storage_path to each evidence clip

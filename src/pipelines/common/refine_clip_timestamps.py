@@ -219,10 +219,7 @@ class RefineClipTimestamps:
             refined = await asyncio.to_thread(
                 self.llm.LLM_request,
                 [schema_prompt],
-                {
-                    "response_mime_type": "application/json",
-                    "response_schema": RefinedClipTimestamps
-                }
+                RefinedClipTimestamps
             )
 
             print(f"[UPDATE] Clip {clip['id']}: {clip['start']}–{clip['end']} → {refined['refined_start']}–{refined['refined_end']}")

@@ -23,7 +23,7 @@ from src.pipelines.videoComprehension.tasks.scene_by_scene_comprehension import 
 from src.pipelines.videoComprehension.tasks.refine_story import RefineStory    # <-- updated import
 
 class ComprehensionPipeline:
-    def __init__(self, blob_path, start_fresh=False):
+    def __init__(self, blob_path, start_fresh=False, debug_output_dir=None):
         # Accept both file or folder
         is_gcs_file = not blob_path.endswith("/") and Path(blob_path).suffix.lower() in VIDEO_EXTS
         self.is_gcs_file = is_gcs_file
@@ -42,6 +42,8 @@ class ComprehensionPipeline:
         self.llm = GeminiGenaiManager(model="gemini-2.5-flash")
 
         self.start_fresh = start_fresh
+        self.debug_output_dir = debug_output_dir
+
         if self.start_fresh:
             print(f"[INFO] start_fresh enabled. Deleting: {self.cloud_storage_indexing_dir}")
             self.cloud_storage_client.delete_folder(BUCKET_NAME, self.cloud_storage_indexing_dir)
@@ -59,9 +61,8 @@ class ComprehensionPipeline:
             if path.suffix.lower() in VIDEO_EXTS:
                 files.append(path)
         return sorted(files, key=lambda x: x.name)
-    
+
     async def run_for_file(self, local_media_path, cloud_storage_media_path):
-        # Preprocessing and comprehension logic (what you have in run())
         media_name = os.path.basename(local_media_path)
         long_segments_dir = tempfile.mkdtemp()
         short_segments_dir = tempfile.mkdtemp()
@@ -69,11 +70,6 @@ class ComprehensionPipeline:
         print("[INFO] Preprocessing long segments...")
         long_segments = await preprocess_long_video(
             local_media_path, long_segments_dir, interval_seconds=15 * 60, fps=1, crf=30)
-        # Store GCS URIs for LLM input
-        # for segment in long_segments:
-        #     gcs_path = f"{self.cloud_storage_indexing_dir}segments/{segment["segment_number"]}"
-        #     self.cloud_storage_client.upload_files(BUCKET_NAME, segment["path"], gcs_path)
-        #     segment["gcs_uri"] = f"gs://{BUCKET_NAME}/{gcs_path}"
 
         print(f"[INFO] Generated {len(long_segments)} long segments.")
 
@@ -88,6 +84,13 @@ class ComprehensionPipeline:
         rough_summary_draft, people = await rc(long_segments)
         print("[INFO] Rough comprehension complete.")
 
+        if self.debug_output_dir:
+            os.makedirs(self.debug_output_dir, exist_ok=True)
+            draft_path = os.path.join(self.debug_output_dir, f"{Path(local_media_path).stem}_rough_summary.txt")
+            with open(draft_path, "w", encoding="utf-8") as f:
+                f.write(rough_summary_draft)
+            print(f"[DEBUG] Saved rough summary draft to {draft_path}")
+
         print("[INFO] Starting scene-by-scene comprehension...")
         sc = SceneBySceneComprehension(self.llm)
         scenes = await sc(short_segments, rough_summary_draft, people)
@@ -98,7 +101,6 @@ class ComprehensionPipeline:
         story_json, story_text = await rs(rough_summary_draft, scenes)
         print("[INFO] Refined story complete.")
 
-        # Assemble file-specific indexing entry
         return {
             "name": media_name,
             "cloud_storage_path": cloud_storage_media_path,
@@ -113,10 +115,8 @@ class ComprehensionPipeline:
             print(f"[SKIP] Indexing already exists at {self.indexing_file_path}")
             return
 
-        # Download single file or all files in folder
         media_files = []
         if self.cloud_storage_media_path.endswith("/") or not Path(self.cloud_storage_media_path).suffix.lower() in VIDEO_EXTS:
-            # Folder: download all video files to temp
             videos_dir = os.path.join(tempfile.mkdtemp(), "videos")
             self.cloud_storage_client.download_files(BUCKET_NAME, self.cloud_storage_media_path, videos_dir)
             local_files = [
@@ -129,13 +129,11 @@ class ComprehensionPipeline:
                 print(f"[INFO] Processing file: {local_media_path}")
                 media_files.append(await self.run_for_file(local_media_path, cloud_path))
         else:
-            # Single file: download to temp
             local_media_path = os.path.join(tempfile.mkdtemp(), os.path.basename(self.cloud_storage_media_path))
             self.cloud_storage_client.download_files(BUCKET_NAME, self.cloud_storage_media_path, local_media_path)
             print(f"[INFO] Processing file: {local_media_path}")
             media_files.append(await self.run_for_file(local_media_path, self.cloud_storage_media_path))
 
-        # Assemble manifest
         indexing_object = {
             "media_files": media_files,
             "manifest": {
@@ -149,6 +147,11 @@ class ComprehensionPipeline:
         output_path = os.path.join(self.workdir, "media_indexing.json")
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(indexing_object, f, ensure_ascii=False, indent=2)
+
+        if self.debug_output_dir:
+            debug_indexing_path = os.path.join(self.debug_output_dir, "media_indexing.json")
+            shutil.copy(output_path, debug_indexing_path)
+            print(f"[DEBUG] Saved indexing to {debug_indexing_path}")
 
         print(f"[INFO] Uploading indexing file to GCS: {self.indexing_file_path}")
         self.cloud_storage_client.upload_files(BUCKET_NAME, output_path, self.indexing_file_path)

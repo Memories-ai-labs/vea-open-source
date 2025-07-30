@@ -5,7 +5,8 @@ import pandas as pd
 from pathlib import Path
 from pydub import AudioSegment
 import asyncio
-from src.pipelines.common.schema import ChosenMusic
+from src.pipelines.common.schema import ChosenMusicResponse
+from typing import List
 
 class MusicSelection:
     def __init__(self, llm, output_dir):
@@ -68,10 +69,7 @@ class MusicSelection:
         result = await asyncio.to_thread(
             self.llm.LLM_request,
             [prompt],
-            {
-                "response_mime_type": "application/json",
-                "response_schema": list[ChosenMusic]
-            }
+            ChosenMusicResponse
         )
         return result
 
