@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 
-class NaiveGeminiComprehension:
+class   NaiveGeminiComprehension:
     def __init__(self, llm):
         self.llm = llm
 
@@ -14,17 +14,18 @@ class NaiveGeminiComprehension:
 
             prompt = (
                 "you are an AI tasked with understanding video content, such as movies, tv shows, interviews, sports games etc. "
-                "Describe the contents of this segment in detail. include key events, characters, and any important dialogue or actions." 
-                "then, provide a list of scenes in the segment and describe each scene briefly including timestamps"
+                "Describe the contents of this segment in detail. try to be as detailed as possible and include every action, character, and dialogue." 
+                "then, provide a full list of scenes in the segment and describe each scene briefly including timestamps"
                 "Return plain text only."
             )
             desc = await asyncio.to_thread(self.llm.LLM_request, [path, prompt])
             descriptions.append(desc.strip())
 
         # Merge into one combined summary
-        final_prompt = (
+        final_prompt = (            
             "You will be given multiple segment-level descriptions of a video as well as a list of scenes for each segment. "
-            "Your task is to combine them into one coherent story summary, then create a list of all scenes in the video with their timestamps. "
+            "Your task is to combine them into one coherent story summary, then create a list of all scenes in the video with their timestamps. " \
+            "make sure the timestamps are incremented from segment to segment, as in the start of the second segment should have a timestamp after the end of the first segment. be as detailed as possible."
         )
         combined = await asyncio.to_thread(self.llm.LLM_request, ["\n\n".join(descriptions), final_prompt])
         return combined

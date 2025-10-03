@@ -101,7 +101,7 @@ class MovieToShortsPipeline:
         shorts = []
         for i, plan_entry in enumerate(lines):
             print(f"\n[SHORTS] Generating short #{i+1}")
-            gcs_output_path = f"outputs/movie2short/{movie_name}/{i}.mp4"
+            gcs_output_path = f"output/newmovie2short/{movie_name}/{i}.mp4"
             plan_desc = plan_entry.get("description", "")
             plan_start = plan_entry.get("start")
             plan_end = plan_entry.get("end")
