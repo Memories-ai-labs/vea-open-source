@@ -33,5 +33,14 @@ class ChosenMusic(BaseModel):
     id: str 
     title: str 
 
-class ChosenMusicResponse(RootModel(List[ChosenMusic])):
-    pass
+class ChosenMusicResponse(RootModel[List[ChosenMusic]]):
+    """LLM response containing a ranked list of music choices."""
+
+    def __iter__(self):  # allow direct iteration over items
+        return iter(self.root)
+
+    def __len__(self):  # len(response)
+        return len(self.root)
+
+    def __getitem__(self, item):  # indexing support
+        return self.root[item]

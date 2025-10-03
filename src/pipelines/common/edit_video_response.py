@@ -2,6 +2,7 @@ import os
 import tempfile
 import asyncio
 import gc
+import traceback
 from moviepy import *
 import librosa
 import numpy as np
@@ -90,6 +91,11 @@ class EditVideoResponse:
         end_sec = parse_time_to_seconds(clip["end"])
         priority = clip.get("priority", False)
 
+        print(
+            f"[DEBUG] _process_clip start id={clip_id} file={file_name} "
+            f"start={start_sec:.2f}s end={end_sec:.2f}s priority={priority}"
+        )
+
         video_clip = VideoFileClip(video_path)
         if video_clip.audio is None:
             silent_audio = AudioClip(
@@ -102,6 +108,7 @@ class EditVideoResponse:
         if narration_enabled:
             try:
                 audio_path = os.path.join(narration_dir, f"{clip_id}.mp3")
+                print(f"[DEBUG] Loading narration for clip {clip_id} from {audio_path}")
                 narration = AudioFileClip(audio_path)
                 audio_duration = narration.duration
                 conservative_trim_end = max(end_sec, min(start_sec + audio_duration, video_clip.duration))
@@ -139,10 +146,13 @@ class EditVideoResponse:
                     if video_duration > audio_duration:
                         video_clip = self.safe_subclip(video_clip, 0, audio_duration)
                     return [video_clip]
-            except:
+            except Exception as exc:
+                print(
+                    f"[WARN] Narration processing failed for clip {clip_id}: {exc}\n"
+                    f"{traceback.format_exc()}"
+                )
                 # try the clip again but dont use narration
                 narration_enabled = False
-                pass
 
         if not narration_enabled:
             # Reload original full-length clip
@@ -336,6 +346,7 @@ class EditVideoResponse:
         # Download all needed files first
         needed = {clip["file_name"]: clip["cloud_storage_path"] for clip in clips}
         for fname, cspath in needed.items():
+            print(f"[DEBUG] Downloading source clip {fname} from {cspath}")
             original_path = self._download_media_file(fname, cspath)
             self._downloaded_files[fname] = original_path
 
@@ -345,12 +356,13 @@ class EditVideoResponse:
         for clip in sorted(clips, key=lambda c: int(c["id"])):
             try:
                 new_clips = self._process_clip(clip, narration_dir, narration_enabled, original_audio)
+                print(f"[DEBUG] Clip {clip['id']} produced {len(new_clips)} segments")
                 original_clips.extend(new_clips)
                 for c in new_clips:
                     w, h = c.size
                     aspect_ratios.append(round(float(w) / float(h), 3))
             except Exception as e:
-                print(f"[ERROR] Failed to process clip {clip['id']}: {e}")
+                print(f"[ERROR] Failed to process clip {clip['id']}: {e}\n{traceback.format_exc()}")
                 continue
 
         if not original_clips:
@@ -375,7 +387,14 @@ class EditVideoResponse:
 
         # --- Cropping ---
         dc = DynamicCropping(self.llm, self.workdir)
-        cropped_clips = await dc(export_width, export_height, original_clips)
+        print(f"[DEBUG] Starting dynamic cropping for {len(original_clips)} clips")
+        try:
+            cropped_clips = await dc(export_width, export_height, original_clips)
+        except Exception as exc:
+            print(f"[ERROR] Dynamic cropping failed: {exc}\n{traceback.format_exc()}")
+            dc.cleanup()
+            raise
+        print(f"[DEBUG] Dynamic cropping complete. Received {len(cropped_clips)} clips")
 
         if background_music_path and snap_to_beat:
             cropped_clips = self.snap_clips_to_music_beats(cropped_clips, background_music_path)
@@ -387,6 +406,7 @@ class EditVideoResponse:
             caption_dir = tempfile.mkdtemp()
             tmp_srt_path = os.path.join(caption_dir, "captions.srt")
             tmp_video_path = os.path.join(caption_dir, "no_caption.mp4")
+            print(f"[DEBUG] Writing intermediate video (no captions) to {tmp_video_path}")
             await asyncio.to_thread(
                 final_video.write_videofile,
                 tmp_video_path,
@@ -409,11 +429,13 @@ class EditVideoResponse:
                 subtitle_generator.write_srt(srt_entries, tmp_srt_path)
 
                 try:
+                    print(f"[DEBUG] Burning subtitles into video using {tmp_srt_path}")
                     self.burn_subtitles(tmp_video_path, tmp_srt_path, self.output_path)
                 except Exception as e:
-                    print(f"[WARN] Failed to burn subtitles: {e}")
+                    print(f"[WARN] Failed to burn subtitles: {e}\n{traceback.format_exc()}")
                     self.output_path = tmp_video_path
         else:
+            print(f"[DEBUG] Writing final video directly to {self.output_path}")
             await asyncio.to_thread(
                 final_video.write_videofile,
                 self.output_path,
@@ -435,6 +457,10 @@ class EditVideoResponse:
             except Exception as e:
                 print(f"[WARN] Failed to close cropped clip: {e}")
         try:
+            dc.cleanup()
+        except Exception as e:
+            print(f"[WARN] Dynamic cropping cleanup failed: {e}")
+        try:
             final_video.close()
         except Exception as e:
             print(f"[WARN] Failed to close final video: {e}")
@@ -447,9 +473,24 @@ class EditVideoResponse:
     
 
 if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("[ERROR] Expected path to edit config JSON")
+        sys.exit(1)
+
     input_path = sys.argv[1]
+    print(f"[DEBUG] EditVideoResponse invoked with config {input_path}")
     with open(input_path, "r", encoding="utf-8") as f:
         config = json.load(f)
+
+    print(
+        "[DEBUG] Parsed config summary:\n"
+        f"  clips={len(config.get('clips', []))}\n"
+        f"  narration_dir={config.get('narration_dir')}\n"
+        f"  background_music_path={config.get('background_music_path')}\n"
+        f"  aspect_ratio={config.get('aspect_ratio')}\n"
+        f"  subtitles={config.get('subtitles')} snap_to_beat={config.get('snap_to_beat')}\n"
+        f"  output_path={config.get('output_path')}"
+    )
 
     # Reconstruct arguments
     clips = config["clips"]

@@ -15,3 +15,8 @@ class QualityAssessmentResult(BaseModel):
     user_prompt_alignment: int = Field(..., ge=1, le=5)
     video_quality: int = Field(..., ge=1, le=5)
     brand_safety: BrandSafetyScores
+
+class EvaluationScore(BaseModel):
+    factual_correctness: int = Field(..., ge=1, le=5)
+    timestamp_accuracy: int = Field(..., ge=1, le=5)
+    detail_completeness: int = Field(..., ge=1, le=5)

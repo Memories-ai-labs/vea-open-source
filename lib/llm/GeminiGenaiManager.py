@@ -8,6 +8,7 @@ from google.genai.types import (
 )
 from google.genai.types import SafetySetting, HarmCategory, HarmBlockThreshold
 
+from enum import Enum
 from pathlib import Path
 from pydantic import BaseModel
 import mimetypes
@@ -15,6 +16,7 @@ import json
 import os
 import time
 import traceback
+from typing import Any, Dict, Optional, Tuple, Type
 from src.config import API_KEYS_PATH
 
 
@@ -53,17 +55,63 @@ class GeminiGenaiManager:
         else:
             return Part(text=str(item))
 
+    def _resolve_schema(self, schema: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Build a JSON schema dict and MIME type from various schema inputs."""
+        if schema is None:
+            return None, None
+
+        # Pydantic BaseModel (class or instance) expose model_json_schema directly
+        if hasattr(schema, "model_json_schema"):
+            return schema.model_json_schema(), "application/json"
+
+        # Enum subclasses can be converted into a simple enum JSON schema
+        if isinstance(schema, type) and issubclass(schema, Enum):
+            enum_values = [member.value for member in schema]
+            if not enum_values:
+                raise ValueError("Enum schema must define at least one value.")
+
+            sample = enum_values[0]
+            if isinstance(sample, str):
+                json_type = "string"
+            elif isinstance(sample, bool):
+                json_type = "boolean"
+            elif isinstance(sample, int):
+                json_type = "integer"
+            elif isinstance(sample, float):
+                json_type = "number"
+            else:
+                raise TypeError(
+                    "Unsupported enum value type for structured output: "
+                    f"{type(sample).__name__}"
+                )
+
+            return {"type": json_type, "enum": enum_values}, "application/json"
+
+        # Built-in JSON primitives
+        builtin_schema_map: Dict[Type[Any], Dict[str, str]] = {
+            str: {"type": "string"},
+            int: {"type": "integer"},
+            float: {"type": "number"},
+            bool: {"type": "boolean"},
+            list: {"type": "array"},
+            dict: {"type": "object"},
+        }
+        if isinstance(schema, type) and schema in builtin_schema_map:
+            return builtin_schema_map[schema], "application/json"
+
+        if isinstance(schema, dict):
+            return schema, "application/json"
+
+        # Fallback: no structured schema available, so return plain text
+        return None, None
+
     def LLM_request(self, prompt_contents: list, schema: BaseModel = None, retry_delay=60, max_retries=3):
         """
         Call Gemini with prompt and optional structured output schema.
         """
         parts = [self._convert_to_part(p) for p in prompt_contents]
 
-        response_schema = None
-        response_mime_type = None
-        if schema is not None:
-            response_schema = schema.model_json_schema()
-            response_mime_type = "application/json"
+        response_schema, response_mime_type = self._resolve_schema(schema)
 
         safety_settings = [
                     SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=HarmBlockThreshold.BLOCK_NONE),
@@ -85,7 +133,12 @@ class GeminiGenaiManager:
                     config=config,
                 )
 
+                if response.text == None:
+                    raise ValueError("Response text is None, likely an error occurred.")
+
                 if response_mime_type == "application/json":
+                    if response.parsed is None:
+                        raise ValueError("Response parsed is None, likely an error occurred.")
                     return response.parsed  # Already parsed
                 return response.text
 

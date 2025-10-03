@@ -53,23 +53,31 @@ async def run_benchmark_for_blob(blob_path, model_name):
 async def main():
     # List of blob paths to process
     blob_paths = [
-        # "movie_library/龙猫.mkv",
-        # "movie_library/驯龙高手.mkv",
         "movie_library/spacebetween.mp4",
-        "movie_library/新龙门客栈.mkv"
+        "movie_library/174.曾经 Once (2007) 中英双字.mkv",
+        "movie_library/John Wick (2014) 1080p BluRay H264 DolbyD 5.1 + nickarad.mp4",
+        "movie_library/V字仇杀队.mkv",
+        "movie_library/七宗罪.mkv",
+        "movie_library/肖申克的救赎.mp4",
+        "movie_library/千与千寻.mkv"
+
     ]
 
     # Gemini model variants to benchmark
     models_to_try = [
         "gemini-2.5-flash",
         "gemini-2.5-pro",
+        "gemini-2.0-flash",
         "ours"
     ]
 
     for blob_path in blob_paths:
         for model_name in models_to_try:
-            await run_benchmark_for_blob(blob_path, model_name)
-
+            try:
+                await run_benchmark_for_blob(blob_path, model_name)
+            except Exception as e:
+                print(f"[ERROR] Failed to process {blob_path} with model {model_name}: {e}")
+                continue
 
 if __name__ == "__main__":
     asyncio.run(main())
