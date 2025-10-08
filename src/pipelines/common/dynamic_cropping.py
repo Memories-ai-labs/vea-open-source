@@ -112,7 +112,7 @@ class ViNetSaliencyBackend:
             raise ValueError("ViNet variant must be 'S' or 'A'.")
 
         if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            device = "cpu"
         self.device = torch.device(device)
         self.fp16 = bool(fp16 and self.device.type == "cuda")
         self.clip_len = int(clip_len)
@@ -260,7 +260,13 @@ class DynamicCropping:
 
         self.clip_len = 32
         self.stride = 32
-        self.backend = ViNetSaliencyBackend(self.repo_dir, self.checkpoint_path, variant="S", clip_len=self.clip_len)
+        self.backend = ViNetSaliencyBackend(
+            self.repo_dir,
+            self.checkpoint_path,
+            variant="S",
+            clip_len=self.clip_len,
+            fp16=False,
+        )
         self._temp_outputs: set[Path] = set()
         self._clip_finalizers: List[weakref.finalize] = []
         self._debug_outputs: List[Path] = []
