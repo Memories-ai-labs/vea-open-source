@@ -514,9 +514,10 @@ class DynamicCropping:
         fps: float,
         shots: Sequence[Tuple[int, int]],
         bounds: Tuple[int, int, int, int],
-    ) -> List[Tuple[float, float]]:
+    ) -> Tuple[List[Tuple[float, float]], List[dict]]:
         total_frames = self._estimate_total_frames(clip, fps)
         frame_centers: List[Tuple[float, float]] = [(0.5, 0.5)] * total_frames
+        shot_metadata: List[dict] = []
 
         if hasattr(clip, "reader") and hasattr(clip.reader, "initialize"):
             try:
@@ -580,17 +581,29 @@ class DynamicCropping:
                 if 0 <= frame_idx < total_frames:
                     frame_centers[frame_idx] = center_norm
 
-        return frame_centers
+            shot_metadata.append(
+                {
+                    "start_frame": int(start),
+                    "end_frame": int(end),
+                    "center_norm": {
+                        "x": float(center_norm[0]),
+                        "y": float(center_norm[1]),
+                    },
+                }
+            )
+
+        return frame_centers, shot_metadata
 
     def _render_clip(
         self,
         clip: VideoFileClip,
         fps: float,
         frame_centers: Sequence[Tuple[float, float]],
+        shot_metadata: Sequence[dict],
         bounds: Tuple[int, int, int, int],
         desired_width: int,
         desired_height: int,
-    ) -> Path:
+    ) -> Tuple[Path, dict]:
         total_frames = self._estimate_total_frames(clip, fps)
         y1, y2, x1, x2 = bounds
 
@@ -606,6 +619,7 @@ class DynamicCropping:
             fps,
             (desired_width, desired_height),
         )
+        frames_written = 0
 
         progress = tqdm(
             total=max(total_frames, 1),
@@ -636,11 +650,46 @@ class DynamicCropping:
                 resized = cv2.resize(masked, (scaled_width, scaled_height), interpolation=cv2.INTER_LINEAR)
                 cropped = self._crop_frame(resized, center, desired_width, desired_height, False)
                 writer.write(cropped)
+                frames_written += 1
                 progress.update(1)
         finally:
             progress.close()
             writer.release()
-        return temp_output
+        if frames_written == 0:
+            fallback_writer = cv2.VideoWriter(
+                str(temp_output),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                max(fps, 1.0),
+                (desired_width, desired_height),
+            )
+            try:
+                sample_frame = clip.get_frame(0)
+                sample_bgr = cv2.cvtColor(sample_frame, cv2.COLOR_RGB2BGR)
+                masked = np.zeros_like(sample_bgr)
+                masked[y1:y2, x1:x2] = sample_bgr[y1:y2, x1:x2]
+                fallback_center = frame_centers[0] if frame_centers else (0.5, 0.5)
+                resized = cv2.resize(masked, (scaled_width, scaled_height), interpolation=cv2.INTER_LINEAR)
+                fallback_cropped = self._crop_frame(resized, fallback_center, desired_width, desired_height, False)
+            except Exception:
+                fallback_cropped = np.zeros((desired_height, desired_width, 3), dtype=np.uint8)
+            fallback_writer.write(fallback_cropped)
+            fallback_writer.release()
+        crop_metadata = {
+            "method": "dynamic_saliency_vinet",
+            "fps": float(fps),
+            "output_size": [int(desired_width), int(desired_height)],
+            "source_size": [int(frame_width), int(frame_height)],
+            "content_bounds": {
+                "y1": int(y1),
+                "y2": int(y2),
+                "x1": int(x1),
+                "x2": int(x2),
+            },
+            "scale": float(scale),
+            "shots": list(shot_metadata),
+        }
+
+        return temp_output, crop_metadata
 
     def _crop_frame(
         self,
@@ -671,7 +720,7 @@ class DynamicCropping:
             cv2.line(overlay, (0, 0), (overlay.shape[1], 0), (0, 0, 255), thickness=4)
         return overlay
 
-    def _process_clip(self, clip: VideoFileClip, desired_width: int, desired_height: int) -> Path:
+    def _process_clip(self, clip: VideoFileClip, desired_width: int, desired_height: int) -> Tuple[Path, dict | None]:
         fps = clip.fps or 30.0
         total_frames = self._estimate_total_frames(clip, fps)
         if total_frames == 0:
@@ -707,9 +756,19 @@ class DynamicCropping:
             self._start_debug_preview(clip, normalized_shots, fps)
 
         try:
-            frame_centers = self._compute_frame_centers(clip, fps, normalized_shots, bounds)
-            temp_output = self._render_clip(clip, fps, frame_centers, bounds, desired_width, desired_height)
-            return temp_output
+            frame_centers, shot_metadata = self._compute_frame_centers(
+                clip, fps, normalized_shots, bounds
+            )
+            temp_output, crop_metadata = self._render_clip(
+                clip,
+                fps,
+                frame_centers,
+                shot_metadata,
+                bounds,
+                desired_width,
+                desired_height,
+            )
+            return temp_output, crop_metadata
         finally:
             if self.debug:
                 self._finalize_debug_preview()
@@ -722,13 +781,28 @@ class DynamicCropping:
 
         for idx, clip in enumerate(clips):
             print(f"\n[INFO] Processing clip {idx}")
-            temp_path = await asyncio.to_thread(self._process_clip, clip, desired_width, desired_height)
+            temp_result = await asyncio.to_thread(self._process_clip, clip, desired_width, desired_height)
+
+            if isinstance(temp_result, tuple):
+                temp_path, crop_metadata = temp_result
+            else:
+                temp_path, crop_metadata = temp_result, None
 
             video = VideoFileClip(str(temp_path))
             self._register_clip_cleanup(video, temp_path)
             if clip.audio:
                 safe_duration = min(video.duration, clip.audio.duration)
                 video = video.with_audio(clip.audio.subclipped(0, safe_duration))
+
+            source_metadata = getattr(clip, "_vea_metadata", None)
+            if source_metadata is not None:
+                if crop_metadata is not None:
+                    source_metadata["crop"] = crop_metadata
+                source_metadata.setdefault("timeline", {})["duration"] = float(video.duration or 0.0)
+                applied_start = source_metadata.setdefault("timings", {}).get("applied_start", 0.0)
+                source_metadata["timings"]["applied_end"] = applied_start + float(video.duration or 0.0)
+                setattr(video, "_vea_metadata", source_metadata)
+
             final_clips.append(video)
             gc.collect()
             clip_progress.update(1)
