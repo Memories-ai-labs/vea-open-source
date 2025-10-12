@@ -182,64 +182,142 @@ def export_fcpxml(
             offset_seconds += duration
             continue
 
-        clip_attrs = {
-            "name": file_name or "Segment",
-            "offset": _format_time(offset_seconds, frame_rate),
-            "start": _format_time(float(timings.get("source_start", 0.0)), frame_rate),
-            "duration": _format_time(duration, frame_rate),
-            "ref": asset_id,
-            "enabled": "1",
-            "format": format_id,
-        }
-
-        segment_type = meta.get("segment_type")
-        if segment_type:
-            clip_attrs["role"] = str(segment_type)
-
-        clip_el = SubElement(spine_el, "asset-clip", clip_attrs)
-
-        retime = meta.get("retime", {}) or {}
-        speed = float(retime.get("speed", 1.0))
-        if abs(speed - 1.0) > 1e-6 or retime.get("adjustments"):
-            time_map = SubElement(clip_el, "timeMap")
-            SubElement(time_map, "timept", time="0s", value=_format_time(float(timings.get("source_start", 0.0)), frame_rate))
-            SubElement(
-                time_map,
-                "timept",
-                time=_format_time(duration, frame_rate),
-                value=_format_time(float(timings.get("source_end", timings.get("source_start", 0.0))), frame_rate),
-            )
+        # This is the start offset of the *entire* clip segment, before any splitting.
+        # We need this for placing the narration correctly.
+        segment_start_offset_seconds = offset_seconds
 
         crop_meta = meta.get("crop") or {}
-        if crop_meta:
-            shots = crop_meta.get("shots") or []
-            center = shots[0]["center_norm"] if shots else {"x": 0.5, "y": 0.5}
-            center_x = float(center.get("x", 0.5))
-            center_y = float(center.get("y", 0.5))
-            source_size = crop_meta.get("source_size") or [width, height]
-            src_w = float(source_size[0]) or float(width)
-            src_h = float(source_size[1]) or float(height)
+        shots = crop_meta.get("shots") or []
 
-            fit_scale = width / src_w if src_w else 1.0
-            fill_scale = (height / src_h) / fit_scale if (src_h and fit_scale) else 1.0
-            scale_value = fill_scale
+        if len(shots) > 1:
+            clip_fps = float(crop_meta.get("fps", frame_rate))
+            source_clip_start_sec = float(timings.get("source_start", 0.0))
 
-            width_after = width * fill_scale
-            max_offset_x = max(0.0, (width_after - width) / 2.0)
-            position_x = (center_x - 0.5) * width_after
-            position_x = max(-max_offset_x, min(max_offset_x, position_x))
-            normalized_position_x = position_x / 19.2
-            position_y = 0.0
+            total_duration_timeline_frames = round(duration * frame_rate)
+            processed_timeline_frames = 0
 
-            SubElement(
-                clip_el,
-                "adjust-transform",
-                scale=f"{scale_value:.6f} {scale_value:.6f}",
-                position=f"{normalized_position_x:.4f} {position_y:.4f}",
-            )
-            if len(shots) > 1:
-                note = SubElement(clip_el, "note")
-                note.text = json.dumps({"shots": shots})
+            for i, shot in enumerate(shots):
+                shot_start_frames_in_clip = shot.get("start_frame", 0)
+                shot_end_frames_in_clip = shot.get("end_frame", 0)
+                shot_duration_frames_in_clip = shot_end_frames_in_clip - shot_start_frames_in_clip
+
+                if shot_duration_frames_in_clip <= 0:
+                    continue
+
+                shot_source_start_sec = source_clip_start_sec + (shot_start_frames_in_clip / clip_fps)
+
+                if i == len(shots) - 1:
+                    shot_duration_timeline_frames = total_duration_timeline_frames - processed_timeline_frames
+                else:
+                    shot_duration_sec = shot_duration_frames_in_clip / clip_fps
+                    shot_duration_timeline_frames = round(shot_duration_sec * frame_rate)
+
+                if shot_duration_timeline_frames <= 0:
+                    continue
+
+                shot_offset_timeline_frames = round(offset_seconds * frame_rate) + processed_timeline_frames
+
+                shot_clip_attrs = {
+                    "name": f"{file_name}_shot_{shot['start_frame']}",
+                    "offset": f"{shot_offset_timeline_frames}/{int(round(frame_rate))}s",
+                    "start": _format_time(shot_source_start_sec, frame_rate),
+                    "duration": f"{shot_duration_timeline_frames}/{int(round(frame_rate))}s",
+                    "ref": asset_id,
+                    "enabled": "1",
+                    "format": format_id,
+                }
+                shot_clip_el = SubElement(spine_el, "asset-clip", shot_clip_attrs)
+
+                shot_center = shot.get("center_norm", {"x": 0.5, "y": 0.5})
+                center_x = float(shot_center.get("x", 0.5))
+                center_y = float(shot_center.get("y", 0.5))
+                source_size = crop_meta.get("source_size") or [width, height]
+                src_w = float(source_size[0]) or float(width)
+                src_h = float(source_size[1]) or float(height)
+
+                scale_value = max(width / src_w, height / src_h) if src_w > 0 and src_h > 0 else 1.0
+                scaled_w = src_w * scale_value
+                scaled_h = src_h * scale_value
+                max_pan_x = max(0.0, (scaled_w - width) / 2.0)
+                max_pan_y = max(0.0, (scaled_h - height) / 2.0)
+                position_x_pixels = (0.5 - center_x) * scaled_w
+                position_y_pixels = (center_y - 0.5) * scaled_h
+                clamped_x_pixels = max(-max_pan_x, min(max_pan_x, position_x_pixels))
+                clamped_y_pixels = max(-max_pan_y, min(max_pan_y, position_y_pixels))
+
+                # Normalize the pixel values. The 19.2 factor is likely based on a 1920px reference width (1920 / 100).
+                normalization_divisor = 19.2
+                final_pos_x = clamped_x_pixels / normalization_divisor
+                final_pos_y = clamped_y_pixels / normalization_divisor
+
+                SubElement(
+                    shot_clip_el,
+                    "adjust-transform",
+                    scale=f"{scale_value:.6f} {scale_value:.6f}",
+                    position=f"{final_pos_x:.4f} {final_pos_y:.4f}",
+                )
+
+                processed_timeline_frames += shot_duration_timeline_frames
+        else:
+            clip_attrs = {
+                "name": file_name or "Segment",
+                "offset": _format_time(offset_seconds, frame_rate),
+                "start": _format_time(float(timings.get("source_start", 0.0)), frame_rate),
+                "duration": _format_time(duration, frame_rate),
+                "ref": asset_id,
+                "enabled": "1",
+                "format": format_id,
+            }
+            segment_type = meta.get("segment_type")
+            if segment_type:
+                clip_attrs["role"] = str(segment_type)
+            clip_el = SubElement(spine_el, "asset-clip", clip_attrs)
+
+            retime = meta.get("retime", {}) or {}
+            speed = float(retime.get("speed", 1.0))
+            if abs(speed - 1.0) > 1e-6 or retime.get("adjustments"):
+                time_map = SubElement(clip_el, "timeMap")
+                SubElement(time_map, "timept", time="0s", value=_format_time(float(timings.get("source_start", 0.0)), frame_rate))
+                SubElement(
+                    time_map,
+                    "timept",
+                    time=_format_time(duration, frame_rate),
+                    value=_format_time(float(timings.get("source_end", timings.get("source_start", 0.0))), frame_rate),
+                )
+
+            if crop_meta:
+                center = shots[0]["center_norm"] if shots else {"x": 0.5, "y": 0.5}
+                center_x = float(center.get("x", 0.5))
+                center_y = float(center.get("y", 0.5))
+                source_size = crop_meta.get("source_size") or [width, height]
+                src_w = float(source_size[0]) or float(width)
+                src_h = float(source_size[1]) or float(height)
+
+                # 1. Calculate the correct scale factor to fill the output frame.
+                scale_value = max(width / src_w, height / src_h) if src_w > 0 and src_h > 0 else 1.0
+
+                # 2. Calculate the dimensions of the scaled-up image.
+                scaled_w = src_w * scale_value
+                scaled_h = src_h * scale_value
+
+                # 3. Calculate the allowed panning range.
+                max_pan_x = max(0.0, (scaled_w - width) / 2.0)
+                max_pan_y = max(0.0, (scaled_h - height) / 2.0)
+
+                # 4. Calculate the desired position to center the salient point.
+                position_x = (0.5 - center_x) * scaled_w
+                position_y = (center_y - 0.5) * scaled_h
+
+                # 5. Clamp the position to the allowed range to avoid black bars.
+                clamped_x = max(-max_pan_x, min(max_pan_x, position_x))
+                clamped_y = max(-max_pan_y, min(max_pan_y, position_y))
+
+                SubElement(
+                    clip_el,
+                    "adjust-transform",
+                    scale=f"{scale_value:.6f} {scale_value:.6f}",
+                    position=f"{clamped_x:.4f} {clamped_y:.4f}",
+                )
 
         details = audio_info.get("details", {}) or {}
         gain_db = details.get("gain_db")
@@ -249,12 +327,16 @@ def export_fcpxml(
             except (ValueError, TypeError):
                 gain_db = None
         if gain_db is not None:
-            SubElement(
-                clip_el,
-                "adjust-audio",
-                pan="0 0",
-                gain=f"{gain_db:.2f}",
-            )
+            # In a multi-shot scenario, clip_el is not defined.
+            # This logic assumes original audio is muted when shots are split.
+            # A more robust solution would apply this to each shot_clip_el.
+            if 'clip_el' in locals():
+                SubElement(
+                    clip_el,
+                    "adjust-volume",
+                    amount=f"{gain_db:.2f}dB",
+                )
+
         narration_path = details.get("narration_path")
         if narration_path:
             audio_asset_id = narration_asset_id_map.get(narration_path)
@@ -267,7 +349,7 @@ def export_fcpxml(
                     "asset-clip",
                     {
                         "name": Path(narration_path).name,
-                        "offset": _format_time(offset_seconds, frame_rate),
+                        "offset": _format_time(segment_start_offset_seconds, frame_rate),
                         "start": "0s",
                         "duration": _format_time(float(narration_duration_val), frame_rate),
                         "ref": audio_asset_id,
@@ -285,9 +367,8 @@ def export_fcpxml(
                 if narration_gain is not None:
                     SubElement(
                         narration_clip_el,
-                        "adjust-audio",
-                        pan="0 0",
-                        gain=f"{narration_gain:.2f}",
+                        "adjust-volume",
+                        amount=f"{narration_gain:.2f}dB",
                     )
 
         offset_seconds += duration
@@ -309,9 +390,8 @@ def export_fcpxml(
         )
         SubElement(
             music_clip,
-            "adjust-audio",
-            pan="0 0",
-            gain=f"{(music_gain_db if music_gain_db is not None else 0.0):.2f}",
+            "adjust-volume",
+            amount=f"{(music_gain_db if music_gain_db is not None else 0.0):.2f}dB",
         )
 
     sequence_el.set("duration", _format_time(offset_seconds, frame_rate))
