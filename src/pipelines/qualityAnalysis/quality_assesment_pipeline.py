@@ -4,6 +4,7 @@ from pathlib import Path
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
+from lib.utils.media import download_and_cache_video
 from src.config import CREDENTIAL_PATH, BUCKET_NAME
 from src.pipelines.qualityAnalysis.schema import QualityAssessmentResult, BrandSafetyScores
 
@@ -21,9 +22,15 @@ class QualityAssessmentPipeline:
         print(f"[DEBUG] Initialized QualityAssessmentPipeline with media: {self.media_name}")
 
     def _download_video(self) -> Path:
-        local_path = os.path.join(self.workdir, self.media_name)
-        print(f"[DEBUG] Downloading video from GCS path: {self.video_blob_path} to {local_path}")
-        self.gcs_client.download_files(BUCKET_NAME, self.video_blob_path, local_path)
+        cache_dir = Path(".cache/quality_analysis")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        local_path = download_and_cache_video(
+            self.gcs_client,
+            BUCKET_NAME,
+            self.video_blob_path,
+            str(cache_dir),
+        )
+        print(f"[DEBUG] Using video: {local_path}")
         return Path(local_path)
 
     def _score_plot_fidelity(self, video_path: Path) -> int:

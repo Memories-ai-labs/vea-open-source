@@ -299,20 +299,38 @@ def extract_images_ffmpeg(
 
 
 def download_and_cache_video(gcs_client, bucket_name, cloud_path, local_dir):
-    """
-    Downloads a video file from GCS if not already cached locally.
-    Returns the local path.
-    """
+    """Downloads a video file from GCS if not already cached locally."""
     filename = os.path.basename(cloud_path)
-    local_path = os.path.join(local_dir, filename)
+    primary_path = os.path.join(local_dir, filename)
 
-    if os.path.exists(local_path):
-        print(f"[CACHE] Video already downloaded: {local_path}")
-        return local_path
+    cache_root = Path(".cache/gcs_videos").resolve()
+    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_root / filename
 
-    print(f"[DOWNLOAD] Downloading video from GCS: {cloud_path} → {local_path}")
-    gcs_client.download_files(bucket_name, cloud_path, local_path)
-    return local_path
+    if primary_path and os.path.exists(primary_path):
+        print(f"[CACHE] Video already present locally: {primary_path}")
+        return primary_path
+
+    if cache_path.exists():
+        print(f"[CACHE] Restoring video from cache: {cache_path} → {primary_path}")
+        if primary_path:
+            Path(primary_path).parent.mkdir(parents=True, exist_ok=True)
+            if not os.path.exists(primary_path):
+                shutil.copy2(cache_path, primary_path)
+        return str(cache_path if not primary_path else primary_path)
+
+    Path(local_dir).mkdir(parents=True, exist_ok=True)
+    download_target = primary_path or str(cache_path)
+    print(f"[DOWNLOAD] Downloading video from GCS: {cloud_path} → {download_target}")
+    gcs_client.download_files(bucket_name, cloud_path, download_target)
+
+    try:
+        if not cache_path.exists() and os.path.exists(download_target):
+            shutil.copy2(download_target, cache_path)
+    except Exception as exc:
+        print(f"[WARN] Failed to populate cache for {cloud_path}: {exc}")
+
+    return download_target
 
 def extract_video_segment(full_video_path, output_dir, start_hhmmss, end_hhmmss, output_name="segment.mp4"):
     """

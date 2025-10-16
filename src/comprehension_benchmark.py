@@ -6,16 +6,16 @@ import json
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.oss.auth import credentials_from_file
 from lib.oss.gcp_oss import GoogleCloudStorage
+from lib.utils.media import download_and_cache_video
 from src.config import CREDENTIAL_PATH, BUCKET_NAME, VIDEO_EXTS
 from src.pipelines.videoComprehension.comprehensionPipeline import ComprehensionPipeline
 from src.pipelines.geminiNaiveComprehensionPipeline.pipeline import GeminiNaiveComprehensionPipeline
 
 
 async def download_from_gcs(gcs_client, gcs_path):
-    filename = os.path.basename(gcs_path)
-    local_path = os.path.join(tempfile.mkdtemp(), filename)
-    gcs_client.download_files(BUCKET_NAME, gcs_path, local_path)
-    return local_path
+    cache_dir = Path(".cache/comprehension_videos")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return download_and_cache_video(gcs_client, BUCKET_NAME, gcs_path, str(cache_dir))
 
 async def run_benchmark_for_blob(blob_path, model_name):
     print(f"\n=== [Model: {model_name}] Processing: {blob_path} ===")

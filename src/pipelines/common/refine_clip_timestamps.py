@@ -6,7 +6,7 @@ import json
 
 from concurrent.futures import ThreadPoolExecutor
 from src.pipelines.common.schema import RefinedClipTimestamps
-from lib.utils.media import parse_time_to_seconds, seconds_to_hhmmss
+from lib.utils.media import parse_time_to_seconds, seconds_to_hhmmss, download_and_cache_video
 from src.pipelines.common.generate_subtitles import GenerateSubtitles
 
 def overlay_debug_info(
@@ -106,9 +106,15 @@ class RefineClipTimestamps:
         filename = os.path.basename(cloud_path)
         if filename in self.downloaded_files:
             return self.downloaded_files[filename]
-        local_path = os.path.join(self.workdir, filename)
-        print(f"[INFO] Downloading {cloud_path} → {local_path}")
-        self.gcs_client.download_files(self.bucket_name, cloud_path, local_path)
+        cache_dir = os.path.join(".cache", "refine_clips")
+        os.makedirs(cache_dir, exist_ok=True)
+        local_path = download_and_cache_video(
+            self.gcs_client,
+            self.bucket_name,
+            cloud_path,
+            cache_dir,
+        )
+        print(f"[INFO] Using source {local_path}")
         self.downloaded_files[filename] = local_path
         return local_path
 
