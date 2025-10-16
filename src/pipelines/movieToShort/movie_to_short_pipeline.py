@@ -6,7 +6,7 @@ from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
 from src.config import CREDENTIAL_PATH, BUCKET_NAME
 from src.pipelines.flexibleResponse.flexibleResponsePipeline import FlexibleResponsePipeline
-from lib.utils.media import seconds_to_hhmmss, get_video_duration
+from lib.utils.media import seconds_to_hhmmss, get_video_duration, download_and_cache_video
 from src.pipelines.movieToShort.schema import ShortsPlans
 from typing import List
 
@@ -152,13 +152,13 @@ class MovieToShortsPipeline:
         return shorts
 
     async def _download_movie(self):
-        import tempfile
-        fname = os.path.basename(self.blob_path)
-        tmp_dir = tempfile.gettempdir()
-        local_path = os.path.join(tmp_dir, fname)
-        if not os.path.exists(local_path):
-            print(f"[SHORTS] Downloading {self.blob_path} to {local_path} ...")
-            self.gcs_client.download_files(BUCKET_NAME, self.blob_path, local_path)
-        else:
-            print(f"[SHORTS] Using cached {local_path}")
+        cache_dir = os.path.join(".cache", "movie_to_short")
+        os.makedirs(cache_dir, exist_ok=True)
+        local_path = download_and_cache_video(
+            self.gcs_client,
+            BUCKET_NAME,
+            self.blob_path,
+            cache_dir,
+        )
+        print(f"[SHORTS] Using source from {local_path}")
         return local_path

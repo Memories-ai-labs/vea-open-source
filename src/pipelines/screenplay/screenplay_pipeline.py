@@ -38,9 +38,17 @@ class ScreenplayPipeline:
         self.indexing = self._load_indexing()
 
     def _load_indexing(self):
-        local_path = os.path.join(self.workdir, "media_indexing.json")
         gcs_path = self.cloud_storage_indexing_dir + "media_indexing.json"
-        self.cloud_storage_client.download_files(BUCKET_NAME, gcs_path, local_path)
+        cache_dir = os.path.join(".cache", "screenplay_indexing")
+        os.makedirs(cache_dir, exist_ok=True)
+        cached_path = download_and_cache_video(
+            self.cloud_storage_client,
+            BUCKET_NAME,
+            gcs_path,
+            cache_dir,
+        )
+        local_path = os.path.join(self.workdir, "media_indexing.json")
+        shutil.copy2(cached_path, local_path)
         with open(local_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 

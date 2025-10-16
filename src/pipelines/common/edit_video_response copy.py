@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 import asyncio
 import gc
@@ -14,7 +15,7 @@ from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from src.config import CREDENTIAL_PATH, BUCKET_NAME
-from lib.utils.media import parse_time_to_seconds
+from lib.utils.media import parse_time_to_seconds, download_and_cache_video
 from src.pipelines.common.dynamic_cropping import DynamicCropping
 from src.pipelines.common.generate_subtitles import GenerateSubtitles
 
@@ -43,8 +44,20 @@ class EditVideoResponse:
         """Download the media file from GCS if not already present."""
         if file_name in self._downloaded_files:
             return self._downloaded_files[file_name]
-        local_path = os.path.join(self.workdir, file_name)
-        self.gcs_client.download_files(self.bucket_name, cloud_storage_path, local_path)
+        cache_dir = os.path.join(".cache", "edit_video_response")
+        os.makedirs(cache_dir, exist_ok=True)
+        local_path = download_and_cache_video(
+            self.gcs_client,
+            self.bucket_name,
+            cloud_storage_path,
+            cache_dir,
+        )
+        if os.path.dirname(local_path) != self.workdir:
+            target_path = os.path.join(self.workdir, file_name)
+            os.makedirs(self.workdir, exist_ok=True)
+            if not os.path.exists(target_path):
+                shutil.copy2(local_path, target_path)
+            local_path = target_path
         self._downloaded_files[file_name] = local_path
         return local_path
 
@@ -444,7 +457,5 @@ if __name__ == "__main__":
         snap_to_beat=snap_to_beat
     ))
     
-
-
 
 

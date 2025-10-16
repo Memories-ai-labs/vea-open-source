@@ -14,7 +14,8 @@ from lib.utils.media import (
     preprocess_short_video,
     get_video_info,
     get_video_duration,
-    clean_stale_tempdirs
+    clean_stale_tempdirs,
+    download_and_cache_video,
 )
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from src.config import CREDENTIAL_PATH, BUCKET_NAME, VIDEO_EXTS
@@ -117,11 +118,17 @@ class ComprehensionPipeline:
 
         media_files = []
         if self.cloud_storage_media_path.endswith("/") or not Path(self.cloud_storage_media_path).suffix.lower() in VIDEO_EXTS:
-            videos_dir = os.path.join(tempfile.mkdtemp(), "videos")
-            self.cloud_storage_client.download_files(BUCKET_NAME, self.cloud_storage_media_path, videos_dir)
+            cache_root = Path(".cache/comprehension_media")
+            target_dir = cache_root / self.media_folder_name
+            target_dir.mkdir(parents=True, exist_ok=True)
+            if not any(target_dir.iterdir()) or self.start_fresh:
+                print(f"[INFO] Downloading media folder {self.cloud_storage_media_path} → {target_dir}")
+                self.cloud_storage_client.download_files(BUCKET_NAME, self.cloud_storage_media_path, str(target_dir))
+            else:
+                print(f"[CACHE] Using cached media folder {target_dir}")
             local_files = [
-                os.path.join(videos_dir, f)
-                for f in os.listdir(videos_dir)
+                str(target_dir / f)
+                for f in os.listdir(target_dir)
                 if Path(f).suffix.lower() in VIDEO_EXTS
             ]
             for local_media_path in local_files:
@@ -129,8 +136,14 @@ class ComprehensionPipeline:
                 print(f"[INFO] Processing file: {local_media_path}")
                 media_files.append(await self.run_for_file(local_media_path, cloud_path))
         else:
-            local_media_path = os.path.join(tempfile.mkdtemp(), os.path.basename(self.cloud_storage_media_path))
-            self.cloud_storage_client.download_files(BUCKET_NAME, self.cloud_storage_media_path, local_media_path)
+            cache_root = Path(".cache/comprehension_media")
+            cache_root.mkdir(parents=True, exist_ok=True)
+            local_media_path = download_and_cache_video(
+                self.cloud_storage_client,
+                BUCKET_NAME,
+                self.cloud_storage_media_path,
+                str(cache_root),
+            )
             print(f"[INFO] Processing file: {local_media_path}")
             media_files.append(await self.run_for_file(local_media_path, self.cloud_storage_media_path))
 

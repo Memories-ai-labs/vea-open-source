@@ -6,11 +6,12 @@ import string
 import gc
 import subprocess
 import uuid
+import shutil
 
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
-from lib.utils.media import clean_stale_tempdirs
+from lib.utils.media import clean_stale_tempdirs, download_and_cache_video
 from src.config import CREDENTIAL_PATH, BUCKET_NAME
 
 from src.pipelines.flexibleResponse.tasks.flexible_gemini_answer import FlexibleGeminiAnswer
@@ -22,7 +23,7 @@ from src.pipelines.flexibleResponse.tasks.generate_video_clip_plan import Genera
 from src.pipelines.common.refine_clip_timestamps import RefineClipTimestamps
 from src.pipelines.common.generate_narration_audio import GenerateNarrationAudio
 from src.pipelines.common.music_selection import MusicSelection 
-from src.pipelines.common.edit_video_response import EditVideoResponse
+
 
 class FlexibleResponsePipeline:
     def __init__(self, cloud_storage_media_path):
@@ -42,9 +43,20 @@ class FlexibleResponsePipeline:
     def _load_media_indexing_json(self):
         """Download and parse media_indexing.json for this media file."""
         print("[INFO] Downloading media_indexing.json...")
-        index_local_path = os.path.join(self.workdir, "media_indexing.json")
         gcs_index_path = self.cloud_storage_indexing_dir + "media_indexing.json"
-        self.cloud_storage_client.download_files(BUCKET_NAME, gcs_index_path, index_local_path)
+        cache_dir = os.path.join(".cache", "media_indexing")
+        os.makedirs(cache_dir, exist_ok=True)
+        index_local_path = download_and_cache_video(
+            self.cloud_storage_client,
+            BUCKET_NAME,
+            gcs_index_path,
+            cache_dir,
+        )
+        if os.path.dirname(index_local_path) != self.workdir:
+            working_copy = os.path.join(self.workdir, "media_indexing.json")
+            os.makedirs(self.workdir, exist_ok=True)
+            shutil.copy2(index_local_path, working_copy)
+            index_local_path = working_copy
         with open(index_local_path, "r", encoding="utf-8") as f:
             self.media_indexing_json = json.load(f)
         if not self.media_indexing_json:

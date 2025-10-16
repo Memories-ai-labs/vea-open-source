@@ -1,7 +1,10 @@
 import os
+import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
+
+from lib.utils.media import download_and_cache_video
 
 class ClipExtractor:
     def __init__(self, workdir, gcs_client, bucket_name):
@@ -22,8 +25,20 @@ class ClipExtractor:
         filename = os.path.basename(cloud_storage_path)
         if filename in self.downloaded_files:
             return self.downloaded_files[filename]
-        local_path = os.path.join(self.workdir, filename)
-        self.gcs_client.download_files(self.bucket_name, cloud_storage_path, local_path)
+        cache_dir = os.path.join(".cache", "clip_extractor")
+        os.makedirs(cache_dir, exist_ok=True)
+        local_path = download_and_cache_video(
+            self.gcs_client,
+            self.bucket_name,
+            cloud_storage_path,
+            cache_dir,
+        )
+        if os.path.dirname(local_path) != self.workdir:
+            target_path = os.path.join(self.workdir, filename)
+            os.makedirs(self.workdir, exist_ok=True)
+            if not os.path.exists(target_path):
+                shutil.copy2(local_path, target_path)
+            local_path = target_path
         self.downloaded_files[filename] = local_path
         return local_path
 
