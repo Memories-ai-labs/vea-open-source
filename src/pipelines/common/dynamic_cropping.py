@@ -798,7 +798,11 @@ class DynamicCropping:
             if source_metadata is not None:
                 if crop_metadata is not None:
                     source_metadata["crop"] = crop_metadata
-                source_metadata.setdefault("timeline", {})["duration"] = float(video.duration or 0.0)
+                timeline_info = source_metadata.setdefault("timeline", {})
+                timeline_info["duration"] = float(video.duration or 0.0)
+                frame_rate = timeline_info.get("frame_rate")
+                if frame_rate:
+                    timeline_info["frame_count"] = int(round(timeline_info["duration"] * float(frame_rate)))
                 applied_start = source_metadata.setdefault("timings", {}).get("applied_start", 0.0)
                 source_metadata["timings"]["applied_end"] = applied_start + float(video.duration or 0.0)
                 setattr(video, "_vea_metadata", source_metadata)
