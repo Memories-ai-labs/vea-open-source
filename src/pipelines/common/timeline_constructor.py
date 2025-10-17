@@ -6,7 +6,10 @@ import traceback
 import time
 import shutil
 import math
+import subprocess
 from copy import deepcopy
+from pathlib import Path
+
 from moviepy import *
 import librosa
 import numpy as np
@@ -21,6 +24,8 @@ from src.pipelines.common import metadata_helpers
 from src.pipelines.common import audio_processing
 
 class TimelineConstructor:
+    ALLOWED_FRAME_RATES = (24, 30, 60, 120)
+
     def __init__(
         self, 
         output_path="video_response.mp4", 
@@ -40,17 +45,146 @@ class TimelineConstructor:
         self.llm = llm
         self._downloaded_files = {}
 
+    @staticmethod
+    def _parse_ffprobe_rate(rate_str: str | None) -> float:
+        if not rate_str or rate_str in {"0/0", "0", "N/A"}:
+            return 0.0
+        if "/" in rate_str:
+            num_str, den_str = rate_str.split("/", 1)
+            try:
+                num = float(num_str)
+                den = float(den_str)
+                if den == 0:
+                    return 0.0
+                return num / den
+            except ValueError:
+                return 0.0
+        try:
+            return float(rate_str)
+        except ValueError:
+            return 0.0
+
+    def _probe_frame_rate(self, path: str) -> float:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=avg_frame_rate,r_frame_rate",
+            "-of",
+            "json",
+            path,
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return 0.0
+
+        try:
+            payload = json.loads(result.stdout or "{}")
+            streams = payload.get("streams") or []
+            if not streams:
+                return 0.0
+            stream = streams[0]
+            avg_rate = self._parse_ffprobe_rate(stream.get("avg_frame_rate"))
+            if avg_rate > 0:
+                return avg_rate
+            return self._parse_ffprobe_rate(stream.get("r_frame_rate"))
+        except json.JSONDecodeError:
+            return 0.0
+
+    def _pick_target_fps(self, measured_fps: float) -> float:
+        if measured_fps <= 0:
+            return float(self.ALLOWED_FRAME_RATES[1])  # default to 30 fps
+        return float(
+            min(
+                self.ALLOWED_FRAME_RATES,
+                key=lambda allowed: abs(allowed - measured_fps),
+            )
+        )
+
+    def _normalize_media_frame_rate(self, file_name: str, source_path: str) -> dict:
+        original_fps = self._probe_frame_rate(source_path)
+        target_fps = self._pick_target_fps(original_fps)
+
+        normalized_dir = Path(self.workdir) / "normalized_media"
+        normalized_dir.mkdir(parents=True, exist_ok=True)
+        normalized_path = normalized_dir / f"{Path(file_name).stem}_fps{int(target_fps)}.mp4"
+
+        if normalized_path.exists():
+            return {
+                "path": str(normalized_path),
+                "fps": target_fps,
+                "original_fps": original_fps or target_fps,
+                "source_path": source_path,
+            }
+
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            source_path,
+            "-vf",
+            f"fps={target_fps}",
+            "-vsync",
+            "cfr",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "18",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "48000",
+            "-af",
+            "aresample=async=1:first_pts=0",
+            "-movflags",
+            "+faststart",
+            str(normalized_path),
+        ]
+
+        try:
+            subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return {
+                "path": str(normalized_path),
+                "fps": target_fps,
+                "original_fps": original_fps or target_fps,
+                "source_path": source_path,
+            }
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            print(f"[WARN] Failed to normalize FPS for {file_name}: {exc}. Using source video.")
+            return {
+                "path": source_path,
+                "fps": original_fps or target_fps,
+                "original_fps": original_fps or target_fps,
+                "source_path": source_path,
+            }
+
     def _download_media_file(self, file_name, cloud_storage_path):
         if file_name in self._downloaded_files:
-            return self._downloaded_files[file_name]
+            return self._downloaded_files[file_name]["path"]
         local_path = download_and_cache_video(
             self.gcs_client,
             self.bucket_name,
             cloud_storage_path,
             self.workdir,
         )
-        self._downloaded_files[file_name] = local_path
-        return local_path
+        normalized_info = self._normalize_media_frame_rate(file_name, local_path)
+        self._downloaded_files[file_name] = normalized_info
+        return normalized_info["path"]
 
     def safe_subclip(self, clip, start_time, end_time, epsilon=0.01):
         safe_end_time = max(start_time, end_time - epsilon)
@@ -63,7 +197,10 @@ class TimelineConstructor:
     ):
         clip_id = clip["id"]
         file_name = clip["file_name"]
-        video_path = self._downloaded_files[file_name]
+        download_info = self._downloaded_files[file_name]
+        video_path = download_info["path"]
+        metadata_frame_rate = float(download_info.get("fps", 0.0)) or None
+        original_frame_rate = float(download_info.get("original_fps", 0.0)) or None
         start_sec = parse_time_to_seconds(clip["start"])
         end_sec = parse_time_to_seconds(clip["end"])
         priority = clip.get("priority", False)
@@ -74,6 +211,12 @@ class TimelineConstructor:
             end_sec,
             original_audio=original_audio,
         )
+
+        if metadata_frame_rate:
+            metadata.setdefault("timeline", {})["frame_rate"] = metadata_frame_rate
+            metadata.setdefault("source", {})["fps"] = metadata_frame_rate
+        if original_frame_rate and original_frame_rate != metadata_frame_rate:
+            metadata.setdefault("source", {})["original_fps"] = original_frame_rate
 
         video_clip = VideoFileClip(video_path)
         if video_clip.audio is None:
@@ -329,7 +472,10 @@ class TimelineConstructor:
 
         timeline_metadata = [deepcopy(getattr(c, "_vea_metadata", None)) for c in cropped_clips if getattr(c, "_vea_metadata", None) is not None]
 
-        video_asset_map = {os.path.basename(p): p for p in self._downloaded_files.values()}
+        video_asset_map = {
+            name: info["path"]
+            for name, info in self._downloaded_files.items()
+        }
 
         narration_asset_map = {}
         if narration_dir and os.path.exists(narration_dir):

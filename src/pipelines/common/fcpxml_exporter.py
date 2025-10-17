@@ -43,6 +43,37 @@ def _format_fraction_seconds(value: Fraction) -> str:
 
 
 
+def _frames_to_seconds(frame_count: int, fps: float) -> Fraction:
+    if frame_count <= 0 or fps <= 0:
+        return Fraction(0, 1)
+    fps_fraction = _fps_to_fraction(fps)
+    if fps_fraction.numerator == 0:
+        return Fraction(0, 1)
+    return Fraction(frame_count, 1) / fps_fraction
+
+
+def _quantize_duration_to_timeline(duration: Fraction, timeline_fps: float) -> tuple[Fraction, int]:
+    if duration <= 0:
+        return Fraction(0, 1), 0
+    timeline_fps_fraction = _fps_to_fraction(timeline_fps)
+    if timeline_fps_fraction.numerator == 0:
+        return Fraction(0, 1), 0
+    frames_fraction = duration * timeline_fps_fraction
+    timeline_frames = int(frames_fraction + Fraction(1, 2))
+    if timeline_frames <= 0:
+        return Fraction(0, 1), 0
+    quantized = Fraction(timeline_frames, 1) / timeline_fps_fraction
+    return quantized, timeline_frames
+
+
+def _fraction_from_seconds(seconds: float, fps_hint: float | None = None) -> Fraction:
+    if fps_hint and fps_hint > 0:
+        max_denominator = max(int(round(fps_hint)) * 1000, 1)
+    else:
+        max_denominator = 48000
+    return _seconds_to_fraction(seconds, max_denominator=max_denominator)
+
+
 def _file_uri(path: str) -> str:
     return Path(path).resolve().as_uri()
 
@@ -60,6 +91,7 @@ def _indent(elem: Element, level: int = 0) -> None:
     else:
         if level and (not elem.tail or not elem.tail.strip()):
             elem.tail = i
+
 
 
 def export_fcpxml(
@@ -91,37 +123,48 @@ def export_fcpxml(
     fcpxml = Element("fcpxml", version="1.10")
     resources = SubElement(fcpxml, "resources")
 
+    timeline_fps_fraction = _fps_to_fraction(frame_rate)
+    if timeline_fps_fraction.numerator == 0:
+        timeline_fps_fraction = Fraction(24, 1)
+    frame_duration_value = f"{timeline_fps_fraction.denominator}/{timeline_fps_fraction.numerator}s"
+
     format_id = "f1"
     SubElement(
         resources,
         "format",
         id=format_id,
-        frameDuration=f"1/{int(round(frame_rate))}s",
+        frameDuration=frame_duration_value,
         width=str(width),
         height=str(height),
         colorSpace="1-1-1 (Rec. 709)",
     )
 
-    asset_usage: Dict[str, float] = {}
+    asset_usage: Dict[str, Fraction] = {}
     for meta in timeline_metadata:
-        source = meta.get("source", {})
+        source = meta.get("source", {}) or {}
         file_name = source.get("file_name")
         if not file_name:
             continue
-        timings = meta.get("timings", {})
-        source_end = float(timings.get("source_end", timings.get("applied_end", 0.0)))
-        asset_usage[file_name] = max(asset_usage.get(file_name, 0.0), source_end)
+        timings = meta.get("timings", {}) or {}
+        fps_hint = source.get("fps") or meta.get("timeline", {}).get("frame_rate") or frame_rate
+        source_end_fraction = _fraction_from_seconds(
+            float(timings.get("source_end", timings.get("applied_end", 0.0))),
+            fps_hint=fps_hint,
+        )
+        existing = asset_usage.get(file_name, Fraction(0, 1))
+        if source_end_fraction > existing:
+            asset_usage[file_name] = source_end_fraction
 
     asset_id_map: Dict[str, str] = {}
     for idx, (file_name, local_path) in enumerate(video_asset_map.items(), start=2):
         asset_id = f"a{idx}"
         asset_id_map[file_name] = asset_id
-        duration_value = _format_fraction_seconds(_seconds_to_fraction(asset_usage.get(file_name, 0.0)))
+        asset_duration = asset_usage.get(file_name, Fraction(0, 1))
         asset_attrs = dict(
             id=asset_id,
             name=file_name,
             start="0s",
-            duration=duration_value,
+            duration=_format_fraction_seconds(asset_duration),
             hasVideo="1",
             hasAudio="1",
             audioSources="1",
@@ -139,14 +182,24 @@ def export_fcpxml(
         asset_id = f"a{next_index}"
         next_index += 1
         narration_asset_id_map[original_path] = asset_id
-        durations = [
-            float(meta.get("timeline", {}).get("duration", 0.0))
-            for meta in timeline_metadata
-            if meta.get("audio", {}).get("details", {}).get("narration_path") == original_path
-        ]
-        narration_duration = _format_fraction_seconds(
-            _seconds_to_fraction(max(durations) if durations else 0.0)
-        )
+        durations: List[Fraction] = []
+        for meta in timeline_metadata:
+            details = meta.get("audio", {}).get("details", {}) or {}
+            if details.get("narration_path") != original_path:
+                continue
+            timeline_info = meta.get("timeline", {}) or {}
+            clip_fps = timeline_info.get("frame_rate") or frame_rate
+            frame_count = timeline_info.get("frame_count")
+            if frame_count:
+                durations.append(_frames_to_seconds(int(round(frame_count)), float(clip_fps)))
+            else:
+                durations.append(
+                    _fraction_from_seconds(
+                        float(timeline_info.get("duration", 0.0)),
+                        fps_hint=clip_fps,
+                    )
+                )
+        narration_duration = max(durations, default=Fraction(0, 1))
         SubElement(
             resources,
             "asset",
@@ -154,7 +207,7 @@ def export_fcpxml(
                 "id": asset_id,
                 "name": Path(copied_path).name,
                 "start": "0s",
-                "duration": narration_duration,
+                "duration": _format_fraction_seconds(narration_duration),
                 "hasVideo": "0",
                 "hasAudio": "1",
                 "audioSources": "1",
@@ -167,7 +220,9 @@ def export_fcpxml(
         )
 
     music_asset_id = None
+    music_duration_fraction = Fraction(0, 1)
     if music_asset_path and music_asset_name and music_duration > 0:
+        music_duration_fraction = _fraction_from_seconds(float(music_duration), fps_hint=frame_rate)
         music_asset_id = f"a{next_index}"
         next_index += 1
         SubElement(
@@ -177,7 +232,7 @@ def export_fcpxml(
                 "id": music_asset_id,
                 "name": music_asset_name,
                 "start": "0s",
-                "duration": _format_fraction_seconds(_seconds_to_fraction(music_duration)),
+                "duration": _format_fraction_seconds(music_duration_fraction),
                 "hasVideo": "0",
                 "hasAudio": "1",
                 "audioSources": "1",
@@ -195,25 +250,55 @@ def export_fcpxml(
     sequence_el = SubElement(project_el, "sequence", format=format_id, tcStart="0s", tcFormat="NDF")
     spine_el = SubElement(sequence_el, "spine")
 
-    offset_seconds = 0.0
+    timeline_frames_accum = 0
+
     for meta in timeline_metadata:
-        timeline_info = meta.get("timeline", {})
-        timings = meta.get("timings", {})
-        source = meta.get("source", {})
+        timeline_info = meta.get("timeline", {}) or {}
+        timings = meta.get("timings", {}) or {}
+        source = meta.get("source", {}) or {}
         audio_info = meta.get("audio", {}) or {}
 
-        duration = float(timeline_info.get("duration", 0.0))
-        if duration <= 0:
+        clip_frame_rate = float(
+            timeline_info.get("frame_rate")
+            or source.get("fps")
+            or frame_rate
+        )
+        frame_count = timeline_info.get("frame_count")
+        frame_count_int = int(round(frame_count)) if frame_count else None
+
+        if frame_count_int and frame_count_int > 0:
+            duration_source = _frames_to_seconds(frame_count_int, clip_frame_rate)
+        else:
+            duration_source = _fraction_from_seconds(
+                float(timeline_info.get("duration", 0.0)),
+                fps_hint=clip_frame_rate,
+            )
+
+        if duration_source <= 0:
+            continue
+
+        duration_timeline, duration_timeline_frames = _quantize_duration_to_timeline(
+            duration_source,
+            frame_rate,
+        )
+        if duration_timeline_frames <= 0:
             continue
 
         file_name = source.get("file_name")
         asset_id = asset_id_map.get(file_name)
         if not asset_id:
-            offset_seconds += duration
+            timeline_frames_accum += duration_timeline_frames
             continue
 
-        segment_start_offset_seconds = offset_seconds
-        segment_offset_fraction = _seconds_to_fraction(segment_start_offset_seconds)
+        segment_offset_fraction = Fraction(timeline_frames_accum, 1) / timeline_fps_fraction
+        source_start_fraction = _fraction_from_seconds(
+            float(timings.get("source_start", 0.0)),
+            fps_hint=clip_frame_rate,
+        )
+        source_end_fraction = _fraction_from_seconds(
+            float(timings.get("source_end", timings.get("source_start", 0.0))),
+            fps_hint=clip_frame_rate,
+        )
 
         crop_meta = meta.get("crop") or {}
         shots = crop_meta.get("shots") or []
@@ -227,44 +312,42 @@ def export_fcpxml(
                 gain_db = None
 
         if len(shots) > 1:
-            clip_fps = float(crop_meta.get("fps", frame_rate))
-            fps_fraction = _fps_to_fraction(clip_fps)
-            frame_duration_fraction = Fraction(fps_fraction.denominator, fps_fraction.numerator)
+            clip_fps_for_shots = float(crop_meta.get("fps", clip_frame_rate))
+            clip_fps_fraction = _fps_to_fraction(clip_fps_for_shots)
+            if clip_fps_fraction.numerator == 0:
+                clip_fps_fraction = _fps_to_fraction(clip_frame_rate)
 
-            source_clip_start_fraction = _seconds_to_fraction(float(timings.get("source_start", 0.0)))
-
-            total_duration_fraction = _seconds_to_fraction(duration)
-            processed_duration_fraction = Fraction(0, 1)
-
-            for i, shot in enumerate(shots):
-                shot_start_frames_in_clip = shot.get("start_frame", 0)
-                shot_end_frames_in_clip = shot.get("end_frame", 0)
-                shot_duration_frames_in_clip = shot_end_frames_in_clip - shot_start_frames_in_clip
-                if shot_duration_frames_in_clip <= 0:
+            processed_timeline_frames = 0
+            for idx, shot in enumerate(shots):
+                shot_start_frame = int(shot.get("start_frame", 0))
+                shot_end_frame = int(shot.get("end_frame", 0))
+                shot_frame_count = shot_end_frame - shot_start_frame
+                if shot_frame_count <= 0:
                     continue
 
-                shot_start_offset_fraction = frame_duration_fraction * shot_start_frames_in_clip
-                start_attr_str = _format_fraction_seconds(
-                    source_clip_start_fraction + shot_start_offset_fraction
-                )
+                shot_source_offset = Fraction(shot_start_frame, 1) / clip_fps_fraction
+                shot_source_duration = Fraction(shot_frame_count, 1) / clip_fps_fraction
 
-                print(
-                    f"[DEBUG_TIME] clip_id={meta.get('clip_id')} shot_start_frame={shot_start_frames_in_clip}"
-                    f" source_clip_start_sec={float(source_clip_start_fraction)} clip_fps={clip_fps} start_attr_str={start_attr_str}"
-                )
-
-                shot_duration_fraction = frame_duration_fraction * shot_duration_frames_in_clip
-                if i == len(shots) - 1:
-                    shot_duration_fraction = total_duration_fraction - processed_duration_fraction
-                if shot_duration_fraction <= 0:
+                if idx == len(shots) - 1:
+                    shot_timeline_frames = duration_timeline_frames - processed_timeline_frames
+                    shot_timeline_duration = Fraction(shot_timeline_frames, 1) / timeline_fps_fraction
+                else:
+                    shot_timeline_duration, shot_timeline_frames = _quantize_duration_to_timeline(
+                        shot_source_duration,
+                        frame_rate,
+                    )
+                if shot_timeline_frames <= 0:
                     continue
 
-                duration_attr_str = _format_fraction_seconds(shot_duration_fraction)
-                shot_offset_fraction = segment_offset_fraction + processed_duration_fraction
-                offset_attr_str = _format_fraction_seconds(shot_offset_fraction)
+                shot_offset_frames = timeline_frames_accum + processed_timeline_frames
+                offset_attr_str = _format_fraction_seconds(
+                    Fraction(shot_offset_frames, 1) / timeline_fps_fraction
+                )
+                duration_attr_str = _format_fraction_seconds(shot_timeline_duration)
+                start_attr_str = _format_fraction_seconds(source_start_fraction + shot_source_offset)
 
                 shot_clip_attrs = {
-                    "name": f"{file_name}_shot_{shot['start_frame']}",
+                    "name": f"{file_name}_shot_{shot_start_frame}",
                     "offset": offset_attr_str,
                     "start": start_attr_str,
                     "duration": duration_attr_str,
@@ -275,29 +358,40 @@ def export_fcpxml(
                 shot_clip_el = SubElement(spine_el, "asset-clip", shot_clip_attrs)
 
                 shot_center = shot.get("center_norm", {"x": 0.5, "y": 0.5})
-                center_x, center_y = float(shot_center.get("x", 0.5)), float(shot_center.get("y", 0.5))
+                center_x = float(shot_center.get("x", 0.5))
+                center_y = float(shot_center.get("y", 0.5))
                 source_size = crop_meta.get("source_size") or [width, height]
-                src_w, src_h = (float(source_size[0]) or float(width)), (float(source_size[1]) or float(height))
+                src_w = float(source_size[0]) if source_size else float(width)
+                src_h = float(source_size[1]) if source_size else float(height)
                 scale_value = max(width / src_w, height / src_h) if src_w > 0 and src_h > 0 else 1.0
-                scaled_w, scaled_h = src_w * scale_value, src_h * scale_value
-                max_pan_x, max_pan_y = max(0.0, (scaled_w - width) / 2.0), max(0.0, (scaled_h - height) / 2.0)
-                position_x_pixels, position_y_pixels = (0.5 - center_x) * scaled_w, (center_y - 0.5) * scaled_h
-                clamped_x, clamped_y = max(-max_pan_x, min(max_pan_x, position_x_pixels)), max(-max_pan_y, min(max_pan_y, position_y_pixels))
+                scaled_w = src_w * scale_value
+                scaled_h = src_h * scale_value
+                max_pan_x = max(0.0, (scaled_w - width) / 2.0)
+                max_pan_y = max(0.0, (scaled_h - height) / 2.0)
+                position_x_pixels = (0.5 - center_x) * scaled_w
+                position_y_pixels = (center_y - 0.5) * scaled_h
+                clamped_x = max(-max_pan_x, min(max_pan_x, position_x_pixels))
+                clamped_y = max(-max_pan_y, min(max_pan_y, position_y_pixels))
                 normalization_divisor = 19.2
-                final_pos_x, final_pos_y = clamped_x / normalization_divisor, clamped_y / normalization_divisor
-                SubElement(shot_clip_el, "adjust-transform", scale=f"{scale_value:.6f} {scale_value:.6f}", position=f"{final_pos_x:.4f} {final_pos_y:.4f}")
+                final_pos_x = clamped_x / normalization_divisor
+                final_pos_y = clamped_y / normalization_divisor
+                SubElement(
+                    shot_clip_el,
+                    "adjust-transform",
+                    scale=f"{scale_value:.6f} {scale_value:.6f}",
+                    position=f"{final_pos_x:.4f} {final_pos_y:.4f}",
+                )
 
                 if gain_db is not None:
                     SubElement(shot_clip_el, "adjust-volume", amount=f"{gain_db:.2f}dB")
-                processed_duration_fraction += shot_duration_fraction
+
+                processed_timeline_frames += shot_timeline_frames
         else:
             clip_attrs = {
                 "name": file_name or "Segment",
                 "offset": _format_fraction_seconds(segment_offset_fraction),
-                "start": _format_fraction_seconds(
-                    _seconds_to_fraction(float(timings.get("source_start", 0.0)))
-                ),
-                "duration": _format_fraction_seconds(_seconds_to_fraction(duration)),
+                "start": _format_fraction_seconds(source_start_fraction),
+                "duration": _format_fraction_seconds(duration_timeline),
                 "ref": asset_id,
                 "enabled": "1",
                 "format": format_id,
@@ -316,52 +410,71 @@ def export_fcpxml(
                     time_map,
                     "timept",
                     time="0s",
-                    value=_format_fraction_seconds(
-                        _seconds_to_fraction(float(timings.get("source_start", 0.0)))
-                    ),
+                    value=_format_fraction_seconds(source_start_fraction),
                 )
                 SubElement(
                     time_map,
                     "timept",
-                    time=_format_fraction_seconds(_seconds_to_fraction(duration)),
-                    value=_format_fraction_seconds(
-                        _seconds_to_fraction(
-                            float(timings.get("source_end", timings.get("source_start", 0.0)))
-                        )
-                    ),
+                    time=_format_fraction_seconds(duration_timeline),
+                    value=_format_fraction_seconds(source_end_fraction),
                 )
 
             if crop_meta:
-                center = shots[0]["center_norm"] if shots else {"x": 0.5, "y": 0.5}
-                center_x, center_y = float(center.get("x", 0.5)), float(center.get("y", 0.5))
+                shots_data = crop_meta.get("shots") or []
+                center = shots_data[0].get("center_norm") if shots_data else crop_meta.get("center_norm")
+                if not center:
+                    center = {"x": 0.5, "y": 0.5}
+                center_x = float(center.get("x", 0.5))
+                center_y = float(center.get("y", 0.5))
                 source_size = crop_meta.get("source_size") or [width, height]
-                src_w, src_h = (float(source_size[0]) or float(width)), (float(source_size[1]) or float(height))
+                src_w = float(source_size[0]) if source_size else float(width)
+                src_h = float(source_size[1]) if source_size else float(height)
                 scale_value = max(width / src_w, height / src_h) if src_w > 0 and src_h > 0 else 1.0
-                scaled_w, scaled_h = src_w * scale_value, src_h * scale_value
-                max_pan_x, max_pan_y = max(0.0, (scaled_w - width) / 2.0), max(0.0, (scaled_h - height) / 2.0)
-                position_x_pixels, position_y_pixels = (0.5 - center_x) * scaled_w, (center_y - 0.5) * scaled_h
-                clamped_x, clamped_y = max(-max_pan_x, min(max_pan_x, position_x_pixels)), max(-max_pan_y, min(max_pan_y, position_y_pixels))
+                scaled_w = src_w * scale_value
+                scaled_h = src_h * scale_value
+                max_pan_x = max(0.0, (scaled_w - width) / 2.0)
+                max_pan_y = max(0.0, (scaled_h - height) / 2.0)
+                position_x_pixels = (0.5 - center_x) * scaled_w
+                position_y_pixels = (center_y - 0.5) * scaled_h
+                clamped_x = max(-max_pan_x, min(max_pan_x, position_x_pixels))
+                clamped_y = max(-max_pan_y, min(max_pan_y, position_y_pixels))
                 normalization_divisor = 19.2
-                final_pos_x, final_pos_y = clamped_x / normalization_divisor, clamped_y / normalization_divisor
-                SubElement(clip_el, "adjust-transform", scale=f"{scale_value:.6f} {scale_value:.6f}", position=f"{final_pos_x:.4f} {final_pos_y:.4f}")
+                final_pos_x = clamped_x / normalization_divisor
+                final_pos_y = clamped_y / normalization_divisor
+                SubElement(
+                    clip_el,
+                    "adjust-transform",
+                    scale=f"{scale_value:.6f} {scale_value:.6f}",
+                    position=f"{final_pos_x:.4f} {final_pos_y:.4f}",
+                )
 
         narration_path = details.get("narration_path")
         if narration_path:
             audio_asset_id = narration_asset_id_map.get(narration_path)
             if audio_asset_id:
-                narration_duration_val = details.get("narration_duration", duration)
-                narration_clip_el = SubElement(spine_el, "asset-clip", {
-                    "name": Path(narration_path).name,
-                    "offset": _format_fraction_seconds(segment_offset_fraction),
-                    "start": "0s",
-                    "duration": _format_fraction_seconds(
-                        _seconds_to_fraction(float(narration_duration_val))
-                    ),
-                    "ref": audio_asset_id,
-                    "enabled": "1",
-                    "lane": "-1",
-                    "role": "dialogue",
-                })
+                narration_duration_val = float(details.get("narration_duration", float(duration_source)))
+                narration_duration_fraction = _fraction_from_seconds(
+                    narration_duration_val,
+                    fps_hint=frame_rate,
+                )
+                narration_timeline_duration, _ = _quantize_duration_to_timeline(
+                    narration_duration_fraction,
+                    frame_rate,
+                )
+                narration_clip_el = SubElement(
+                    spine_el,
+                    "asset-clip",
+                    {
+                        "name": Path(narration_path).name,
+                        "offset": _format_fraction_seconds(segment_offset_fraction),
+                        "start": "0s",
+                        "duration": _format_fraction_seconds(narration_timeline_duration),
+                        "ref": audio_asset_id,
+                        "enabled": "1",
+                        "lane": "-1",
+                        "role": "dialogue",
+                    },
+                )
                 narration_gain = details.get("narration_gain_db")
                 if narration_gain is None and "narration_gain_multiplier" in details:
                     try:
@@ -371,9 +484,13 @@ def export_fcpxml(
                 if narration_gain is not None:
                     SubElement(narration_clip_el, "adjust-volume", amount=f"{narration_gain:.2f}dB")
 
-        offset_seconds += duration
+        timeline_frames_accum += duration_timeline_frames
 
-    if music_asset_id and music_duration > 0:
+    if music_asset_id and music_duration_fraction > 0:
+        music_timeline_duration, _ = _quantize_duration_to_timeline(
+            music_duration_fraction,
+            frame_rate,
+        )
         music_clip = SubElement(
             spine_el,
             "asset-clip",
@@ -381,7 +498,7 @@ def export_fcpxml(
                 "name": music_asset_name or "Music",
                 "offset": "0s",
                 "start": "0s",
-                "duration": _format_fraction_seconds(_seconds_to_fraction(music_duration)),
+                "duration": _format_fraction_seconds(music_timeline_duration),
                 "ref": music_asset_id,
                 "enabled": "1",
                 "lane": "-10",
@@ -396,14 +513,14 @@ def export_fcpxml(
 
     sequence_el.set(
         "duration",
-        _format_fraction_seconds(_seconds_to_fraction(offset_seconds)),
+        _format_fraction_seconds(Fraction(timeline_frames_accum, 1) / timeline_fps_fraction),
     )
 
     _indent(fcpxml)
     output_path = str(output_path)
     xml_payload = tostring(fcpxml, encoding="unicode")
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
-        f.write("<!DOCTYPE fcpxml>\n")
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+        f.write('<!DOCTYPE fcpxml>\n')
         f.write(xml_payload)
     return output_path

@@ -23,6 +23,8 @@ def _build_segment_metadata(
         },
         "timeline": {
             "duration": max(float(end_sec) - float(start_sec), 0.0),
+            "frame_rate": None,
+            "frame_count": None,
         },
         "retime": {
             "speed": 1.0,
@@ -47,6 +49,12 @@ def _attach_metadata(clip_obj, metadata):
     timings["applied_end"] = applied_end
     if not metadata.get("_lock_source_end"):
         timings["source_end"] = applied_end
+
+    frame_rate = metadata.get("timeline", {}).get("frame_rate")
+    if frame_rate:
+        metadata["timeline"]["frame_count"] = int(round(duration * float(frame_rate)))
+    else:
+        metadata["timeline"].pop("frame_count", None)
     setattr(clip_obj, "_vea_metadata", metadata)
     return clip_obj
 
