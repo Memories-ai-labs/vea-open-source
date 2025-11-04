@@ -7,6 +7,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from src.pipelines.common.schema import RefinedClipTimestamps
 from lib.utils.media import parse_time_to_seconds, seconds_to_hhmmss, download_and_cache_video
+from lib.utils.metrics_collector import metrics_collector
 from src.pipelines.common.generate_subtitles import GenerateSubtitles
 
 def overlay_debug_info(
@@ -204,7 +205,11 @@ class RefineClipTimestamps:
             # Run Gemini reasoning prompt (text-only response)
             reasoning_text = await asyncio.to_thread(
                 self.llm.LLM_request,
-                [reasoning_prompt]
+                [reasoning_prompt],
+                None,  # schema
+                60,    # retry_delay
+                3,     # max_retries
+                "refine_timestamps_align"  # context
             )
 
             # Build schema-only prompt with reasoning transition
@@ -225,7 +230,10 @@ class RefineClipTimestamps:
             refined = await asyncio.to_thread(
                 self.llm.LLM_request,
                 [schema_prompt],
-                RefinedClipTimestamps
+                RefinedClipTimestamps,
+                60,    # retry_delay
+                3,     # max_retries
+                "refine_timestamps_validate"  # context
             )
 
             print(f"[UPDATE] Clip {clip['id']}: {clip['start']}–{clip['end']} → {refined['refined_start']}–{refined['refined_end']}")
@@ -261,30 +269,31 @@ class RefineClipTimestamps:
 
 
     async def __call__(self, clips):
-        # Download each movie file once before threading
-        all_cloud_paths = {clip["cloud_storage_path"] for clip in clips}
-        for path in all_cloud_paths:
-            self._download_if_needed(path)
+        with metrics_collector.track_step("refine_timestamps"):
+            # Download each movie file once before threading
+            all_cloud_paths = {clip["cloud_storage_path"] for clip in clips}
+            for path in all_cloud_paths:
+                self._download_if_needed(path)
 
-        # Run clip refinements in parallel (max 6 threads)
-        tasks = [self._process_single_clip(clip) for clip in clips]
-        refined_clips = await asyncio.gather(*tasks)
+            # Run clip refinements in parallel (max 6 threads)
+            tasks = [self._process_single_clip(clip) for clip in clips]
+            refined_clips = await asyncio.gather(*tasks)
 
-        # --- Ensure no overlaps between adjacent clips ---
-        refined_clips.sort(key=lambda c: parse_time_to_seconds(c["start"]))
-        for i in range(1, len(refined_clips)):
-            prev_end = parse_time_to_seconds(refined_clips[i - 1]["end"])
-            current_start = parse_time_to_seconds(refined_clips[i]["start"])
-            current_end = parse_time_to_seconds(refined_clips[i]["end"])
+            # --- Ensure no overlaps between adjacent clips ---
+            refined_clips.sort(key=lambda c: parse_time_to_seconds(c["start"]))
+            for i in range(1, len(refined_clips)):
+                prev_end = parse_time_to_seconds(refined_clips[i - 1]["end"])
+                current_start = parse_time_to_seconds(refined_clips[i]["start"])
+                current_end = parse_time_to_seconds(refined_clips[i]["end"])
 
-            if current_start < prev_end:
-                # Shift current clip's start just after prev clip's end, but ensure it stays before end
-                new_start_sec = min(prev_end + 0.1, current_end - 0.1)
-                if new_start_sec < current_end:
-                    refined_clips[i]["start"] = seconds_to_hhmmss(new_start_sec)
-                    print(f"[FIX] Adjusted clip {refined_clips[i]['id']} start to avoid overlap: {refined_clips[i]['start']}")
-                else:
-                    print(f"[WARN] Could not fix overlap for clip {refined_clips[i]['id']}: zero or negative duration")
+                if current_start < prev_end:
+                    # Shift current clip's start just after prev clip's end, but ensure it stays before end
+                    new_start_sec = min(prev_end + 0.1, current_end - 0.1)
+                    if new_start_sec < current_end:
+                        refined_clips[i]["start"] = seconds_to_hhmmss(new_start_sec)
+                        print(f"[FIX] Adjusted clip {refined_clips[i]['id']} start to avoid overlap: {refined_clips[i]['start']}")
+                    else:
+                        print(f"[WARN] Could not fix overlap for clip {refined_clips[i]['id']}: zero or negative duration")
 
 
-        return refined_clips
+            return refined_clips

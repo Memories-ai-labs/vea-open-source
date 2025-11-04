@@ -18,10 +18,11 @@ import time
 import traceback
 from typing import Any, Dict, Optional, Tuple, Type
 from src.config import API_KEYS_PATH
+from lib.utils.metrics_collector import metrics_collector
 
 
 class GeminiGenaiManager:
-    def __init__(self, model="gemini-2.5-flash", location="us-central1", project="alex-oix"):
+    def __init__(self, model="gemini-2.5-flash", location="us-central1", project="research-459618"):
         self.load_api_keys()
         self.model = model
         self.genai_client = genai.Client(
@@ -105,9 +106,16 @@ class GeminiGenaiManager:
         # Fallback: no structured schema available, so return plain text
         return None, None
 
-    def LLM_request(self, prompt_contents: list, schema: BaseModel = None, retry_delay=60, max_retries=3):
+    def LLM_request(self, prompt_contents: list, schema: BaseModel = None, retry_delay=60, max_retries=3, context: Optional[str] = None):
         """
         Call Gemini with prompt and optional structured output schema.
+
+        Args:
+            prompt_contents: List of content items (strings, Paths, GCS URIs)
+            schema: Optional Pydantic model for structured output
+            retry_delay: Seconds to wait between retries
+            max_retries: Maximum number of retry attempts
+            context: Optional context string for metrics tracking (e.g., "evidence_retrieval")
         """
         parts = [self._convert_to_part(p) for p in prompt_contents]
 
@@ -135,6 +143,10 @@ class GeminiGenaiManager:
 
                 if response.text == None:
                     raise ValueError("Response text is None, likely an error occurred.")
+
+                # Log token usage metrics if context provided
+                if context and hasattr(response, 'usage_metadata'):
+                    metrics_collector.log_tokens(context, response.usage_metadata)
 
                 if response_mime_type == "application/json":
                     if response.parsed is None:

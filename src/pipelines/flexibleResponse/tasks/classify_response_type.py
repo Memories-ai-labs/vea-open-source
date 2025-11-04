@@ -27,7 +27,10 @@ class ClassifyResponseType:
         response = await asyncio.to_thread(
             self.llm.LLM_request,
             [prompt],
-            ResponseForm
+            ResponseForm,
+            60,  # retry_delay
+            3,   # max_retries
+            "classify_response"  # context
         )
 
         print(f"[DEBUG] Classified response type: {response}")

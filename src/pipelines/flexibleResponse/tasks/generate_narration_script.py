@@ -28,4 +28,11 @@ class GenerateNarrationScript:
             "- Output only the narration text\n"
         )
 
-        return await asyncio.to_thread(self.llm.LLM_request, [prompt])
+        return await asyncio.to_thread(
+            self.llm.LLM_request,
+            [prompt],
+            None,  # schema
+            60,    # retry_delay
+            3,     # max_retries
+            "generate_narration_script"  # context
+        )

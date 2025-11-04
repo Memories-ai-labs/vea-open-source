@@ -37,6 +37,13 @@ class FlexibleGeminiAnswer:
             "Respond in detailed plain text (do NOT use JSON). Another agent will format your answer for structuring and downstream processing."
         )
 
-        response = await asyncio.to_thread(self.llm.LLM_request, [prompt])
+        response = await asyncio.to_thread(
+            self.llm.LLM_request,
+            [prompt],
+            None,  # schema
+            60,    # retry_delay
+            3,     # max_retries
+            "flexible_gemini_answer"  # context
+        )
         # print(response)
         return response

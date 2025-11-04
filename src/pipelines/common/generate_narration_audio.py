@@ -1,6 +1,7 @@
 import os
 import asyncio
 from elevenlabs.client import ElevenLabs
+from lib.utils.metrics_collector import metrics_collector
 
 class GenerateNarrationAudio:
     def __init__(self, voice_output_dir, language="English"):
@@ -26,17 +27,21 @@ class GenerateNarrationAudio:
         print("[INFO] All voice clips generated.")
 
     def _generate_voice_sync(self, text, output_path):
-        try:
-            audio = self.elevenlabs.text_to_speech.convert(
-                text=text,
-                voice_id="JBFqnCBsd6RMkjVDRZzb",
-                model_id="eleven_flash_v2_5",
-            )
-            with open(output_path, "wb") as f:
-                for chunk in audio:
-                    if chunk:
-                        f.write(chunk)
-            print(f"[INFO] Narration generated: {output_path}")
-            return output_path
-        except Exception as e:
-            print(f"[ERROR] Failed to generate voice for {output_path}: {e}")
+        with metrics_collector.track_step("elevenlabs_tts"):
+            # Log character count before API call
+            metrics_collector.log_characters("elevenlabs_tts", len(text))
+
+            try:
+                audio = self.elevenlabs.text_to_speech.convert(
+                    text=text,
+                    voice_id="JBFqnCBsd6RMkjVDRZzb",
+                    model_id="eleven_flash_v2_5",
+                )
+                with open(output_path, "wb") as f:
+                    for chunk in audio:
+                        if chunk:
+                            f.write(chunk)
+                print(f"[INFO] Narration generated: {output_path}")
+                return output_path
+            except Exception as e:
+                print(f"[ERROR] Failed to generate voice for {output_path}: {e}")

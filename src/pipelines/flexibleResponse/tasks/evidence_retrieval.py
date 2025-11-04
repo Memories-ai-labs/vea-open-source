@@ -50,7 +50,10 @@ class EvidenceRetrieval:
         clips = await asyncio.to_thread(
             self.llm.LLM_request,
             [prompt],
-            EvidenceClips
+            EvidenceClips,
+            60,  # retry_delay
+            3,   # max_retries
+            "evidence_retrieval"  # context
         )
 
         # Post-process: Attach cloud_storage_path to each evidence clip

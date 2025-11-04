@@ -69,7 +69,10 @@ class GenerateVideoClipPlan:
             clips = await asyncio.to_thread(
                 self.llm.LLM_request,
                 [prompt],
-                ChosenClips
+                ChosenClips,
+                60,  # retry_delay
+                3,   # max_retries
+                "generate_clip_plan"  # context
             )
 
             # Gemini pass 2: Clean up narration for TTS
@@ -94,7 +97,10 @@ class GenerateVideoClipPlan:
             cleaned_clips = await asyncio.to_thread(
                 self.llm.LLM_request,
                 [json.dumps(clips, ensure_ascii=False, indent=2), clean_prompt],
-                ChosenClips
+                ChosenClips,
+                60,  # retry_delay
+                3,   # max_retries
+                "clean_narration"  # context
             )
             final_clips = cleaned_clips
             # Deduplicate clips that have the same narration sentence
@@ -132,7 +138,10 @@ class GenerateVideoClipPlan:
             clips = await asyncio.to_thread(
                 self.llm.LLM_request,
                 [prompt],
-                ChosenClips
+                ChosenClips,
+                60,  # retry_delay
+                3,   # max_retries
+                "generate_clip_plan_no_narration"  # context
             )
             final_clips = clips  # no cleanup needed
 

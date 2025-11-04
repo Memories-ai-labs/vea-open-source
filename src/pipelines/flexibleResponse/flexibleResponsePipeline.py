@@ -12,6 +12,7 @@ from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
 from lib.utils.media import clean_stale_tempdirs, download_and_cache_video
+from lib.utils.metrics_collector import metrics_collector
 from src.config import CREDENTIAL_PATH, BUCKET_NAME
 
 from src.pipelines.flexibleResponse.tasks.flexible_gemini_answer import FlexibleGeminiAnswer
@@ -85,11 +86,12 @@ class FlexibleResponsePipeline:
         # 1. Step 1: Generate the initial LLM response
         print("[INFO] Requesting initial Gemini response...")
         gemini_task = FlexibleGeminiAnswer(self.llm)
-        initial_response = await gemini_task(
-            user_prompt=user_prompt,
-            indexing_data=indexing_data,
-            file_descriptions=file_descriptions
-        )
+        with metrics_collector.track_step("flexible_gemini_answer"):
+            initial_response = await gemini_task(
+                user_prompt=user_prompt,
+                indexing_data=indexing_data,
+                file_descriptions=file_descriptions
+            )
         print("[INFO] Initial Gemini response received.")
         # print(f"[DEBUG] Initial response: {initial_response}")
 
@@ -97,7 +99,8 @@ class FlexibleResponsePipeline:
             # --- Text/Evidence Response Path ---
             print("[INFO] Classifying response type (text, text+evidence)...")
             classify = ClassifyResponseType(self.llm)
-            response_type = await classify(user_prompt, initial_response)
+            with metrics_collector.track_step("classify_response_type"):
+                response_type = await classify(user_prompt, initial_response)
             print(f"[INFO] Response type classified as: {response_type}")
 
             if response_type == "text_only":
@@ -110,14 +113,15 @@ class FlexibleResponsePipeline:
                 }
 
             elif response_type == "text_and_evidence":
-                try: 
+                try:
                     print("[INFO] Retrieving evidence clips from Gemini...")
                     evidence_task = EvidenceRetrieval(self.llm)
-                    selected_clips = await evidence_task(
-                        initial_response=initial_response,
-                        indexing_data=indexing_data,
-                        file_descriptions=file_descriptions
-                    )
+                    with metrics_collector.track_step("evidence_retrieval"):
+                        selected_clips = await evidence_task(
+                            initial_response=initial_response,
+                            indexing_data=indexing_data,
+                            file_descriptions=file_descriptions
+                        )
                     print(f"[INFO] {len(selected_clips)} evidence clips selected.")
 
                     print("[INFO] Extracting and uploading evidence clips...")
@@ -126,7 +130,8 @@ class FlexibleResponsePipeline:
                         gcs_client=self.cloud_storage_client,
                         bucket_name=BUCKET_NAME
                     )
-                    gcs_clip_paths = clipper.extract_and_upload_clips(selected_clips, run_id)
+                    with metrics_collector.track_step("clip_extraction"):
+                        gcs_clip_paths = clipper.extract_and_upload_clips(selected_clips, run_id)
                     print(f"[INFO] Uploaded {len(gcs_clip_paths)} evidence clips to GCS.")
 
                     return {
@@ -147,12 +152,13 @@ class FlexibleResponsePipeline:
             if narration_enabled:
                 print("[INFO] Generating narration script for video response...")
                 narration_task = GenerateNarrationScript(self.llm)
-                refined_script = await narration_task(
-                    initial_response=initial_response,
-                    user_prompt=user_prompt,
-                    indexing_data=indexing_data,
-                    file_descriptions=file_descriptions
-                )
+                with metrics_collector.track_step("generate_narration_script"):
+                    refined_script = await narration_task(
+                        initial_response=initial_response,
+                        user_prompt=user_prompt,
+                        indexing_data=indexing_data,
+                        file_descriptions=file_descriptions
+                    )
                 print("[INFO] Narration script generated.")
                 # print(f"[DEBUG] Refined narration script: {refined_script}")
             else:
@@ -162,13 +168,14 @@ class FlexibleResponsePipeline:
             # Generate the clip plan (either for narration or not)
             print("[INFO] Generating video clip plan...")
             clip_plan_task = GenerateVideoClipPlan(self.llm)
-            selected_narrated_clips = await clip_plan_task(
-                narration_script=refined_script,
-                user_prompt=user_prompt,
-                indexing_data=indexing_data,
-                file_descriptions=file_descriptions,
-                narration_enabled=narration_enabled
-            )
+            with metrics_collector.track_step("generate_clip_plan"):
+                selected_narrated_clips = await clip_plan_task(
+                    narration_script=refined_script,
+                    user_prompt=user_prompt,
+                    indexing_data=indexing_data,
+                    file_descriptions=file_descriptions,
+                    narration_enabled=narration_enabled
+                )
             print(f"[INFO] Video clip plan generated. {len(selected_narrated_clips)} clips planned.")
             print(selected_narrated_clips)
             # refine trim timestamps for clips
@@ -216,10 +223,26 @@ class FlexibleResponsePipeline:
             with open(editor_input_path, "w", encoding="utf-8") as f:
                 json.dump(editor_input, f, indent=2)
 
-            # --- Call CLI subprocess
+            # Generate temp metrics file path for subprocess
+            subprocess_metrics_file = os.path.join(self.workdir, f"subprocess_metrics_{uuid.uuid4().hex}.json")
+
+            # --- Call CLI subprocess with metrics output path
             print("[INFO] Running EditVideoResponse as subprocess to free memory...")
-            subprocess.run(["python", "-m","src.pipelines.common.edit_video_response", editor_input_path], check=True)
+            subprocess.run([
+                "python", "-m", "src.pipelines.common.edit_video_response",
+                editor_input_path,
+                subprocess_metrics_file
+            ], check=True)
             print("[INFO] EditVideoResponse subprocess complete.")
+
+            # Merge subprocess metrics into parent
+            metrics_collector.merge_from_file(subprocess_metrics_file)
+
+            # Clean up temp metrics file
+            try:
+                os.remove(subprocess_metrics_file)
+            except:
+                pass
 
             # Upload the result to GCS
             final_gcs_path = f"outputs/{self.media_base_name}/{run_id}/video_response.mp4"

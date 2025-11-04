@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -299,34 +300,49 @@ def extract_images_ffmpeg(
 
 
 def download_and_cache_video(gcs_client, bucket_name, cloud_path, local_dir):
-    """Downloads a video file from GCS if not already cached locally."""
+    """Downloads a video file from GCS if not already cached locally.
+
+    Uses full cloud_path to generate unique cache keys, preventing collisions
+    when multiple files have the same basename (e.g., media_indexing.json).
+    """
     filename = os.path.basename(cloud_path)
     primary_path = os.path.join(local_dir, filename)
 
+    # Create unique cache path based on full cloud_path to avoid collisions
+    # For cloud_path like "indexing/video_name/media_indexing.json"
+    # Creates cache like: .cache/gcs_videos/indexing/video_name/media_indexing.json
     cache_root = Path(".cache/gcs_videos").resolve()
-    cache_root.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_root / filename
+
+    # Sanitize cloud_path: remove leading slashes and normalize separators
+    sanitized_path = cloud_path.lstrip("/").replace("\\", "/")
+    cache_path = cache_root / sanitized_path
+
+    # Ensure cache directory exists
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
 
     if primary_path and os.path.exists(primary_path):
-        print(f"[CACHE] Video already present locally: {primary_path}")
+        print(f"[CACHE] File already present locally: {primary_path}")
         return primary_path
 
     if cache_path.exists():
-        print(f"[CACHE] Restoring video from cache: {cache_path} → {primary_path}")
+        print(f"[CACHE] Restoring from cache: {cache_path} → {primary_path}")
         if primary_path:
             Path(primary_path).parent.mkdir(parents=True, exist_ok=True)
             if not os.path.exists(primary_path):
                 shutil.copy2(cache_path, primary_path)
         return str(cache_path if not primary_path else primary_path)
 
+    # Download to primary location
     Path(local_dir).mkdir(parents=True, exist_ok=True)
     download_target = primary_path or str(cache_path)
-    print(f"[DOWNLOAD] Downloading video from GCS: {cloud_path} → {download_target}")
+    print(f"[DOWNLOAD] Downloading from GCS: {cloud_path} → {download_target}")
     gcs_client.download_files(bucket_name, cloud_path, download_target)
 
+    # Populate global cache with full path structure
     try:
         if not cache_path.exists() and os.path.exists(download_target):
             shutil.copy2(download_target, cache_path)
+            print(f"[CACHE] Populated cache: {cache_path}")
     except Exception as exc:
         print(f"[WARN] Failed to populate cache for {cloud_path}: {exc}")
 

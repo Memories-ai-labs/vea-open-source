@@ -18,6 +18,7 @@ import json
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.utils.media import parse_time_to_seconds, download_and_cache_video
+from lib.utils.metrics_collector import metrics_collector
 from src.pipelines.common.dynamic_cropping import DynamicCropping
 from src.pipelines.common.fcpxml_exporter import export_fcpxml
 from src.pipelines.common import metadata_helpers
@@ -515,22 +516,23 @@ class TimelineConstructor:
         )
         print(f"[INFO] FCPXML saved to {fcpxml_path}")
 
-        final_video = self._assemble_final_video(cropped_clips, background_music_path, music_volume_override)
-        self._ensure_audio_readers(final_video.audio)
+        with metrics_collector.track_step("video_assembly"):
+            final_video = self._assemble_final_video(cropped_clips, background_music_path, music_volume_override)
+            self._ensure_audio_readers(final_video.audio)
 
-        try:
-            await asyncio.to_thread(
-                final_video.write_videofile,
-                self.output_path,
-                preset="ultrafast",
-                fps=24,
-            )
-            print(f"[INFO] Final video created: {self.output_path}")
-        finally:
             try:
-                final_video.close()
-            except Exception:
-                pass
+                await asyncio.to_thread(
+                    final_video.write_videofile,
+                    self.output_path,
+                    preset="ultrafast",
+                    fps=24,
+                )
+                print(f"[INFO] Final video created: {self.output_path}")
+            finally:
+                try:
+                    final_video.close()
+                except Exception:
+                    pass
 
         for clip in original_clips + cropped_clips:
             try:
