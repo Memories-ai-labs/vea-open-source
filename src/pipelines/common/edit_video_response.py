@@ -1,10 +1,12 @@
 import sys
 import json
 import asyncio
+import os
 
 from lib.oss.gcp_oss import GoogleCloudStorage
 from lib.oss.auth import credentials_from_file
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
+from lib.utils.metrics_collector import metrics_collector
 from src.config import CREDENTIAL_PATH
 from src.pipelines.common.timeline_constructor import TimelineConstructor
 
@@ -14,6 +16,8 @@ if __name__ == "__main__":
         sys.exit(1)
 
     input_path = sys.argv[1]
+    metrics_output_path = sys.argv[2] if len(sys.argv) > 2 else None
+
     with open(input_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
@@ -39,3 +43,9 @@ if __name__ == "__main__":
         snap_to_beat=config.get("snap_to_beat", False),
         multi_round_mode=config.get("multi_round_mode", True)
     ))
+
+    # Write metrics to file if path provided
+    if metrics_output_path:
+        os.makedirs(os.path.dirname(metrics_output_path), exist_ok=True)
+        metrics_collector.write_report(metrics_output_path)
+        print(f"[INFO] Subprocess metrics written to {metrics_output_path}")

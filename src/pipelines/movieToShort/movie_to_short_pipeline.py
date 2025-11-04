@@ -7,6 +7,7 @@ from lib.oss.auth import credentials_from_file
 from src.config import CREDENTIAL_PATH, BUCKET_NAME
 from src.pipelines.flexibleResponse.flexibleResponsePipeline import FlexibleResponsePipeline
 from lib.utils.media import seconds_to_hhmmss, get_video_duration, download_and_cache_video
+from lib.utils.metrics_collector import metrics_collector
 from src.pipelines.movieToShort.schema import ShortsPlans
 from typing import List
 
@@ -53,17 +54,18 @@ class MovieToShortsPipeline:
 
 
         print("[SHORTS] Generating plan for shorts (text-only response)...")
-        plan_result = await self.flexible_pipeline.run(
-            user_prompt=plan_prompt,
-            video_response=False,
-            original_audio=True,
-            music=False,
-            narration_enabled=False,
-            aspect_ratio=self.aspect_ratio,
-            subtitles=False,
-            snap_to_beat=False,
-        )
-        shorts_plan_text = plan_result.get("response", "")
+        with metrics_collector.track_step("planning"):
+            plan_result = await self.flexible_pipeline.run(
+                user_prompt=plan_prompt,
+                video_response=False,
+                original_audio=True,
+                music=False,
+                narration_enabled=False,
+                aspect_ratio=self.aspect_ratio,
+                subtitles=False,
+                snap_to_beat=False,
+            )
+            shorts_plan_text = plan_result.get("response", "")
 
         # print("\n[SHORTS PLAN]\n", shorts_plan_text)
         if not shorts_plan_text.strip():
@@ -86,11 +88,20 @@ class MovieToShortsPipeline:
         )
 
 
-        shorts_plan_json = await asyncio.to_thread(
-            self.flexible_pipeline.llm.LLM_request,
-            [format_prompt],
-            ShortsPlans
-        )
+        with metrics_collector.track_step("format_plan"):
+            shorts_plan_json = await asyncio.to_thread(
+                self.flexible_pipeline.llm.LLM_request,
+                [format_prompt],
+                ShortsPlans,
+                context="format_plan"
+            )
+
+        # Save planning metrics before resetting for individual shorts
+        os.makedirs(".cache/metrics", exist_ok=True)
+        planning_metrics_file = ".cache/metrics/planning_metrics.json"
+        metrics_collector.write_report(planning_metrics_file)
+        metrics_collector.print_report()
+        print(f"[METRICS] Planning metrics written to {planning_metrics_file}\n")
 
         print("\n[SHORTS PLAN STRUCTURED JSON]\n", json.dumps(shorts_plan_json, indent=2))
         lines = shorts_plan_json
@@ -100,6 +111,10 @@ class MovieToShortsPipeline:
         # ---- STEP 2: Generate each short using the plan ----
         shorts = []
         for i, plan_entry in enumerate(lines):
+            # Reset metrics for this short
+            metrics_collector.reset()
+            metrics_collector.short_index = i
+
             print(f"\n[SHORTS] Generating short #{i+1}")
             gcs_output_path = f"output/newmovie2short/{movie_name}/{i}.mp4"
             plan_desc = plan_entry.get("description", "")
@@ -118,7 +133,7 @@ class MovieToShortsPipeline:
                 per_short_prompt += f"Include supporting moment(s) at: {extras}\n"
 
             per_short_prompt += (
-                "Choose the most powerful 1-minute edit using clips that reflect this part of the movie’s plot. "
+                "Choose the most powerful 1-minute edit using clips that reflect this part of the movie's plot. "
                 "Keep the edit engaging and impactful while preserving the story flow. "
                 "You must choose clips in chronological order, and try your best to avoid choosing clips outside the time range specified in the plan.\n"
                 "Ensure the short is understandable on its own but contributes to the overall chronological storytelling across all shorts. "
@@ -126,26 +141,37 @@ class MovieToShortsPipeline:
             )
 
             try:
-                result = await self.flexible_pipeline.run(
-                    user_prompt=per_short_prompt,
-                    video_response=True,
-                    original_audio=True,
-                    music=False,
-                    narration_enabled=False,
-                    aspect_ratio=self.aspect_ratio,
-                    # subtitles=True,
-                    subtitles=False,
+                with metrics_collector.track_step(f"short_{i}_generation"):
+                    result = await self.flexible_pipeline.run(
+                        user_prompt=per_short_prompt,
+                        video_response=True,
+                        original_audio=True,
+                        music=False,
+                        narration_enabled=False,
+                        aspect_ratio=self.aspect_ratio,
+                        # subtitles=True,
+                        subtitles=False,
 
-                    snap_to_beat=False,
-                    output_path=gcs_output_path
-                )
+                        snap_to_beat=False,
+                        output_path=gcs_output_path
+                    )
+
                 shorts.append({
                     "short_index": i,
                     "gcs_output_path": gcs_output_path,
                     "plan_entry": plan_entry,
                     "response": result,
                 })
-            except:
+
+                # Write metrics to file and print report
+                os.makedirs(".cache/metrics", exist_ok=True)
+                metrics_file = f".cache/metrics/short_{i}_metrics.json"
+                metrics_collector.write_report(metrics_file)
+                metrics_collector.print_report()
+                print(f"[METRICS] Written to {metrics_file}\n")
+
+            except Exception as e:
+                print(f"[ERROR] Failed to generate short #{i}: {e}")
                 pass
 
         print(f"[SHORTS] Generation complete! {len(shorts)} shorts created.")

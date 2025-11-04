@@ -19,6 +19,8 @@ import torch.nn as nn
 from moviepy import VideoFileClip
 from tqdm import tqdm
 
+from lib.utils.metrics_collector import metrics_collector
+
 
 # ---------------------------
 # Helper: black bar detection
@@ -112,7 +114,7 @@ class ViNetSaliencyBackend:
             raise ValueError("ViNet variant must be 'S' or 'A'.")
 
         if device is None:
-            device = "cpu"
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
         self.fp16 = bool(fp16 and self.device.type == "cuda")
         self.clip_len = int(clip_len)
@@ -154,6 +156,11 @@ class ViNetSaliencyBackend:
             checkpoint = checkpoint["state_dict"]
         checkpoint = {k.replace("module.", ""): v for k, v in checkpoint.items()}
         model.load_state_dict(checkpoint, strict=False)
+
+        # Convert model to FP16 if using half precision
+        if self.fp16:
+            model = model.half()
+
         return model
 
     @torch.no_grad()
@@ -260,12 +267,18 @@ class DynamicCropping:
 
         self.clip_len = 32
         self.stride = 32
+
+        # Note: PySceneDetect (used for shot detection) does not support CUDA acceleration
+        # Only ViNet saliency detection can use CUDA
+        if torch.cuda.is_available():
+            print(f"[CUDA] GPU available: {torch.cuda.get_device_name(0)}")
+
         self.backend = ViNetSaliencyBackend(
             self.repo_dir,
             self.checkpoint_path,
             variant="S",
             clip_len=self.clip_len,
-            fp16=False,
+            fp16=True,  # Enable FP16 acceleration on CUDA if available
         )
         self._temp_outputs: set[Path] = set()
         self._clip_finalizers: List[weakref.finalize] = []
@@ -534,20 +547,28 @@ class DynamicCropping:
             start_time = start / fps
             end_time = end / fps
             if clip.duration is not None:
-                epsilon = 1e-4
+                # Add larger epsilon for end-of-video to avoid MoviePy EOF issues
+                epsilon = 0.1  # 100ms buffer from end
                 start_time = min(start_time, max(0.0, clip.duration - epsilon))
-                end_time = min(end_time, clip.duration)
+                end_time = min(end_time, clip.duration - epsilon)
             if end_time <= start_time:
                 continue
 
-            if hasattr(clip, "subclipped"):
-                shot_clip = clip.subclipped(start_time, end_time)
-            else:
-                shot_clip = clip.subclip(start_time, end_time)
+            # Skip shots that are too short (less than 1 frame)
+            if (end_time - start_time) * fps < 1.0:
+                print(f"[WARN] Skipping very short shot at {start_time:.2f}s-{end_time:.2f}s")
+                continue
 
             shot_frames: List[np.ndarray] = []
             frame_limit = max(0, end - start)
+            shot_clip = None
+
             try:
+                if hasattr(clip, "subclipped"):
+                    shot_clip = clip.subclipped(start_time, end_time)
+                else:
+                    shot_clip = clip.subclip(start_time, end_time)
+
                 for frame_idx, frame in enumerate(shot_clip.iter_frames(fps=fps, dtype="uint8")):
                     if frame_limit and frame_idx >= frame_limit:
                         break
@@ -556,8 +577,24 @@ class DynamicCropping:
                     masked[y1:y2, x1:x2] = frame_bgr[y1:y2, x1:x2]
                     resized = cv2.resize(masked, (input_width, input_height), interpolation=cv2.INTER_LINEAR)
                     shot_frames.append(resized)
+            except (IOError, OSError) as exc:
+                print(f"[WARN] Failed to process shot at {start_time:.2f}s-{end_time:.2f}s: {exc}")
+                # Use default center for failed shot
+                center_norm = (0.5, 0.5)
+                for frame_idx in range(start, end):
+                    if 0 <= frame_idx < total_frames:
+                        frame_centers[frame_idx] = center_norm
+                shot_metadata.append({
+                    "start_frame": int(start),
+                    "end_frame": int(end),
+                    "center_norm": {"x": float(center_norm[0]), "y": float(center_norm[1])},
+                })
+                shot_frames.clear()
+                saliency_stack = None
+                continue
             finally:
-                getattr(shot_clip, "close", lambda: None)()
+                if shot_clip is not None:
+                    getattr(shot_clip, "close", lambda: None)()
 
             saliency_stack = self._collect_shot_saliency(shot_frames)
 
@@ -774,49 +811,50 @@ class DynamicCropping:
                 self._finalize_debug_preview()
 
     async def __call__(self, desired_width: int, desired_height: int, clips: Sequence[VideoFileClip]):
-        print(f"[INFO] Starting DynamicCropping for {len(clips)} clips using ViNet saliency.")
-        final_clips = []
+        with metrics_collector.track_step("dynamic_cropping"):
+            print(f"[INFO] Starting DynamicCropping for {len(clips)} clips using ViNet saliency.")
+            final_clips = []
 
-        clip_progress = tqdm(total=len(clips), desc="DynamicCropping clips", unit="clip")
+            clip_progress = tqdm(total=len(clips), desc="DynamicCropping clips", unit="clip")
 
-        for idx, clip in enumerate(clips):
-            print(f"\n[INFO] Processing clip {idx}")
-            temp_result = await asyncio.to_thread(self._process_clip, clip, desired_width, desired_height)
+            for idx, clip in enumerate(clips):
+                print(f"\n[INFO] Processing clip {idx}")
+                temp_result = await asyncio.to_thread(self._process_clip, clip, desired_width, desired_height)
 
-            if isinstance(temp_result, tuple):
-                temp_path, crop_metadata = temp_result
-            else:
-                temp_path, crop_metadata = temp_result, None
+                if isinstance(temp_result, tuple):
+                    temp_path, crop_metadata = temp_result
+                else:
+                    temp_path, crop_metadata = temp_result, None
 
-            video = VideoFileClip(str(temp_path))
-            self._register_clip_cleanup(video, temp_path)
-            if clip.audio:
-                safe_duration = min(video.duration, clip.audio.duration)
-                video = video.with_audio(clip.audio.subclipped(0, safe_duration))
+                video = VideoFileClip(str(temp_path))
+                self._register_clip_cleanup(video, temp_path)
+                if clip.audio:
+                    safe_duration = min(video.duration, clip.audio.duration)
+                    video = video.with_audio(clip.audio.subclipped(0, safe_duration))
 
-            source_metadata = getattr(clip, "_vea_metadata", None)
-            if source_metadata is not None:
-                if crop_metadata is not None:
-                    source_metadata["crop"] = crop_metadata
-                timeline_info = source_metadata.setdefault("timeline", {})
-                timeline_info["duration"] = float(video.duration or 0.0)
-                frame_rate = timeline_info.get("frame_rate")
-                if frame_rate:
-                    timeline_info["frame_count"] = int(round(timeline_info["duration"] * float(frame_rate)))
-                applied_start = source_metadata.setdefault("timings", {}).get("applied_start", 0.0)
-                source_metadata["timings"]["applied_end"] = applied_start + float(video.duration or 0.0)
-                setattr(video, "_vea_metadata", source_metadata)
+                source_metadata = getattr(clip, "_vea_metadata", None)
+                if source_metadata is not None:
+                    if crop_metadata is not None:
+                        source_metadata["crop"] = crop_metadata
+                    timeline_info = source_metadata.setdefault("timeline", {})
+                    timeline_info["duration"] = float(video.duration or 0.0)
+                    frame_rate = timeline_info.get("frame_rate")
+                    if frame_rate:
+                        timeline_info["frame_count"] = int(round(timeline_info["duration"] * float(frame_rate)))
+                    applied_start = source_metadata.setdefault("timings", {}).get("applied_start", 0.0)
+                    source_metadata["timings"]["applied_end"] = applied_start + float(video.duration or 0.0)
+                    setattr(video, "_vea_metadata", source_metadata)
 
-            final_clips.append(video)
-            gc.collect()
-            clip_progress.update(1)
+                final_clips.append(video)
+                gc.collect()
+                clip_progress.update(1)
 
-        clip_progress.close()
+            clip_progress.close()
 
-        if self.debug and self._debug_outputs:
-            print("[DEBUG] Dynamic cropping previews saved:")
-            for path in self._debug_outputs:
-                print(f"    {path}")
+            if self.debug and self._debug_outputs:
+                print("[DEBUG] Dynamic cropping previews saved:")
+                for path in self._debug_outputs:
+                    print(f"    {path}")
 
-        print("[INFO] DynamicCropping complete.")
-        return final_clips
+            print("[INFO] DynamicCropping complete.")
+            return final_clips
