@@ -32,6 +32,7 @@ test_data/
 ## self-defined
 test/
 config/
+config.json
 data/
 index_all.py
 excluded_movies.txt

@@ -5,8 +5,7 @@ from typing import List
 import os
 from fastapi import FastAPI, HTTPException
 
-from lib.oss.gcp_oss import GoogleCloudStorage
-from lib.oss.auth import credentials_from_file
+from lib.oss.storage_factory import get_storage_client
 from src.schema import (
     MovieFile,
     IndexRequest,
@@ -23,9 +22,10 @@ from src.schema import (
 
 from src.config import (
     API_PREFIX,
-    CREDENTIAL_PATH,
     BUCKET_NAME,
-    MOVIE_LIBRARY,
+    VIDEOS_DIR,
+    get_storage_mode,
+    ensure_local_directories,
 )
 
 from src.pipelines.videoComprehension.comprehensionPipeline import ComprehensionPipeline
@@ -42,8 +42,13 @@ logger = logging.getLogger(__name__)
 # --- Initialize FastAPI app ---
 app = FastAPI()
 
-# --- Initialize GCP OSS client ---
-gcp_oss = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
+# --- Initialize Storage client (local or cloud based on config) ---
+storage_client = get_storage_client()
+logger.info(f"Storage mode: {get_storage_mode()}")
+ensure_local_directories()
+
+# Alias for backward compatibility with existing code
+gcp_oss = storage_client
 
 
 @app.get("/")
@@ -53,11 +58,11 @@ async def root():
 @app.get(f"{API_PREFIX}/movies", response_model=List[MovieFile])
 async def list_available_movies() -> List[MovieFile]:
     """
-    List available movies stored in GCS.
+    List available movies in storage (local or cloud).
     """
     try:
-        logger.info("Fetching list of available movies from GCS...")
-        blobs = gcp_oss.list_folder(BUCKET_NAME, f"{MOVIE_LIBRARY}/")
+        logger.info("Fetching list of available movies...")
+        blobs = storage_client.list_folder(BUCKET_NAME, f"{VIDEOS_DIR}/")
         movies = [MovieFile(name=blob[0], blob_path=blob[1]) for blob in blobs]
         logger.info(f"Found {len(movies)} movies.")
         return movies

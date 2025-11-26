@@ -1,0 +1,51 @@
+{
+  "_comment": "VEA configuration - fill in your API keys below",
+
+  "paths": {
+    "videos_dir": "data/videos",
+    "_videos_dir_comment": "Directory where source videos are stored",
+
+    "indexing_dir": "data/indexing",
+    "_indexing_dir_comment": "Directory where video indexing metadata is stored",
+
+    "outputs_dir": "data/outputs",
+    "_outputs_dir_comment": "Directory where generated videos are saved"
+  },
+
+  "api_keys": {
+    "ELEVENLABS_API_KEY": "your-elevenlabs-api-key",
+    "_elevenlabs_comment": "Get your API key from https://elevenlabs.io/",
+
+    "SOUNDSTRIPE_KEY": "your-soundstripe-api-key",
+    "_soundstripe_comment": "Get your API key from https://www.soundstripe.com/ (optional - for background music)",
+
+    "GOOGLE_CLOUD_PROJECT": "your-gcp-project-id",
+    "_google_project_comment": "Your Google Cloud Project ID for Vertex AI (required for Gemini LLM)",
+
+    "GOOGLE_CLOUD_LOCATION": "us-central1",
+    "_google_location_comment": "Google Cloud region for Vertex AI (default: us-central1)",
+
+    "_google_auth_required": "IMPORTANT: Run 'gcloud auth application-default login' before using"
+  },
+
+  "optional_features": {
+    "enable_music": true,
+    "_enable_music_comment": "Enable background music selection (requires SOUNDSTRIPE_KEY)",
+
+    "enable_dynamic_cropping": true,
+    "_enable_dynamic_cropping_comment": "Enable AI-powered dynamic cropping with ViNet",
+
+    "enable_subtitles": true,
+    "_enable_subtitles_comment": "Enable subtitle generation",
+
+    "enable_fcpxml_export": true,
+    "_enable_fcpxml_export_comment": "Export Final Cut Pro XML alongside videos"
+  },
+
+  "video_processing": {
+    "default_fps": 24,
+    "summary_fps": 1,
+    "summary_crf": 40,
+    "_comment": "Video preprocessing settings for LLM optimization"
+  }
+}
