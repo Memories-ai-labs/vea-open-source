@@ -3,14 +3,13 @@ import os
 from pathlib import Path
 from lib.utils.media import preprocess_long_video
 from src.pipelines.geminiNaiveComprehensionPipeline.tasks.naive_comprehension import NaiveGeminiComprehension
-from lib.oss.gcp_oss import GoogleCloudStorage
-from src.config import BUCKET_NAME, CREDENTIAL_PATH
-from lib.oss.auth import credentials_from_file
+from lib.oss.storage_factory import get_storage_client
+from src.config import BUCKET_NAME
 
 class GeminiNaiveComprehensionPipeline:
     def __init__(self, llm):
         self.llm = llm
-        self.gcs_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
+        self.gcs_client = get_storage_client()
 
     async def run_for_file(self, local_media_path):
         print(f"[INFO] Starting naive comprehension pipeline for: {local_media_path}")

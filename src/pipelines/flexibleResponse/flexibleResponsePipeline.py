@@ -9,11 +9,10 @@ import uuid
 import shutil
 
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
-from lib.oss.gcp_oss import GoogleCloudStorage
-from lib.oss.auth import credentials_from_file
-from lib.utils.media import clean_stale_tempdirs, download_and_cache_video
+from lib.oss.storage_factory import get_storage_client
+from lib.utils.media import clean_stale_tempdirs, download_and_cache_video, get_video_duration, parse_time_to_seconds
 from lib.utils.metrics_collector import metrics_collector
-from src.config import CREDENTIAL_PATH, BUCKET_NAME
+from src.config import BUCKET_NAME, INDEXING_DIR, OUTPUTS_DIR
 
 from src.pipelines.flexibleResponse.tasks.flexible_gemini_answer import FlexibleGeminiAnswer
 from src.pipelines.flexibleResponse.tasks.classify_response_type import ClassifyResponseType
@@ -32,9 +31,9 @@ class FlexibleResponsePipeline:
         self.cloud_storage_media_path = cloud_storage_media_path
         self.media_name = os.path.basename(cloud_storage_media_path.rstrip("/"))
         self.media_base_name = os.path.splitext(self.media_name)[0]
-        self.cloud_storage_indexing_dir = f"indexing/{self.media_base_name}/"
+        self.cloud_storage_indexing_dir = f"{INDEXING_DIR}/{self.media_base_name}/"
         self.llm = GeminiGenaiManager(model="gemini-2.5-flash")
-        self.cloud_storage_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
+        self.cloud_storage_client = get_storage_client()
         self.workdir = tempfile.mkdtemp()
         self.media_indexing_json = None
 
@@ -69,6 +68,79 @@ class FlexibleResponsePipeline:
         indexing_data = self.media_indexing_json["media_files"]
         file_descriptions = self.media_indexing_json["manifest"]
         return indexing_data, file_descriptions
+
+    def _filter_out_of_bounds_clips(self, clips: list) -> list:
+        """
+        Filter out clips with timestamps that exceed the source video duration.
+        Also filters clips with invalid timestamps (start >= end, negative values, etc.)
+        """
+        if not clips:
+            return clips
+
+        # Cache video durations to avoid repeated lookups
+        duration_cache = {}
+        valid_clips = []
+
+        for clip in clips:
+            try:
+                # Get source video path
+                source_path = clip.get("cloud_storage_path", "")
+                if not source_path:
+                    print(f"[WARN] Clip {clip.get('id', '?')} has no cloud_storage_path, skipping")
+                    continue
+
+                # Get or cache video duration
+                if source_path not in duration_cache:
+                    # Download video to get duration
+                    cache_dir = os.path.join(".cache", "duration_check")
+                    os.makedirs(cache_dir, exist_ok=True)
+                    local_path = download_and_cache_video(
+                        self.cloud_storage_client,
+                        BUCKET_NAME,
+                        source_path,
+                        cache_dir
+                    )
+                    duration_cache[source_path] = get_video_duration(local_path)
+
+                video_duration = duration_cache[source_path]
+
+                # Parse clip timestamps
+                start_str = clip.get("start", "00:00:00,000")
+                end_str = clip.get("end", "00:00:00,000")
+                start_sec = parse_time_to_seconds(start_str)
+                end_sec = parse_time_to_seconds(end_str)
+
+                # Validate timestamps
+                if start_sec < 0:
+                    print(f"[WARN] Clip {clip.get('id', '?')} has negative start time ({start_str}), skipping")
+                    continue
+
+                if end_sec <= start_sec:
+                    print(f"[WARN] Clip {clip.get('id', '?')} has end <= start ({end_str} <= {start_str}), skipping")
+                    continue
+
+                if start_sec >= video_duration:
+                    print(f"[WARN] Clip {clip.get('id', '?')} start ({start_str} = {start_sec:.1f}s) exceeds video duration ({video_duration:.1f}s), skipping")
+                    continue
+
+                if end_sec > video_duration:
+                    # Clamp end to video duration instead of skipping
+                    from lib.utils.media import seconds_to_hhmmss
+                    old_end = end_str
+                    clip["end"] = seconds_to_hhmmss(video_duration)
+                    print(f"[WARN] Clip {clip.get('id', '?')} end ({old_end}) exceeds video duration, clamped to {clip['end']}")
+
+                valid_clips.append(clip)
+
+            except Exception as e:
+                print(f"[WARN] Error validating clip {clip.get('id', '?')}: {e}, skipping")
+                continue
+
+        filtered_count = len(clips) - len(valid_clips)
+        if filtered_count > 0:
+            print(f"[INFO] Filtered out {filtered_count} invalid clips, {len(valid_clips)} remaining")
+
+        return valid_clips
 
     async def run(self, user_prompt: str, video_response: bool, original_audio: bool, music: bool,
                   narration_enabled: bool, aspect_ratio: float, subtitles: bool, snap_to_beat: bool,
@@ -124,6 +196,11 @@ class FlexibleResponsePipeline:
                         )
                     print(f"[INFO] {len(selected_clips)} evidence clips selected.")
 
+                    # Filter out clips with invalid/out-of-bounds timestamps
+                    selected_clips = self._filter_out_of_bounds_clips(selected_clips)
+                    if not selected_clips:
+                        raise RuntimeError("No valid evidence clips remaining after filtering")
+
                     print("[INFO] Extracting and uploading evidence clips...")
                     clipper = ClipExtractor(
                         workdir=self.workdir,
@@ -178,6 +255,12 @@ class FlexibleResponsePipeline:
                 )
             print(f"[INFO] Video clip plan generated. {len(selected_narrated_clips)} clips planned.")
             print(selected_narrated_clips)
+
+            # Filter out clips with invalid/out-of-bounds timestamps
+            selected_narrated_clips = self._filter_out_of_bounds_clips(selected_narrated_clips)
+            if not selected_narrated_clips:
+                raise RuntimeError("No valid clips remaining after filtering out-of-bounds timestamps")
+
             # refine trim timestamps for clips
             if original_audio:
                 refiner = RefineClipTimestamps(self.llm, self.workdir, self.cloud_storage_client, BUCKET_NAME)
@@ -245,7 +328,7 @@ class FlexibleResponsePipeline:
                 pass
 
             # Upload the result to GCS
-            final_gcs_path = f"outputs/{self.media_base_name}/{run_id}/video_response.mp4"
+            final_gcs_path = f"{OUTPUTS_DIR}/{self.media_base_name}/{run_id}/video_response.mp4"
             if output_path:
                 final_gcs_path = output_path
             print(f"[INFO] Uploading final video to: {final_gcs_path}")

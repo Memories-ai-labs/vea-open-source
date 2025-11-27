@@ -14,7 +14,7 @@ def get_storage_client():
     """
     if is_local_mode():
         from lib.oss.local_storage import LocalStorage
-        return LocalStorage()
+        return LocalStorage(base_path=".")
     else:
         from lib.oss.gcp_oss import GoogleCloudStorage
         from lib.oss.auth import credentials_from_file

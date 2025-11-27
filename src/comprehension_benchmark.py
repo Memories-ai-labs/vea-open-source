@@ -4,10 +4,9 @@ import tempfile
 from pathlib import Path
 import json
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
-from lib.oss.auth import credentials_from_file
-from lib.oss.gcp_oss import GoogleCloudStorage
+from lib.oss.storage_factory import get_storage_client
 from lib.utils.media import download_and_cache_video
-from src.config import CREDENTIAL_PATH, BUCKET_NAME, VIDEO_EXTS
+from src.config import BUCKET_NAME, VIDEO_EXTS
 from src.pipelines.videoComprehension.comprehensionPipeline import ComprehensionPipeline
 from src.pipelines.geminiNaiveComprehensionPipeline.pipeline import GeminiNaiveComprehensionPipeline
 
@@ -21,7 +20,7 @@ async def run_benchmark_for_blob(blob_path, model_name):
     print(f"\n=== [Model: {model_name}] Processing: {blob_path} ===")
 
     # Prepare GCS client and output folder
-    gcs_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
+    gcs_client = get_storage_client()
     media_name = Path(blob_path).stem
     output_folder = f"benchmark_outputs/{media_name}/{model_name}"
     os.makedirs(output_folder, exist_ok=True)

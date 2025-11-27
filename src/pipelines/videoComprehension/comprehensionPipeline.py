@@ -6,8 +6,7 @@ from datetime import datetime
 import json
 import asyncio
 
-from lib.oss.auth import credentials_from_file
-from lib.oss.gcp_oss import GoogleCloudStorage
+from lib.oss.storage_factory import get_storage_client
 from lib.utils.media import (
     correct_segment_number_based_on_time,
     preprocess_long_video,
@@ -18,7 +17,7 @@ from lib.utils.media import (
     download_and_cache_video,
 )
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
-from src.config import CREDENTIAL_PATH, BUCKET_NAME, VIDEO_EXTS
+from src.config import BUCKET_NAME, VIDEO_EXTS, INDEXING_DIR
 from src.pipelines.videoComprehension.tasks.rough_comprehension import RoughComprehension
 from src.pipelines.videoComprehension.tasks.scene_by_scene_comprehension import SceneBySceneComprehension
 from src.pipelines.videoComprehension.tasks.refine_story import RefineStory    # <-- updated import
@@ -37,9 +36,9 @@ class ComprehensionPipeline:
             self.cloud_storage_media_path = blob_path.rstrip("/") + "/"
             self.media_folder_name = os.path.basename(self.cloud_storage_media_path.rstrip("/"))
 
-        self.cloud_storage_indexing_dir = f"indexing/{self.media_folder_name}/"
+        self.cloud_storage_indexing_dir = f"{INDEXING_DIR}/{self.media_folder_name}/"
         self.indexing_file_path = self.cloud_storage_indexing_dir + "media_indexing.json"
-        self.cloud_storage_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
+        self.cloud_storage_client = get_storage_client()
         self.llm = GeminiGenaiManager(model="gemini-2.5-flash")
 
         self.start_fresh = start_fresh

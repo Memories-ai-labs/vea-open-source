@@ -17,30 +17,17 @@ import os
 import time
 import traceback
 from typing import Any, Dict, Optional, Tuple, Type
-from src.config import API_KEYS_PATH
 from lib.utils.metrics_collector import metrics_collector
 
 
 class GeminiGenaiManager:
     def __init__(self, model="gemini-2.5-flash", location="us-central1", project="research-459618"):
-        self.load_api_keys()
         self.model = model
         self.genai_client = genai.Client(
             vertexai=True,
             location=location,
             project=project
         )
-
-    def load_api_keys(self):
-        """Load API keys from JSON into env vars"""
-        if os.path.exists(API_KEYS_PATH):
-            with open(API_KEYS_PATH, "r") as file:
-                api_keys = json.load(file)
-                for key, value in api_keys.items():
-                    os.environ[key] = value
-                    print(f"Loaded API key: {key}")
-        else:
-            print("Warning: API key file not found.")
 
     def _convert_to_part(self, item) -> Part:
         """Convert Path, GCS URI, or string into Gemini-compatible Part"""

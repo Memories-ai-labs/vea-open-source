@@ -2,10 +2,9 @@ import os
 import tempfile
 from pathlib import Path
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
-from lib.oss.gcp_oss import GoogleCloudStorage
-from lib.oss.auth import credentials_from_file
+from lib.oss.storage_factory import get_storage_client
 from lib.utils.media import download_and_cache_video
-from src.config import CREDENTIAL_PATH, BUCKET_NAME
+from src.config import BUCKET_NAME
 from src.pipelines.qualityAnalysis.schema import QualityAssessmentResult, BrandSafetyScores
 
 
@@ -14,7 +13,7 @@ class QualityAssessmentPipeline:
         self.video_blob_path = cloud_storage_video_path
         self.media_name = os.path.basename(cloud_storage_video_path)
         self.media_base_name = os.path.splitext(self.media_name)[0]
-        self.gcs_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
+        self.gcs_client = get_storage_client()
         self.llm = GeminiGenaiManager(model="gemini-2.5-flash")
         self.ground_truth = ground_truth_text
         self.user_prompt = user_prompt

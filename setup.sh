@@ -35,9 +35,13 @@ pip install --upgrade pip
 echo "[INFO] Installing dependencies..."
 pip install -r requirements.txt
 
-# Setup ViNet for dynamic cropping
-echo "[INFO] Setting up ViNet..."
-python -m lib.utils.vinet_setup
+# Install optional dependencies for enhanced functionality
+echo "[INFO] Installing optional dependencies (scenedetect, psutil)..."
+pip install "scenedetect[opencv]" psutil
+
+# Setup ViNet for dynamic cropping (always fresh to ensure consistent state)
+echo "[INFO] Setting up ViNet (fresh install)..."
+python -m lib.utils.vinet_setup --force
 
 # Create local data directories
 echo "[INFO] Creating local data directories..."

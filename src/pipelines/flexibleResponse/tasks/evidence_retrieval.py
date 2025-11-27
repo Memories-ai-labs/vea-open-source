@@ -1,15 +1,16 @@
 import asyncio
 import json
 from src.pipelines.flexibleResponse.schema import EvidenceClips
-from typing import List
+from src.pipelines.common.schema import convert_timestamp_to_string
+
 
 class EvidenceRetrieval:
     def __init__(self, llm):
         self.llm = llm
 
     async def __call__(
-        self, 
-        initial_response: str, 
+        self,
+        initial_response: str,
         indexing_data: list,  # This is now the list of media_files dicts
         file_descriptions: dict  # manifest
     ):
@@ -24,8 +25,7 @@ class EvidenceRetrieval:
             f"- {fname}: {desc}" for fname, desc in file_descriptions.items()
         )
 
-        # Dump all  content for context
-
+        # Dump all content for context
         content_dump = json.dumps(indexing_data, ensure_ascii=False, indent=4)
 
         prompt = (
@@ -39,8 +39,12 @@ class EvidenceRetrieval:
             "Your task is to select relevant scenes that could serve as **visual evidence** for points made in the response. you may choose up to 5 clips as evidence, so choose the most important ones. \n"
             "For each evidence clip you select, always include:\n"
             "- `file_name`: the name of the source video file for this clip (e.g., mymovie.mp4, travel1.mov, etc)\n"
-            "- `start`: timestamp (HH:MM:SS)\n"
-            "- `end`: timestamp (HH:MM:SS)\n"
+            "- `start`, `end`: timestamps as objects with separate numeric fields:\n"
+            "  {\"hours\": <0-23>, \"minutes\": <0-59>, \"seconds\": <0-59>, \"milliseconds\": <0-999>}\n"
+            "  Examples:\n"
+            "  - 2 minutes 5 seconds = {\"hours\": 0, \"minutes\": 2, \"seconds\": 5, \"milliseconds\": 0}\n"
+            "  - 1 hour 15 minutes = {\"hours\": 1, \"minutes\": 15, \"seconds\": 0, \"milliseconds\": 0}\n"
+            "  - 45 seconds = {\"hours\": 0, \"minutes\": 0, \"seconds\": 45, \"milliseconds\": 0}\n"
             "- `description`: a short description of the visual content\n"
             "- `reason`: an explanation of why this scene supports the assistant's response\n\n"
             "Do not include any extra text or explanation. Only output a valid JSON list."
@@ -56,8 +60,14 @@ class EvidenceRetrieval:
             "evidence_retrieval"  # context
         )
 
-        # Post-process: Attach cloud_storage_path to each evidence clip
+        # Post-process: Convert timestamps and attach cloud_storage_path
         for clip in clips:
+            # Convert structured timestamps to strings
+            if "start" in clip:
+                clip["start"] = convert_timestamp_to_string(clip["start"])
+            if "end" in clip:
+                clip["end"] = convert_timestamp_to_string(clip["end"])
+            # Attach cloud storage path
             fname = clip.get("file_name")
             clip["cloud_storage_path"] = file_name_to_gcs.get(fname)
 

@@ -1,7 +1,8 @@
 from src.pipelines.flexibleResponse.schema import ChosenClips
+from src.pipelines.common.schema import convert_timestamp_to_string
 import asyncio
 import json
-from typing import List
+
 
 class GenerateVideoClipPlan:
     def __init__(self, llm):
@@ -13,6 +14,15 @@ class GenerateVideoClipPlan:
             for entry in indexing_data
             if "name" in entry and "cloud_storage_path" in entry
         }
+
+    def _convert_clips_timestamps(self, clips):
+        """Convert structured timestamps in clips to string format."""
+        for clip in clips:
+            if "start" in clip:
+                clip["start"] = convert_timestamp_to_string(clip["start"])
+            if "end" in clip:
+                clip["end"] = convert_timestamp_to_string(clip["end"])
+        return clips
 
     def deduplicate_clips(self, clips):
         seen = set()
@@ -58,7 +68,12 @@ class GenerateVideoClipPlan:
                 "For each output clip, include these fields:\n"
                 "- `id`: unique integer\n"
                 "- `file_name`: video file name\n"
-                "- `start`, `end`: timestamps\n"
+                "- `start`, `end`: timestamps as objects with separate numeric fields:\n"
+                "  {\"hours\": <0-23>, \"minutes\": <0-59>, \"seconds\": <0-59>, \"milliseconds\": <0-999>}\n"
+                "  Examples:\n"
+                "  - 2 minutes 5 seconds = {\"hours\": 0, \"minutes\": 2, \"seconds\": 5, \"milliseconds\": 0}\n"
+                "  - 1 hour 15 minutes = {\"hours\": 1, \"minutes\": 15, \"seconds\": 0, \"milliseconds\": 0}\n"
+                "  - 45 seconds = {\"hours\": 0, \"minutes\": 0, \"seconds\": 45, \"milliseconds\": 0}\n"
                 "- `narration`: the narration line for the clip\n"
                 "- `priority`: one of `narration`, `clip_audio`, or `clip_video`\n"
                 "IMPORTANT: Do not include timestamps in the narration sentence, as this ruins the text to speech narration.\n"
@@ -124,7 +139,12 @@ class GenerateVideoClipPlan:
                 "For each selected clip, include the following fields:\n"
                 "- `id`: unique integer\n"
                 "- `file_name`: video file name\n"
-                "- `start`, `end`: timestamps\n"
+                "- `start`, `end`: timestamps as objects with separate numeric fields:\n"
+                "  {\"hours\": <0-23>, \"minutes\": <0-59>, \"seconds\": <0-59>, \"milliseconds\": <0-999>}\n"
+                "  Examples:\n"
+                "  - 2 minutes 5 seconds = {\"hours\": 0, \"minutes\": 2, \"seconds\": 5, \"milliseconds\": 0}\n"
+                "  - 1 hour 15 minutes = {\"hours\": 1, \"minutes\": 15, \"seconds\": 0, \"milliseconds\": 0}\n"
+                "  - 45 seconds = {\"hours\": 0, \"minutes\": 0, \"seconds\": 45, \"milliseconds\": 0}\n"
                 "- `narration`: since narration is not in use, leave a very brief description of the scene, and a very short reason for why it is chosen\n"
                 "- `priority`: choose `clip_audio` if the original clip audio is important, or `clip_video` if the entire video segment should be used without audio editing. Avoid `narration`.\n"
                 f"User prompt:\n---\n{user_prompt.strip()}\n---\n\n"
@@ -144,6 +164,9 @@ class GenerateVideoClipPlan:
                 "generate_clip_plan_no_narration"  # context
             )
             final_clips = clips  # no cleanup needed
+
+        # Convert structured timestamps to string format
+        final_clips = self._convert_clips_timestamps(final_clips)
 
         # Add cloud storage path to clips
         file_to_cloud_path = self._build_file_to_cloud_path(indexing_data)
