@@ -360,18 +360,29 @@ def export_fcpxml(
                 shot_center = shot.get("center_norm", {"x": 0.5, "y": 0.5})
                 center_x = float(shot_center.get("x", 0.5))
                 center_y = float(shot_center.get("y", 0.5))
-                source_size = crop_meta.get("source_size") or [width, height]
-                src_w = float(source_size[0]) if source_size else float(width)
-                src_h = float(source_size[1]) if source_size else float(height)
-                scale_value = max(width / src_w, height / src_h) if src_w > 0 and src_h > 0 else 1.0
-                scaled_w = src_w * scale_value
-                scaled_h = src_h * scale_value
+                # Use content_bounds if available (for letterbox/pillarbox removal)
+                content_bounds = crop_meta.get("content_bounds")
+                if content_bounds:
+                    src_w = float(content_bounds["x2"] - content_bounds["x1"])
+                    src_h = float(content_bounds["y2"] - content_bounds["y1"])
+                else:
+                    source_size = crop_meta.get("source_size") or [width, height]
+                    src_w = float(source_size[0]) if source_size else float(width)
+                    src_h = float(source_size[1]) if source_size else float(height)
+                # FCPXML scale: timeline auto-fits width first, then scale is applied
+                # Formula: (output_h × src_w) / (src_h × output_w)
+                scale_value = (height * src_w) / (src_h * width) if src_w > 0 and src_h > 0 and width > 0 else 1.0
+                # Calculate final dimensions after auto-fit + scale
+                # Step 1: Auto-fit to timeline width, Step 2: Apply scale
+                scaled_w = width * scale_value
+                scaled_h = (src_h * width / src_w) * scale_value if src_w > 0 else height
                 max_pan_x = max(0.0, (scaled_w - width) / 2.0)
                 max_pan_y = max(0.0, (scaled_h - height) / 2.0)
                 position_x_pixels = (0.5 - center_x) * scaled_w
                 position_y_pixels = (center_y - 0.5) * scaled_h
                 clamped_x = max(-max_pan_x, min(max_pan_x, position_x_pixels))
                 clamped_y = max(-max_pan_y, min(max_pan_y, position_y_pixels))
+                # Normalize position (hardcoded divisor calibrated for FCPXML coordinate system)
                 normalization_divisor = 19.2
                 final_pos_x = clamped_x / normalization_divisor
                 final_pos_y = clamped_y / normalization_divisor
@@ -426,18 +437,29 @@ def export_fcpxml(
                     center = {"x": 0.5, "y": 0.5}
                 center_x = float(center.get("x", 0.5))
                 center_y = float(center.get("y", 0.5))
-                source_size = crop_meta.get("source_size") or [width, height]
-                src_w = float(source_size[0]) if source_size else float(width)
-                src_h = float(source_size[1]) if source_size else float(height)
-                scale_value = max(width / src_w, height / src_h) if src_w > 0 and src_h > 0 else 1.0
-                scaled_w = src_w * scale_value
-                scaled_h = src_h * scale_value
+                # Use content_bounds if available (for letterbox/pillarbox removal)
+                content_bounds = crop_meta.get("content_bounds")
+                if content_bounds:
+                    src_w = float(content_bounds["x2"] - content_bounds["x1"])
+                    src_h = float(content_bounds["y2"] - content_bounds["y1"])
+                else:
+                    source_size = crop_meta.get("source_size") or [width, height]
+                    src_w = float(source_size[0]) if source_size else float(width)
+                    src_h = float(source_size[1]) if source_size else float(height)
+                # FCPXML scale: timeline auto-fits width first, then scale is applied
+                # Formula: (output_h × src_w) / (src_h × output_w)
+                scale_value = (height * src_w) / (src_h * width) if src_w > 0 and src_h > 0 and width > 0 else 1.0
+                # Calculate final dimensions after auto-fit + scale
+                # Step 1: Auto-fit to timeline width, Step 2: Apply scale
+                scaled_w = width * scale_value
+                scaled_h = (src_h * width / src_w) * scale_value if src_w > 0 else height
                 max_pan_x = max(0.0, (scaled_w - width) / 2.0)
                 max_pan_y = max(0.0, (scaled_h - height) / 2.0)
                 position_x_pixels = (0.5 - center_x) * scaled_w
                 position_y_pixels = (center_y - 0.5) * scaled_h
                 clamped_x = max(-max_pan_x, min(max_pan_x, position_x_pixels))
                 clamped_y = max(-max_pan_y, min(max_pan_y, position_y_pixels))
+                # Normalize position (hardcoded divisor calibrated for FCPXML coordinate system)
                 normalization_divisor = 19.2
                 final_pos_x = clamped_x / normalization_divisor
                 final_pos_y = clamped_y / normalization_divisor
