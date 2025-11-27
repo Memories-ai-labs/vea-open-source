@@ -26,7 +26,7 @@ from src.pipelines.common import metadata_helpers
 from src.pipelines.common import audio_processing
 
 class TimelineConstructor:
-    ALLOWED_FRAME_RATES = (24, 30, 60, 120)
+    ALLOWED_FRAME_RATES = (24, 25, 30, 50, 60, 120)
 
     def __init__(
         self, 
