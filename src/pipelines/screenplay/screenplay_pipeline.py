@@ -4,21 +4,17 @@ import asyncio
 import tempfile
 import time
 import shutil
-import subprocess
-from typing import List
 
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
-from lib.oss.gcp_oss import GoogleCloudStorage
-from lib.oss.auth import credentials_from_file
+from lib.oss.storage_factory import get_storage_client
 from lib.utils.media import (
     download_and_cache_video,
     parse_time_to_seconds,
-    seconds_to_hhmmss,
     extract_video_segment
 )
-from src.config import CREDENTIAL_PATH, BUCKET_NAME
+from src.config import BUCKET_NAME, INDEXING_DIR
 from src.pipelines.common.generate_subtitles import GenerateSubtitles
-from src.pipelines.screenplay.schema import SegmentTimestamp, SegmentTimestamps, SectionScreenplay, FinalScreenplay
+from src.pipelines.screenplay.schema import SegmentTimestamp, SegmentTimestamps, SectionScreenplay
 
 
 class ScreenplayPipeline:
@@ -29,9 +25,9 @@ class ScreenplayPipeline:
         self.cloud_storage_media_path = cloud_storage_media_path
         self.media_name = os.path.basename(cloud_storage_media_path)
         self.media_base_name = os.path.splitext(self.media_name)[0]
-        self.cloud_storage_indexing_dir = f"indexing/{self.media_base_name}/"
+        self.cloud_storage_indexing_dir = f"{INDEXING_DIR}/{self.media_base_name}/"
         self.llm = GeminiGenaiManager(model="gemini-2.5-pro")
-        self.cloud_storage_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
+        self.cloud_storage_client = get_storage_client()
         self.workdir = tempfile.mkdtemp()
         self.subtitle_generator = GenerateSubtitles(output_dir=os.path.join(self.workdir, "subs"))
 
@@ -63,8 +59,13 @@ class ScreenplayPipeline:
         plot_summary = "\n".join([f"(Segment {s['segment_num']}): {s['sentence_text']}" for s in story_sentences])
         prompt = (
             "Split this movie into logical segments at natural plot breaks. "
-            "Each segment must be 10 minutes or less. Use this format:\n\n"
-            "[\n  {\"start\": \"HH:MM:SS\", \"end\": \"HH:MM:SS\"}, ...\n]\n\n"
+            "Each segment must be 10 minutes or less.\n\n"
+            "For each segment, provide start and end as timestamp objects with separate numeric fields:\n"
+            "{\"hours\": <0-23>, \"minutes\": <0-59>, \"seconds\": <0-59>, \"milliseconds\": <0-999>}\n"
+            "Examples:\n"
+            "- 2 minutes 5 seconds = {\"hours\": 0, \"minutes\": 2, \"seconds\": 5, \"milliseconds\": 0}\n"
+            "- 1 hour 15 minutes = {\"hours\": 1, \"minutes\": 15, \"seconds\": 0, \"milliseconds\": 0}\n"
+            "- 45 seconds = {\"hours\": 0, \"minutes\": 0, \"seconds\": 45, \"milliseconds\": 0}\n\n"
             f"Plot:\n{plot_text}\n\n"
             f"Detailed Plot Breakdown:\n{plot_summary}\n\n"
             f"Scene List:\n{json.dumps(scenes, indent=2, ensure_ascii=False)}"
@@ -73,9 +74,15 @@ class ScreenplayPipeline:
         return [self._dict_to_segment(d) for d in segment_dicts]
 
     async def _generate_screenplay_for_segment(self, segment, movie_path: str):
+        # Convert Timestamp objects to strings for downstream functions
+        start_str = segment.start.to_string()
+        end_str = segment.end.to_string()
+        start_seconds = segment.start.to_seconds()
+        end_seconds = segment.end.to_seconds()
+
         segment_video_path = extract_video_segment(
-            movie_path, self.workdir, segment.start, segment.end,
-            output_name=f"segment_{segment.start.replace(':','')}.mp4"
+            movie_path, self.workdir, start_str, end_str,
+            output_name=f"segment_{start_str.replace(':','').replace(',','')}.mp4"
         )
 
         transcription = None
@@ -84,7 +91,7 @@ class ScreenplayPipeline:
                 transcription = await asyncio.to_thread(
                     self.subtitle_generator,
                     audio_path=segment_video_path,
-                    global_start_time=parse_time_to_seconds(segment.start)
+                    global_start_time=start_seconds
                 )
                 break
             except Exception as e:
@@ -97,7 +104,7 @@ class ScreenplayPipeline:
 
         scenes = [
             s for s in self.indexing.get("scenes.json", [])
-            if parse_time_to_seconds(segment.start) <= parse_time_to_seconds(s["start_timestamp"]) <= parse_time_to_seconds(segment.end)
+            if start_seconds <= parse_time_to_seconds(s["start_timestamp"]) <= end_seconds
         ]
         scene_descriptions = "\n".join([f"{s['start_timestamp']} - {s['end_timestamp']}: {s['scene_description']}" for s in scenes])
         plot = self.indexing.get("story.txt", "")
@@ -158,7 +165,7 @@ class ScreenplayPipeline:
 
         async def process_segment_with_limit(seg):
             async with semaphore:
-                print(f"[INFO] Generating screenplay for {seg.start} - {seg.end}")
+                print(f"[INFO] Generating screenplay for {seg.start.to_string()} - {seg.end.to_string()}")
                 return await self._generate_screenplay_for_segment(seg, movie_path)
 
         screenplays = await asyncio.gather(

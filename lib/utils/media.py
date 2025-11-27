@@ -208,6 +208,14 @@ def seconds_to_hhmmss(seconds) -> str:
     millis = int(round((seconds - int(seconds)) * 1000))
     return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
+
+def seconds_to_mmss(seconds) -> str:
+    """Convert seconds to MM:SS format (for durations < 1 hour)."""
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{minutes:02}:{secs:02}"
+
+
 def clean_stale_tempdirs():
         print("Cleaning stale temp directories...")
         tmp_root = tempfile.gettempdir()  # Usually /tmp

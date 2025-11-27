@@ -5,9 +5,8 @@ from collections import defaultdict
 import itertools
 from tqdm import tqdm
 
-from lib.oss.gcp_oss import GoogleCloudStorage
-from lib.oss.auth import credentials_from_file
-from src.config import CREDENTIAL_PATH, BUCKET_NAME
+from lib.oss.storage_factory import get_storage_client
+from src.config import BUCKET_NAME, INDEXING_DIR, OUTPUTS_DIR
 from src.pipelines.flexibleResponse.flexibleResponsePipeline import FlexibleResponsePipeline
 from src.pipelines.videoComprehension.comprehensionPipeline import ComprehensionPipeline
 
@@ -16,7 +15,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Initialize GCP OSS client ---
-gcp_oss = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
+gcp_oss = get_storage_client()
 
 FAILED_LOG_PATH = "failed_recaps.txt"
 
@@ -78,14 +77,14 @@ async def index_and_recap_all():
                 pbar.update(1)
                 continue
 
-            recap_gcs_path = f"outputs/{file_no_ext}/recap.mp4"
+            recap_gcs_path = f"{OUTPUTS_DIR}/{file_no_ext}/recap.mp4"
             try:
                 if await file_exists(recap_gcs_path):
                     pbar.set_postfix({"episode": filename, "status": "recap exists"})
                     pbar.update(1)
                     continue
 
-                index_gcs_path = f"indexing/{file_no_ext}/media_indexing.json"
+                index_gcs_path = f"{INDEXING_DIR}/{file_no_ext}/media_indexing.json"
                 if not await file_exists(index_gcs_path):
                     pbar.set_postfix({"episode": filename, "status": "indexing..."})
                     print(f"\n[INFO] Indexing {filename}...")
@@ -104,7 +103,7 @@ async def index_and_recap_all():
                     aspect_ratio=0,
                     subtitles=True,
                     snap_to_beat=False,
-                    output_path=f"outputs/{file_no_ext}/recap.mp4"
+                    output_path=f"{OUTPUTS_DIR}/{file_no_ext}/recap.mp4"
                 )
                 pbar.set_postfix({"episode": filename, "status": "done"})
             except Exception as e:

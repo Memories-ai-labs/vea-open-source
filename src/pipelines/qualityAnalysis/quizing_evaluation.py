@@ -4,9 +4,8 @@ import pandas as pd
 from pathlib import Path
 from typing import List
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
-from lib.oss.auth import credentials_from_file
-from lib.oss.gcp_oss import GoogleCloudStorage
-from src.config import CREDENTIAL_PATH, BUCKET_NAME
+from lib.oss.storage_factory import get_storage_client
+from src.config import BUCKET_NAME
 
 
 FULL_QUIZ_QUESTIONS = [
@@ -71,7 +70,7 @@ class QuizingEvaluation:
     def __init__(self, benchmark_root: str = "benchmark_outputs", output_file: str = "quiz_predictions.txt"):
         self.benchmark_root = Path(benchmark_root)
         self.output_file = Path(output_file)
-        self.gcs = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
+        self.gcs = get_storage_client()
         self.llm = GeminiGenaiManager(model="gemini-2.5-flash")
         self.questions = FULL_QUIZ_QUESTIONS
         print(f"[INIT] Loaded {len(self.questions)} hardcoded questions")

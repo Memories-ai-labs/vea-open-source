@@ -5,10 +5,11 @@ import cv2
 import json
 
 from concurrent.futures import ThreadPoolExecutor
-from src.pipelines.common.schema import RefinedClipTimestamps
+from src.pipelines.common.schema import RefinedClipTimestamps, convert_timestamp_to_string
 from lib.utils.media import parse_time_to_seconds, seconds_to_hhmmss, download_and_cache_video
 from lib.utils.metrics_collector import metrics_collector
 from src.pipelines.common.generate_subtitles import GenerateSubtitles
+
 
 def overlay_debug_info(
     video_path,
@@ -199,7 +200,7 @@ class RefineClipTimestamps:
                 f"Scene description: {clip.get('scene_description', 'N/A')}\n\n"
                 "Transcript word timings:\n"
                 f"{pretty_transcript}\n\n"
-                "Please describe in text how you would determine the ideal boundaries. and clearly state the new start and end times in HH:MM:SS,mmm format.\n"
+                "Please describe in text how you would determine the ideal boundaries, and state the new start and end times.\n"
             )
 
             # Run Gemini reasoning prompt (text-only response)
@@ -220,9 +221,13 @@ class RefineClipTimestamps:
                 "Now, please convert your reasoning into a structured JSON output using the following format:\n"
                 "{\n"
                 "  \"id\": integer,\n"
-                "  \"refined_start\": \"HH:MM:SS,mmm\",\n"
-                "  \"refined_end\": \"HH:MM:SS,mmm\"\n"
+                "  \"refined_start\": {\"hours\": <0-23>, \"minutes\": <0-59>, \"seconds\": <0-59>, \"milliseconds\": <0-999>},\n"
+                "  \"refined_end\": {\"hours\": <0-23>, \"minutes\": <0-59>, \"seconds\": <0-59>, \"milliseconds\": <0-999>}\n"
                 "}\n\n"
+                "Examples of timestamp objects:\n"
+                "- 2 minutes 5 seconds = {\"hours\": 0, \"minutes\": 2, \"seconds\": 5, \"milliseconds\": 0}\n"
+                "- 1 hour 15 minutes = {\"hours\": 1, \"minutes\": 15, \"seconds\": 0, \"milliseconds\": 0}\n"
+                "- 45.5 seconds = {\"hours\": 0, \"minutes\": 0, \"seconds\": 45, \"milliseconds\": 500}\n"
                 "Only output the JSON object, and ensure the timestamps reflect your reasoning above."
             )
 
@@ -236,11 +241,15 @@ class RefineClipTimestamps:
                 "refine_timestamps_validate"  # context
             )
 
-            print(f"[UPDATE] Clip {clip['id']}: {clip['start']}–{clip['end']} → {refined['refined_start']}–{refined['refined_end']}")
+            # Convert structured timestamps to strings
+            refined_start_str = convert_timestamp_to_string(refined["refined_start"])
+            refined_end_str = convert_timestamp_to_string(refined["refined_end"])
+
+            print(f"[UPDATE] Clip {clip['id']}: {clip['start']}–{clip['end']} → {refined_start_str}–{refined_end_str}")
             original_start_sec = parse_time_to_seconds(clip["start"])
             original_end_sec = parse_time_to_seconds(clip["end"])
-            clip["start"] = refined["refined_start"]
-            clip["end"] = refined["refined_end"]
+            clip["start"] = refined_start_str
+            clip["end"] = refined_end_str
 
             if self.debug:
                 debug_file_path = os.path.join(self.workdir, f"debug_clip_{clip['id']}.txt")
@@ -260,8 +269,8 @@ class RefineClipTimestamps:
                     words=unoffset_words,
                     original_start=original_start_sec - expanded_start_sec,
                     original_end=original_end_sec - expanded_start_sec,
-                    refined_start=parse_time_to_seconds(refined["refined_start"]) - expanded_start_sec,
-                    refined_end=parse_time_to_seconds(refined["refined_end"]) - expanded_start_sec,
+                    refined_start=parse_time_to_seconds(refined_start_str) - expanded_start_sec,
+                    refined_end=parse_time_to_seconds(refined_end_str) - expanded_start_sec,
                     output_path=debug_output
                 )
 

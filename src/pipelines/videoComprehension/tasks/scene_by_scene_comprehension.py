@@ -1,13 +1,22 @@
-import os
-import json
 import time
 import asyncio
-from datetime import timedelta
 from pathlib import Path
-from typing import List
 
-from lib.utils.media import seconds_to_hhmmss, parse_time_to_seconds
+from lib.utils.media import seconds_to_hhmmss, seconds_to_mmss, parse_time_to_seconds
 from src.pipelines.videoComprehension.schema import Scenes
+
+
+def _scene_timestamp_to_seconds(ts) -> float:
+    """Convert structured SceneTimestamp (dict or object) to seconds."""
+    if isinstance(ts, str):
+        return parse_time_to_seconds(ts)
+    if isinstance(ts, dict):
+        minutes = ts.get("minutes", 0)
+        seconds = ts.get("seconds", 0)
+        return minutes * 60 + seconds
+    if hasattr(ts, "minutes") and hasattr(ts, "seconds"):
+        return ts.minutes * 60 + ts.seconds
+    return parse_time_to_seconds(str(ts))
 
 class SceneBySceneComprehension:
     def __init__(self, llm):
@@ -23,6 +32,9 @@ class SceneBySceneComprehension:
             segment_number = seg["segment_number"]
 
             print(f"[INFO] Transcribing scene-by-scene for segment: {file_path.name}")
+
+            segment_duration = seg["end"] - seg["start"]
+            max_ts = seconds_to_mmss(segment_duration)
 
             prompt = (
                 f"{summary_draft}\n\n"
@@ -40,11 +52,18 @@ class SceneBySceneComprehension:
                 "Every 20 seconds, describe the scene in detail, such as the individuals involved and their actions. "
                 "Use the story and people/characters to help deduce who is in each scene and what is happening. "
                 "Ignore scenes that are just logo animation, credits, or unrelated filler. "
-                "Be sure to use the whole segment. Format each scene as JSON with: "
-                "- start_timestamp (HH:MM:SS)\n"
-                "- end_timestamp (HH:MM:SS)\n"
-                "- description\n"
-                "IMPORTANT: you must use the HH:MM:SS format for timestamps."
+                "Be sure to use the whole segment. Format each scene as JSON with:\n"
+                "- start_timestamp: object with {\"minutes\": <0-59>, \"seconds\": <0-59>}\n"
+                "- end_timestamp: object with {\"minutes\": <0-59>, \"seconds\": <0-59>}\n"
+                "- scene_description: text description of the scene\n\n"
+                "Examples of timestamp objects:\n"
+                "- 0 seconds = {\"minutes\": 0, \"seconds\": 0}\n"
+                "- 20 seconds = {\"minutes\": 0, \"seconds\": 20}\n"
+                "- 1 minute 30 seconds = {\"minutes\": 1, \"seconds\": 30}\n"
+                "- 2 minutes 45 seconds = {\"minutes\": 2, \"seconds\": 45}\n\n"
+                f"This video segment is approximately {int(segment_duration)} seconds long ({int(segment_duration//60)} minutes {int(segment_duration%60)} seconds). "
+                f"Valid timestamps range from 0:00 to approximately {max_ts}. "
+                "Timestamps are relative to the START of this segment, NOT absolute timestamps in the full movie. "
                 "You should output in English except for character names, which should be in the original language."
             )
 
@@ -57,8 +76,8 @@ class SceneBySceneComprehension:
 
             for scene in scene_data:
                 try:
-                    raw_start = parse_time_to_seconds(scene["start_timestamp"])
-                    raw_end = parse_time_to_seconds(scene["end_timestamp"])
+                    raw_start = _scene_timestamp_to_seconds(scene["start_timestamp"])
+                    raw_end = _scene_timestamp_to_seconds(scene["end_timestamp"])
                     scene["start_timestamp"] = seconds_to_hhmmss(start_seconds + raw_start)
                     scene["end_timestamp"] = seconds_to_hhmmss(start_seconds + raw_end)
                     scene["id"] = scene_id

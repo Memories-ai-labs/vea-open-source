@@ -1,15 +1,13 @@
-import math
 import os
 import json
 import asyncio
-from lib.oss.gcp_oss import GoogleCloudStorage
-from lib.oss.auth import credentials_from_file
-from src.config import CREDENTIAL_PATH, BUCKET_NAME
+from lib.oss.storage_factory import get_storage_client
+from src.config import BUCKET_NAME
 from src.pipelines.flexibleResponse.flexibleResponsePipeline import FlexibleResponsePipeline
-from lib.utils.media import seconds_to_hhmmss, get_video_duration, download_and_cache_video
+from lib.utils.media import get_video_duration, download_and_cache_video
 from lib.utils.metrics_collector import metrics_collector
 from src.pipelines.movieToShort.schema import ShortsPlans
-from typing import List
+from src.pipelines.common.schema import convert_timestamp_to_string
 
 class MovieToShortsPipeline:
     """
@@ -20,7 +18,7 @@ class MovieToShortsPipeline:
         self.short_duration = short_duration  # Output short length in seconds
         self.aspect_ratio = aspect_ratio
         self.flexible_pipeline = FlexibleResponsePipeline(blob_path)
-        self.gcs_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
+        self.gcs_client = get_storage_client()
 
     async def run(self):
         print("[SHORTS] Getting movie duration...")
@@ -37,17 +35,22 @@ class MovieToShortsPipeline:
             "\n"
             "The shorts should:\n"
             "- Be arranged chronologically according to the movie's timeline.\n"
-            "- Skip filler scenes or sections that don’t add much to the story.\n"
+            "- Skip filler scenes or sections that don't add much to the story.\n"
             "- Highlight turning points, major conflicts, character growth, climactic moments, and payoffs.\n"
             "\n"
             "For each short, provide:\n"
             "- short_index: number\n"
             "- description: what the short is about and why it is an important part of the story\n"
-            "- start: approximate HH:MM:SS timestamp for the main segment of this short (i.e., where this story beat begins)\n"
-            "- end: approximate HH:MM:SS timestamp for the main segment’s end\n"
-            "- supporting_clips: optional list of HH:MM:SS start/end pairs for any other key moments that should be included to strengthen the short (e.g., payoffs, reactions, flashbacks)\n"
+            "- start: timestamp for the main segment's beginning as an object with separate numeric fields:\n"
+            "  {\"hours\": <0-23>, \"minutes\": <0-59>, \"seconds\": <0-59>, \"milliseconds\": <0-999>}\n"
+            "  Examples:\n"
+            "  - 2 minutes 5 seconds = {\"hours\": 0, \"minutes\": 2, \"seconds\": 5, \"milliseconds\": 0}\n"
+            "  - 1 hour 15 minutes = {\"hours\": 1, \"minutes\": 15, \"seconds\": 0, \"milliseconds\": 0}\n"
+            "  - 45 seconds = {\"hours\": 0, \"minutes\": 0, \"seconds\": 45, \"milliseconds\": 0}\n"
+            "- end: timestamp for the main segment's end (same format as start)\n"
+            "- supporting_clips: optional list of additional segments, each with start and end in the same format\n"
             "\n"
-            "You are not required to use the entire movie. It’s okay to skip unimportant or dull scenes.\n"
+            "You are not required to use the entire movie. It's okay to skip unimportant or dull scenes.\n"
             "Make sure the total number of shorts allows the whole story to be followed in ~20 parts for a full movie, or ~8 for an TV episode.\n"
             f"The movie duration is approximately {int(total_duration//60)} minutes {int(total_duration%60)} seconds.\n"
         )
@@ -76,9 +79,14 @@ class MovieToShortsPipeline:
             "Format the following chronological shorts plan into a JSON list. Each short should include:\n"
             "- short_index: integer (starts from 0)\n"
             "- description: what this short contains and why it is important to the story, in detail\n"
-            "- start: HH:MM:SS timestamp for the main segment’s beginning\n"
-            "- end: HH:MM:SS timestamp for the main segment’s end\n"
-            "- supporting_clips: optional list of additional segments to include, each with a start and end in HH:MM:SS format\n"
+            "- start: timestamp as an object with separate numeric fields:\n"
+            "  {\"hours\": <0-23>, \"minutes\": <0-59>, \"seconds\": <0-59>, \"milliseconds\": <0-999>}\n"
+            "  Examples:\n"
+            "  - 2 minutes 5 seconds = {\"hours\": 0, \"minutes\": 2, \"seconds\": 5, \"milliseconds\": 0}\n"
+            "  - 1 hour 15 minutes = {\"hours\": 1, \"minutes\": 15, \"seconds\": 0, \"milliseconds\": 0}\n"
+            "  - 45 seconds = {\"hours\": 0, \"minutes\": 0, \"seconds\": 45, \"milliseconds\": 0}\n"
+            "- end: timestamp for the segment's end (same format as start)\n"
+            "- supporting_clips: optional list of additional segments, each with start and end in the same format\n"
             "\n"
             "Return only a JSON list of objects. Do not include any explanation.\n"
             "Shorts plan:\n"
@@ -95,6 +103,19 @@ class MovieToShortsPipeline:
                 ShortsPlans,
                 context="format_plan"
             )
+
+        # Convert structured timestamps to strings for downstream processing
+        for entry in shorts_plan_json:
+            if "start" in entry:
+                entry["start"] = convert_timestamp_to_string(entry["start"])
+            if "end" in entry:
+                entry["end"] = convert_timestamp_to_string(entry["end"])
+            if "supporting_clips" in entry and entry["supporting_clips"]:
+                for clip in entry["supporting_clips"]:
+                    if "start" in clip:
+                        clip["start"] = convert_timestamp_to_string(clip["start"])
+                    if "end" in clip:
+                        clip["end"] = convert_timestamp_to_string(clip["end"])
 
         # Save planning metrics before resetting for individual shorts
         os.makedirs(".cache/metrics", exist_ok=True)

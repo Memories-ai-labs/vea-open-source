@@ -3,11 +3,9 @@ import json
 import asyncio
 import os
 
-from lib.oss.gcp_oss import GoogleCloudStorage
-from lib.oss.auth import credentials_from_file
+from lib.oss.storage_factory import get_storage_client
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.utils.metrics_collector import metrics_collector
-from src.config import CREDENTIAL_PATH
 from src.pipelines.common.timeline_constructor import TimelineConstructor
 
 if __name__ == "__main__":
@@ -21,7 +19,7 @@ if __name__ == "__main__":
     with open(input_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    gcs_client = GoogleCloudStorage(credentials=credentials_from_file(CREDENTIAL_PATH))
+    gcs_client = get_storage_client()
     llm = GeminiGenaiManager(model="gemini-1.5-flash")
 
     constructor = TimelineConstructor(

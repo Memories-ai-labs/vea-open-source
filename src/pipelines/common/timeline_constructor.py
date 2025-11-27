@@ -21,6 +21,7 @@ from lib.utils.media import parse_time_to_seconds, download_and_cache_video
 from lib.utils.metrics_collector import metrics_collector
 from src.pipelines.common.dynamic_cropping import DynamicCropping
 from src.pipelines.common.fcpxml_exporter import export_fcpxml
+from src.pipelines.common.generate_subtitles import GenerateSubtitles
 from src.pipelines.common import metadata_helpers
 from src.pipelines.common import audio_processing
 
@@ -437,6 +438,82 @@ class TimelineConstructor:
                 except Exception:
                     pass
 
+    async def _generate_and_burn_subtitles(self, aspect_ratio):
+        """Generate subtitles from video audio and burn them into the video."""
+        print("[INFO] Generating subtitles...")
+
+        try:
+            # Create subtitle output directory
+            subs_dir = os.path.join(self.workdir, "subs")
+            os.makedirs(subs_dir, exist_ok=True)
+
+            # Initialize subtitle generator
+            subtitle_generator = GenerateSubtitles(output_dir=subs_dir)
+
+            # Transcribe the video's audio
+            transcription = await asyncio.to_thread(
+                subtitle_generator,
+                audio_path=self.output_path,
+                global_start_time=0.0
+            )
+
+            words = transcription.get("words", [])
+            if not words:
+                print("[WARN] No words detected in audio, skipping subtitles.")
+                return
+
+            # Convert words to SRT entries
+            srt_entries = GenerateSubtitles.words_to_srt_entries(words, max_words=8)
+
+            # Write SRT file
+            srt_path = os.path.join(subs_dir, "subtitles.srt")
+            GenerateSubtitles.write_srt(srt_entries, srt_path)
+
+            # Burn subtitles into video using ffmpeg
+            temp_output = self.output_path.replace(".mp4", "_with_subs.mp4")
+
+            # Calculate font size based on aspect ratio (larger for vertical videos)
+            if aspect_ratio < 1.0:
+                # Vertical video (9:16) - larger font
+                font_size = 24
+                margin_v = 60
+            else:
+                # Horizontal video (16:9) - standard font
+                font_size = 18
+                margin_v = 40
+
+            # Build subtitle filter with styling
+            subtitle_filter = (
+                f"subtitles={srt_path}:force_style='"
+                f"FontSize={font_size},"
+                f"FontName=Arial,"
+                f"PrimaryColour=&HFFFFFF,"
+                f"OutlineColour=&H000000,"
+                f"Outline=2,"
+                f"Shadow=1,"
+                f"MarginV={margin_v}'"
+            )
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", self.output_path,
+                "-vf", subtitle_filter,
+                "-c:a", "copy",
+                temp_output
+            ]
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"[WARN] Failed to burn subtitles: {result.stderr[:500]}")
+                return
+
+            # Replace original with subtitled version
+            shutil.move(temp_output, self.output_path)
+            print(f"[INFO] Subtitles burned into video: {self.output_path}")
+
+        except Exception as e:
+            print(f"[WARN] Subtitle generation failed: {e}")
+
     async def run(
         self,
         clips,
@@ -526,6 +603,7 @@ class TimelineConstructor:
                     self.output_path,
                     preset="ultrafast",
                     fps=24,
+                    audio_codec="aac",
                 )
                 print(f"[INFO] Final video created: {self.output_path}")
             finally:
@@ -533,6 +611,10 @@ class TimelineConstructor:
                     final_video.close()
                 except Exception:
                     pass
+
+        # Generate and burn subtitles if enabled
+        if subtitles:
+            await self._generate_and_burn_subtitles(aspect_ratio)
 
         for clip in original_clips + cropped_clips:
             try:
