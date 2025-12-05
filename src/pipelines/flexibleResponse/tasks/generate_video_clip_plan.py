@@ -1,5 +1,6 @@
 from src.pipelines.flexibleResponse.schema import ChosenClips
 from src.pipelines.common.schema import convert_timestamp_to_string
+from lib.utils.media import parse_time_to_seconds
 import asyncio
 import json
 
@@ -34,6 +35,41 @@ class GenerateVideoClipPlan:
                 deduped.append(clip)
         return deduped
 
+    def _analyze_clip_distribution(self, clips):
+        """Analyze and warn about clips that are clustered in the same time region."""
+        if len(clips) < 3:
+            return
+
+        # Group clips by file and analyze time distribution
+        file_clips = {}
+        for clip in clips:
+            fname = clip.get("file_name", "unknown")
+            start = clip.get("start", "00:00:00,000")
+            if fname not in file_clips:
+                file_clips[fname] = []
+            try:
+                start_sec = parse_time_to_seconds(start)
+                file_clips[fname].append(start_sec)
+            except:
+                pass
+
+        # For each file, check if clips are clustered
+        for fname, times in file_clips.items():
+            if len(times) < 3:
+                continue
+            times.sort()
+
+            # Check for clustering: if >50% of clips are within 5 minutes of each other
+            window_size = 300  # 5 minutes
+            max_cluster = 0
+            for i, t in enumerate(times):
+                cluster_count = sum(1 for t2 in times if abs(t2 - t) <= window_size)
+                max_cluster = max(max_cluster, cluster_count)
+
+            if max_cluster > len(times) * 0.5:
+                print(f"[WARN] Clip clustering detected in {fname}: {max_cluster}/{len(times)} clips within 5-min window")
+                print(f"[WARN] Clip times (seconds): {[int(t) for t in times]}")
+
     async def __call__(
         self, 
         narration_script: str, 
@@ -53,6 +89,9 @@ class GenerateVideoClipPlan:
                 "Below is the user's prompt, you should adhere to any requests and tailor the response to the user's preferences. You must retain narration content specifically asked for in the user prompt, and do your best to choose the most appropriate clip for user prompt specific narration texts.\n"
                 "You must not omit content from the narration script that is specifically requested by the user or is necessary to customize the video for the user.\n"
                 "IMPORTANT: Do not output any duplicate clips. For each unique combination of file name, start, and end time, only include one entry in your output list.\n"
+                "IMPORTANT: Select clips from DIFFERENT parts of the source video timeline. Avoid clustering clips from the same time region. "
+                "If the narration covers the story chronologically, select clips that progress through the video from beginning to end. "
+                "Ensure visual variety by choosing scenes from across the entire duration of the source material.\n"
                 f"User prompt:\n---\n{user_prompt.strip()}\n---\n\n"
                 "For each clip, set a `priority` field (choose only one):\n"
                 "- `narration`: Use text-to-speech narration as primary audio. This is best when narration is more important than original audio, "
@@ -136,6 +175,8 @@ class GenerateVideoClipPlan:
                 "You are assisting in building a video from one or more media files. There is NO text-to-speech narration in this mode. "
                 "Your job is to select the most relevant video segments to directly answer or illustrate the user's prompt. "
                 "IMPORTANT: Do not output any duplicate clips. For each unique combination of file name, start, and end time, only include one entry in your output list.\n"
+                "IMPORTANT: Select clips from DIFFERENT parts of the source video timeline. Avoid clustering clips from the same time region. "
+                "Ensure visual variety by choosing scenes from across the entire duration of the source material.\n"
                 "For each selected clip, include the following fields:\n"
                 "- `id`: unique integer\n"
                 "- `file_name`: video file name\n"
@@ -178,5 +219,8 @@ class GenerateVideoClipPlan:
 
         # Deduplicate by (file_name, start, end)
         final_clips = self.deduplicate_clips(final_clips)
+
+        # Analyze clip distribution and warn about clustering
+        self._analyze_clip_distribution(final_clips)
 
         return final_clips
