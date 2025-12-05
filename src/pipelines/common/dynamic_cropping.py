@@ -577,8 +577,8 @@ class DynamicCropping:
                     masked[y1:y2, x1:x2] = frame_bgr[y1:y2, x1:x2]
                     resized = cv2.resize(masked, (input_width, input_height), interpolation=cv2.INTER_LINEAR)
                     shot_frames.append(resized)
-            except (IOError, OSError) as exc:
-                print(f"[WARN] Failed to process shot at {start_time:.2f}s-{end_time:.2f}s: {exc}")
+            except Exception as exc:
+                print(f"[WARN] Failed to process shot at {start_time:.2f}s-{end_time:.2f}s: {type(exc).__name__}: {exc}")
                 # Use default center for failed shot
                 center_norm = (0.5, 0.5)
                 for frame_idx in range(start, end):
@@ -591,10 +591,26 @@ class DynamicCropping:
                 })
                 shot_frames.clear()
                 saliency_stack = None
+                # Reinitialize the main clip reader after a failure
+                if hasattr(clip, 'reader') and clip.reader is not None:
+                    try:
+                        clip.reader.close()
+                    except Exception:
+                        pass
+                    try:
+                        clip.reader.initialize()
+                    except Exception:
+                        pass
+                gc.collect()
                 continue
             finally:
                 if shot_clip is not None:
-                    getattr(shot_clip, "close", lambda: None)()
+                    try:
+                        shot_clip.close()
+                    except Exception:
+                        pass
+                    # Force garbage collection after closing subclip
+                    gc.collect()
 
             saliency_stack = self._collect_shot_saliency(shot_frames)
 
@@ -763,6 +779,14 @@ class DynamicCropping:
         if total_frames == 0:
             raise RuntimeError("Failed to estimate frame count for dynamic cropping.")
 
+        # Force close and reinitialize reader to ensure clean state
+        if hasattr(clip, 'reader') and clip.reader is not None:
+            try:
+                clip.reader.close()
+            except Exception:
+                pass
+            clip.reader.initialize()
+
         y1, y2, x1, x2 = self._content_bounds(clip, total_frames)
         bounds = (y1, y2, x1, x2)
 
@@ -791,6 +815,15 @@ class DynamicCropping:
 
         if self.debug:
             self._start_debug_preview(clip, normalized_shots, fps)
+
+        # Reinitialize reader after shot detection to clear any stale state
+        if hasattr(clip, 'reader') and clip.reader is not None:
+            try:
+                clip.reader.close()
+            except Exception:
+                pass
+            clip.reader.initialize()
+        gc.collect()
 
         try:
             frame_centers, shot_metadata = self._compute_frame_centers(
