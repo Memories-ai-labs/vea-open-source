@@ -114,7 +114,7 @@ class ViNetSaliencyBackend:
             raise ValueError("ViNet variant must be 'S' or 'A'.")
 
         if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            device = "cpu"  # Force CPU to avoid CUDA corruption of FFmpeg reader
         self.device = torch.device(device)
         self.fp16 = bool(fp16 and self.device.type == "cuda")
         self.clip_len = int(clip_len)
@@ -278,7 +278,7 @@ class DynamicCropping:
             self.checkpoint_path,
             variant="S",
             clip_len=self.clip_len,
-            fp16=True,  # Enable FP16 acceleration on CUDA if available
+            fp16=False,  # Disable FP16 for stability (use FP32)
         )
         self._temp_outputs: set[Path] = set()
         self._clip_finalizers: List[weakref.finalize] = []
