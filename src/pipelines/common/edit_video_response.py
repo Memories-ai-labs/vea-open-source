@@ -23,14 +23,12 @@ if __name__ == "__main__":
     llm = GeminiGenaiManager(model="gemini-1.5-flash")
 
     constructor = TimelineConstructor(
-        output_path=config.get("output_path", "video_response.mp4"),
         gcs_client=gcs_client,
         bucket_name=config.get("bucket_name"),
-        workdir=config.get("workdir"),
         llm=llm
     )
 
-    asyncio.run(constructor.run(
+    output_dir = asyncio.run(constructor.run(
         clips=config["clips"],
         narration_dir=config["narration_dir"],
         background_music_path=config.get("background_music_path"),
@@ -39,8 +37,9 @@ if __name__ == "__main__":
         aspect_ratio=config.get("aspect_ratio", 16/9),
         subtitles=config.get("subtitles", True),
         snap_to_beat=config.get("snap_to_beat", False),
-        multi_round_mode=config.get("multi_round_mode", True)
     ))
+
+    print(f"[INFO] Output directory: {output_dir}")
 
     # Write metrics to file if path provided
     if metrics_output_path:
