@@ -28,7 +28,7 @@ if __name__ == "__main__":
         llm=llm
     )
 
-    output_dir = asyncio.run(constructor.run(
+    output_dir, video_path = asyncio.run(constructor.run(
         clips=config["clips"],
         narration_dir=config["narration_dir"],
         background_music_path=config.get("background_music_path"),
@@ -40,16 +40,14 @@ if __name__ == "__main__":
     ))
 
     print(f"[INFO] Output directory: {output_dir}")
+    print(f"[INFO] Video path: {video_path}")
 
     # Write result file for parent process to read
     result_file = input_path.replace(".json", "_result.json")
-    video_files = list(output_dir.glob("*.mp4"))
-    video_path = str(video_files[0]) if video_files else None
-
     with open(result_file, "w", encoding="utf-8") as f:
         json.dump({
             "output_dir": str(output_dir),
-            "video_path": video_path,
+            "video_path": str(video_path),
         }, f)
 
     # Write metrics to file if path provided

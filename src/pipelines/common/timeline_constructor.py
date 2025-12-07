@@ -686,7 +686,7 @@ class TimelineConstructor:
                 pass
 
         print(f"[INFO] All outputs saved to: {self._output_dir}")
-        return self._output_dir
+        return self._output_dir, video_output_path
 
     # =========================================================================
     # Test Harnesses
