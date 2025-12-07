@@ -41,6 +41,17 @@ if __name__ == "__main__":
 
     print(f"[INFO] Output directory: {output_dir}")
 
+    # Write result file for parent process to read
+    result_file = input_path.replace(".json", "_result.json")
+    video_files = list(output_dir.glob("*.mp4"))
+    video_path = str(video_files[0]) if video_files else None
+
+    with open(result_file, "w", encoding="utf-8") as f:
+        json.dump({
+            "output_dir": str(output_dir),
+            "video_path": video_path,
+        }, f)
+
     # Write metrics to file if path provided
     if metrics_output_path:
         os.makedirs(os.path.dirname(metrics_output_path), exist_ok=True)
