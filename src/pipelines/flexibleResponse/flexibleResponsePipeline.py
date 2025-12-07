@@ -227,20 +227,20 @@ class FlexibleResponsePipeline:
                     if not selected_clips:
                         raise RuntimeError("No valid evidence clips remaining after filtering")
 
-                    print("[INFO] Extracting and uploading evidence clips...")
+                    print("[INFO] Extracting evidence clips...")
                     clipper = ClipExtractor(
                         workdir=self.workdir,
                         gcs_client=self.cloud_storage_client,
                         bucket_name=BUCKET_NAME
                     )
                     with metrics_collector.track_step("clip_extraction"):
-                        gcs_clip_paths = clipper.extract_and_upload_clips(selected_clips, run_id)
-                    print(f"[INFO] Uploaded {len(gcs_clip_paths)} evidence clips to GCS.")
+                        clip_paths = clipper.extract_and_upload_clips(selected_clips, run_id)
+                    print(f"[INFO] Extracted {len(clip_paths)} evidence clips.")
 
                     return {
                         "response": initial_response,
                         "response_type": "text_and_evidence",
-                        "evidence_paths": gcs_clip_paths,
+                        "evidence_paths": clip_paths,
                         "run_id": run_id
                     }
                 except:
@@ -359,17 +359,17 @@ class FlexibleResponsePipeline:
             except:
                 pass
 
-            # Upload the result to GCS
-            final_gcs_path = f"{OUTPUTS_DIR}/{self.media_base_name}/{run_id}/video_response.mp4"
+            # Copy the result to storage
+            final_output_path = f"{OUTPUTS_DIR}/{self.media_base_name}/{run_id}/video_response.mp4"
             if output_path:
-                final_gcs_path = output_path
-            print(f"[INFO] Uploading final video to: {final_gcs_path}")
-            self.cloud_storage_client.upload_files(BUCKET_NAME, local_video_path, final_gcs_path)
-            print(f"[SUCCESS] Video response uploaded to GCS.")
+                final_output_path = output_path
+            print(f"[INFO] Saving final video to: {final_output_path}")
+            self.cloud_storage_client.upload_files(BUCKET_NAME, local_video_path, final_output_path)
+            print(f"[SUCCESS] Video response saved.")
 
             return {
                 "response": refined_script,
                 "response_type": "video",
-                "evidence_paths": [final_gcs_path],
+                "evidence_paths": [final_output_path],
                 "run_id": run_id
             }

@@ -1,29 +1,60 @@
 import os
 import shutil
 import tempfile
+import logging
 from pathlib import Path
-from datetime import datetime
 import json
+from typing import Optional, Callable
 import asyncio
 
 from lib.oss.storage_factory import get_storage_client
 from lib.utils.media import (
-    correct_segment_number_based_on_time,
-    preprocess_long_video,
-    preprocess_short_video,
-    get_video_info,
     get_video_duration,
     clean_stale_tempdirs,
     download_and_cache_video,
 )
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
+from lib.llm.MemoriesAiManager import MemoriesAiManager
 from src.config import BUCKET_NAME, VIDEO_EXTS, INDEXING_DIR
-from src.pipelines.videoComprehension.tasks.rough_comprehension import RoughComprehension
-from src.pipelines.videoComprehension.tasks.scene_by_scene_comprehension import SceneBySceneComprehension
-from src.pipelines.videoComprehension.tasks.refine_story import RefineStory    # <-- updated import
+from src.pipelines.videoComprehension.tasks.caption_comprehension import CaptionComprehension
+
+logger = logging.getLogger(__name__)
+
 
 class ComprehensionPipeline:
-    def __init__(self, blob_path, start_fresh=False, debug_output_dir=None):
+    """
+    Video comprehension pipeline using Memories.ai hybrid approach.
+
+    Uses Chat API for upload/indexing/summary/people, and Caption API for scene descriptions.
+    """
+
+    def __init__(
+        self,
+        blob_path: str,
+        start_fresh: bool = False,
+        debug_output_dir: Optional[str] = None,
+        memories_manager: MemoriesAiManager = None,
+        caption_callback_url: str = None,
+        register_caption_callback: Callable[[str], asyncio.Future] = None,
+    ):
+        """
+        Initialize the ComprehensionPipeline.
+
+        Args:
+            blob_path: Path to video file or folder in cloud storage
+            start_fresh: If True, delete existing indexing and re-process
+            debug_output_dir: Optional directory to save debug outputs
+            memories_manager: MemoriesAiManager instance (required)
+            caption_callback_url: Public webhook URL for Caption API callbacks (required)
+            register_caption_callback: Function to register pending callback (required)
+        """
+        if not memories_manager:
+            raise ValueError("memories_manager is required")
+        if not caption_callback_url:
+            raise ValueError("caption_callback_url is required")
+        if not register_caption_callback:
+            raise ValueError("register_caption_callback is required")
+
         # Accept both file or folder
         is_gcs_file = not blob_path.endswith("/") and Path(blob_path).suffix.lower() in VIDEO_EXTS
         self.is_gcs_file = is_gcs_file
@@ -41,8 +72,18 @@ class ComprehensionPipeline:
         self.cloud_storage_client = get_storage_client()
         self.llm = GeminiGenaiManager(model="gemini-2.5-flash")
 
+        # Store settings
         self.start_fresh = start_fresh
         self.debug_output_dir = debug_output_dir
+
+        # Memories.ai integration
+        self.memories_manager = memories_manager
+        self.caption_callback_url = caption_callback_url
+        self.register_caption_callback = register_caption_callback
+
+        logger.info("[COMPREHENSION] Using Memories.ai hybrid approach (Chat + Caption API)")
+        if self.start_fresh:
+            logger.info("[COMPREHENSION] start_fresh enabled - will re-upload to Memories.ai")
 
         if self.start_fresh:
             print(f"[INFO] start_fresh enabled. Deleting: {self.cloud_storage_indexing_dir}")
@@ -54,86 +95,101 @@ class ComprehensionPipeline:
         os.makedirs(self.videos_dir, exist_ok=True)
         print(f"[INFO] Temp directory created: {self.workdir}")
 
-    def _get_video_files(self):
-        files = []
-        for f in os.listdir(self.videos_dir):
-            path = Path(os.path.join(self.videos_dir, f))
-            if path.suffix.lower() in VIDEO_EXTS:
-                files.append(path)
-        return sorted(files, key=lambda x: x.name)
+    async def _process_video(
+        self,
+        local_media_path: str,
+        cloud_storage_media_path: str,
+    ) -> dict:
+        """
+        Process a single video file using the hybrid Chat + Caption API approach.
 
-    async def run_for_file(self, local_media_path, cloud_storage_media_path):
+        Args:
+            local_media_path: Path to local video file
+            cloud_storage_media_path: Path in cloud storage
+
+        Returns:
+            Dict with media file metadata and comprehension results
+        """
         media_name = os.path.basename(local_media_path)
-        long_segments_dir = tempfile.mkdtemp()
-        short_segments_dir = tempfile.mkdtemp()
+        stem = Path(local_media_path).stem
+        logger.info(f"[COMPREHENSION] Processing: {media_name}")
 
-        print("[INFO] Preprocessing long segments...")
-        long_segments = await preprocess_long_video(
-            local_media_path, long_segments_dir, interval_seconds=15 * 60, fps=1, crf=30)
+        # Create Caption comprehension task (hybrid: Chat + Caption API)
+        cc = CaptionComprehension(
+            memories_manager=self.memories_manager,
+            gemini_llm=self.llm,
+            callback_url=self.caption_callback_url,
+            register_callback=self.register_caption_callback,
+            scene_interval_seconds=20,
+            force_reupload=self.start_fresh,
+        )
 
-        print(f"[INFO] Generated {len(long_segments)} long segments.")
-
-        print("[INFO] Preprocessing short segments...")
-        short_segments = await preprocess_long_video(
-            local_media_path, short_segments_dir, interval_seconds=5 * 60, fps=1, crf=30)
-        short_segments = correct_segment_number_based_on_time(long_segments, short_segments)
-        print(f"[INFO] Generated {len(short_segments)} short segments.")
-
-        print("[INFO] Starting rough comprehension...")
-        rc = RoughComprehension(self.llm)
-        rough_summary_draft, people = await rc(long_segments)
-        print("[INFO] Rough comprehension complete.")
+        # Run comprehension
+        result = await cc(local_media_path)
 
         if self.debug_output_dir:
             os.makedirs(self.debug_output_dir, exist_ok=True)
-            draft_path = os.path.join(self.debug_output_dir, f"{Path(local_media_path).stem}_rough_summary.txt")
-            with open(draft_path, "w", encoding="utf-8") as f:
-                f.write(rough_summary_draft)
-            print(f"[DEBUG] Saved rough summary draft to {draft_path}")
 
-        print("[INFO] Starting scene-by-scene comprehension...")
-        sc = SceneBySceneComprehension(self.llm)
-        scenes = await sc(short_segments, rough_summary_draft, people)
-        print(f"[INFO] Scene-by-scene comprehension generated {len(scenes)} scenes.")
+            # Save summary
+            summary_path = os.path.join(self.debug_output_dir, f"{stem}_summary.txt")
+            with open(summary_path, "w", encoding="utf-8") as f:
+                f.write(result["rough_summary"])
+            print(f"[DEBUG] Saved summary to {summary_path}")
 
-        print("[INFO] Refining story...")
-        rs = RefineStory(self.llm)
-        story_json, story_text = await rs(rough_summary_draft, scenes)
-        print("[INFO] Refined story complete.")
+            # Save people descriptions
+            people_path = os.path.join(self.debug_output_dir, f"{stem}_people.txt")
+            with open(people_path, "w", encoding="utf-8") as f:
+                f.write(result["people"])
+            print(f"[DEBUG] Saved people to {people_path}")
+
+            # Save scenes
+            scenes_path = os.path.join(self.debug_output_dir, f"{stem}_scenes.json")
+            with open(scenes_path, "w", encoding="utf-8") as f:
+                json.dump(result["scenes"], f, ensure_ascii=False, indent=2)
+            print(f"[DEBUG] Saved scenes to {scenes_path}")
 
         return {
             "name": media_name,
             "cloud_storage_path": cloud_storage_media_path,
-            "story.txt": story_text,
-            "story.json": story_json,
-            "people.txt": people,
-            "scenes.json": scenes,
+            "story.txt": result["rough_summary"],
+            "story.json": None,
+            "people.txt": result["people"],
+            "scenes.json": result["scenes"],
+            "memories_video_no": result.get("video_no"),
         }
 
     async def run(self):
+        """Run the comprehension pipeline."""
         if self.cloud_storage_client.path_exists(BUCKET_NAME, self.indexing_file_path) and not self.start_fresh:
             print(f"[SKIP] Indexing already exists at {self.indexing_file_path}")
             return
 
         media_files = []
+
+        # Handle folder of videos
         if self.cloud_storage_media_path.endswith("/") or not Path(self.cloud_storage_media_path).suffix.lower() in VIDEO_EXTS:
             cache_root = Path(".cache/comprehension_media")
             target_dir = cache_root / self.media_folder_name
             target_dir.mkdir(parents=True, exist_ok=True)
+
             if not any(target_dir.iterdir()) or self.start_fresh:
                 print(f"[INFO] Downloading media folder {self.cloud_storage_media_path} → {target_dir}")
                 self.cloud_storage_client.download_files(BUCKET_NAME, self.cloud_storage_media_path, str(target_dir))
             else:
                 print(f"[CACHE] Using cached media folder {target_dir}")
+
             local_files = [
                 str(target_dir / f)
                 for f in os.listdir(target_dir)
                 if Path(f).suffix.lower() in VIDEO_EXTS
             ]
+
             for local_media_path in local_files:
                 cloud_path = self.cloud_storage_media_path.rstrip("/") + "/" + os.path.basename(local_media_path)
                 print(f"[INFO] Processing file: {local_media_path}")
-                media_files.append(await self.run_for_file(local_media_path, cloud_path))
+                media_files.append(await self._process_video(local_media_path, cloud_path))
+
+        # Handle single video file
         else:
             cache_root = Path(".cache/comprehension_media")
             cache_root.mkdir(parents=True, exist_ok=True)
@@ -144,18 +200,20 @@ class ComprehensionPipeline:
                 str(cache_root),
             )
             print(f"[INFO] Processing file: {local_media_path}")
-            media_files.append(await self.run_for_file(local_media_path, self.cloud_storage_media_path))
+            media_files.append(await self._process_video(local_media_path, self.cloud_storage_media_path))
 
+        # Build indexing object
         indexing_object = {
             "media_files": media_files,
             "manifest": {
-                "story.txt": "A linear summary of the story or events, broken into segments.",
-                "story.json": "A linear summary of the story or events, broken into segments in json form.",
-                "people.txt": "Descriptions of all people, characters, or key individuals and their relationships.",
+                "story.txt": "A linear summary of the story or events.",
+                "story.json": "Structured story data (optional, may be null).",
+                "people.txt": "Descriptions of all people, characters, or key individuals.",
                 "scenes.json": "Scene metadata including timestamps and visual content."
             }
         }
 
+        # Save locally
         output_path = os.path.join(self.workdir, "media_indexing.json")
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(indexing_object, f, ensure_ascii=False, indent=2)
@@ -165,6 +223,7 @@ class ComprehensionPipeline:
             shutil.copy(output_path, debug_indexing_path)
             print(f"[DEBUG] Saved indexing to {debug_indexing_path}")
 
-        print(f"[INFO] Uploading indexing file to GCS: {self.indexing_file_path}")
+        # Save to storage
+        print(f"[INFO] Saving indexing file to: {self.indexing_file_path}")
         self.cloud_storage_client.upload_files(BUCKET_NAME, output_path, self.indexing_file_path)
-        print(f"[SUCCESS] Uploaded indexing: {self.indexing_file_path}")
+        print(f"[SUCCESS] Saved indexing: {self.indexing_file_path}")
