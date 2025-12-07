@@ -12,7 +12,7 @@ class MovieFile(BaseModel):
     blob_path: str
 class IndexRequest(BaseModel):
     blob_path: str
-    start_fresh: Optional[bool] = False
+    start_fresh: Optional[bool] = False  # Re-process everything, including re-upload to Memories.ai
 
 
 class IndexResponse(BaseModel):
