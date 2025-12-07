@@ -333,17 +333,14 @@ def download_and_cache_video(gcs_client, bucket_name, cloud_path, local_dir):
         return primary_path
 
     if cache_path.exists():
-        print(f"[CACHE] Restoring from cache: {cache_path} → {primary_path}")
-        if primary_path:
-            Path(primary_path).parent.mkdir(parents=True, exist_ok=True)
-            if not os.path.exists(primary_path):
-                shutil.copy2(cache_path, primary_path)
-        return str(cache_path if not primary_path else primary_path)
+        # Return cached path directly - no need to copy to workdir
+        print(f"[CACHE] Using cached file: {cache_path}")
+        return str(cache_path)
 
-    # Download to primary location
+    # Download/copy to primary location
     Path(local_dir).mkdir(parents=True, exist_ok=True)
     download_target = primary_path or str(cache_path)
-    print(f"[DOWNLOAD] Downloading from GCS: {cloud_path} → {download_target}")
+    print(f"[STORAGE] Fetching: {cloud_path} → {download_target}")
     gcs_client.download_files(bucket_name, cloud_path, download_target)
 
     # Populate global cache with full path structure

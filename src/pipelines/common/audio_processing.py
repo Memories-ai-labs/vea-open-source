@@ -10,6 +10,12 @@ def get_loudness(audio_clip, sample_rate=44100):
     samples = audio_clip.to_soundarray(fps=sample_rate)
     if samples.ndim > 1:
         samples = np.mean(samples, axis=1)
+    # Ensure sample count is compatible with pyloudnorm block processing
+    # pyloudnorm uses 400ms blocks (0.4 * sample_rate samples)
+    block_size = int(0.4 * sample_rate)
+    if len(samples) < block_size:
+        # Pad short clips to minimum block size
+        samples = np.pad(samples, (0, block_size - len(samples)), mode='constant')
     meter = pyln.Meter(sample_rate)
     loudness = meter.integrated_loudness(samples)
     return loudness
@@ -23,16 +29,11 @@ def _average_clip_loudness(clips):
         if audio is None or duration <= 0:
             continue
         try:
-            segment = audio.subclipped(0, duration)
-            loudness = get_loudness(segment)
+            # Get audio samples directly without subclipping to avoid sample count mismatches
+            loudness = get_loudness(audio)
         except Exception as exc:
             print(f"[WARN] Failed to measure loudness for clip: {exc}")
             continue
-        finally:
-            try:
-                segment.close()
-            except Exception:
-                pass
         total_energy += (10 ** (loudness / 10.0)) * duration
         total_duration += duration
     if total_duration <= 0 or total_energy <= 0:

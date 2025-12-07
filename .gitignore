@@ -43,3 +43,5 @@ src/debug.py
 yolov8n.pt
 benchmark_outputs
 .cache/
+.env
+debug_output/

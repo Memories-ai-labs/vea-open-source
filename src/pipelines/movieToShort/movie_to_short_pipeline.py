@@ -70,7 +70,6 @@ class MovieToShortsPipeline:
             )
             shorts_plan_text = plan_result.get("response", "")
 
-        # print("\n[SHORTS PLAN]\n", shorts_plan_text)
         if not shorts_plan_text.strip():
             raise RuntimeError("Failed to generate a shorts plan!")
 

@@ -94,6 +94,43 @@ class TimelineConstructor:
         print(f"[INFO] Output directory: {self._output_dir}")
         return self._output_dir
 
+    def _load_audio_as_array(self, audio_path: str) -> AudioClip:
+        """
+        Load an audio file as a numpy-backed AudioClip to avoid FFmpeg reader state issues.
+
+        The problem: AudioFileClip maintains an internal FFmpeg subprocess. When clips are
+        concatenated or processed multiple times, this reader can get into a bad state where
+        it tries to read past the end of the file, causing 'stdout is None' errors.
+
+        The solution: Read the entire audio into memory as a numpy array, then create a
+        new AudioClip from that array. This is stable and doesn't rely on FFmpeg state.
+        """
+        # Load audio with AudioFileClip to get metadata
+        with AudioFileClip(audio_path) as temp_clip:
+            fps = temp_clip.fps
+            duration = temp_clip.duration
+            nchannels = temp_clip.nchannels
+            # Read entire audio into memory
+            audio_array = temp_clip.to_soundarray(fps=fps)
+
+        # Create a new AudioClip from the numpy array
+        def make_frame(t):
+            # Handle both scalar and array time inputs
+            t = np.atleast_1d(t)
+            # Convert time to sample indices
+            indices = (t * fps).astype(int)
+            # Clip to valid range
+            indices = np.clip(indices, 0, len(audio_array) - 1)
+            result = audio_array[indices]
+            # Ensure consistent 2D shape (samples, channels)
+            if result.ndim == 1 and nchannels > 1:
+                result = result.reshape(-1, nchannels)
+            return result
+
+        stable_clip = AudioClip(make_frame, duration=duration, fps=fps)
+        stable_clip.nchannels = nchannels
+        return stable_clip
+
     # =========================================================================
     # Media Download and Normalization
     # =========================================================================
@@ -266,10 +303,10 @@ class TimelineConstructor:
             metadata_helpers._register_clip_edit(clip, metadata)
             return [video_clip]
 
-        # Load narration
+        # Load narration as numpy-backed clip to avoid FFmpeg reader state issues
         try:
             audio_path = os.path.join(narration_dir, f"{clip_id}.mp3")
-            narration = AudioFileClip(audio_path)
+            narration = self._load_audio_as_array(audio_path)
             narration_duration = float(narration.duration or 0.0)
         except Exception as e:
             print(f"[WARN] Failed to load narration for clip {clip_id}: {e}")
@@ -441,7 +478,8 @@ class TimelineConstructor:
             return final_video
 
         try:
-            music = AudioFileClip(music_path)
+            # Load music as numpy-backed clip to avoid FFmpeg reader state issues
+            music = self._load_audio_as_array(music_path)
 
             # Calculate music volume if not provided
             if music_volume is None:
@@ -727,9 +765,31 @@ class TimelineConstructor:
             dict with paths and status
         """
         import json
+        import numpy as np
         from pathlib import Path
         from moviepy import VideoFileClip, AudioFileClip, AudioClip
         from moviepy import vfx
+
+        def load_audio_as_array(audio_path: str) -> AudioClip:
+            """Load audio file as numpy-backed AudioClip (avoids FFmpeg reader issues)."""
+            with AudioFileClip(audio_path) as temp_clip:
+                fps = temp_clip.fps
+                duration = temp_clip.duration
+                nchannels = temp_clip.nchannels
+                audio_array = temp_clip.to_soundarray(fps=fps)
+
+            def make_frame(t):
+                t = np.atleast_1d(t)
+                indices = (t * fps).astype(int)
+                indices = np.clip(indices, 0, len(audio_array) - 1)
+                result = audio_array[indices]
+                if result.ndim == 1 and nchannels > 1:
+                    result = result.reshape(-1, nchannels)
+                return result
+
+            clip = AudioClip(make_frame, duration=duration, fps=fps)
+            clip.nchannels = nchannels
+            return clip
 
         video_path = Path(video_path)
         if not video_path.exists():
@@ -757,14 +817,14 @@ class TimelineConstructor:
         video_duration = base_clip.duration
         print(f"[TEST] Trimmed clip duration: {video_duration:.2f}s")
 
-        # Load narration if provided
+        # Load narration if provided (as numpy-backed clip)
         narration = None
         narration_duration = 0.0
         if narration_audio_path:
             narration_path = Path(narration_audio_path)
             if narration_path.exists():
                 print(f"[TEST] Loading narration: {narration_path}")
-                narration = AudioFileClip(str(narration_path))
+                narration = load_audio_as_array(str(narration_path))
                 narration_duration = narration.duration
                 print(f"[TEST] Narration duration: {narration_duration:.2f}s")
             else:

@@ -134,7 +134,6 @@ class QuizingEvaluation:
                         index = json.load(open(index_path, "r", encoding="utf-8")) if model_name == "ours"
                         else open(index_path, "r", encoding="utf-8").read()
                     )
-                    # print(context)
                     prompt = self._format_prompt(question, context)
                     predicted_answer = self.llm.LLM_request([prompt]).strip()
                     output_lines.append(f"[Model {model_id}] {predicted_answer}\n")

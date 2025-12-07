@@ -13,6 +13,9 @@
   },
 
   "api_keys": {
+    "MEMORIES_API_KEY": "your-memories-ai-api-key",
+    "_memories_comment": "Get your API key from https://memories.ai/app/service/key (required for video understanding)",
+
     "ELEVENLABS_API_KEY": "your-elevenlabs-api-key",
     "_elevenlabs_comment": "Get your API key from https://elevenlabs.io/",
 
@@ -20,12 +23,12 @@
     "_soundstripe_comment": "Get your API key from https://www.soundstripe.com/ (optional - for background music)",
 
     "GOOGLE_CLOUD_PROJECT": "your-gcp-project-id",
-    "_google_project_comment": "Your Google Cloud Project ID for Vertex AI (required for Gemini LLM)",
+    "_google_project_comment": "Your Google Cloud Project ID for Vertex AI (required for Gemini structured output)",
 
     "GOOGLE_CLOUD_LOCATION": "us-central1",
     "_google_location_comment": "Google Cloud region for Vertex AI (default: us-central1)",
 
-    "_google_auth_required": "IMPORTANT: Run 'gcloud auth application-default login' before using"
+    "_google_auth_required": "IMPORTANT: Run 'gcloud auth application-default login' before using Gemini"
   },
 
   "optional_features": {

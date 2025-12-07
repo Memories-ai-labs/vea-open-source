@@ -69,9 +69,10 @@ class FlexibleResponsePipeline:
 
     def _load_media_indexing_json(self):
         """Download and parse media_indexing.json for this media file."""
-        print("[INFO] Downloading media_indexing.json...")
+        print(f"[INFO] Loading media_indexing.json for project: {self.project_name}")
         gcs_index_path = self.cloud_storage_indexing_dir + "media_indexing.json"
-        cache_dir = os.path.join(".cache", "media_indexing")
+        # Use project-specific cache directory to avoid cross-project contamination
+        cache_dir = os.path.join(".cache", "media_indexing", self.project_name)
         os.makedirs(cache_dir, exist_ok=True)
         index_local_path = download_and_cache_video(
             self.cloud_storage_client,

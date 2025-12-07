@@ -45,5 +45,4 @@ class FlexibleGeminiAnswer:
             3,     # max_retries
             "flexible_gemini_answer"  # context
         )
-        # print(response)
         return response

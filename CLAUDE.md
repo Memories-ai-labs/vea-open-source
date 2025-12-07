@@ -4,7 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-VEA Playground is a video editing automation service that uses Gemini LLMs to understand video content and generate edited video responses. The system indexes long-form videos, comprehends their content, and responds to user prompts by extracting relevant clips, adding narration, music, and dynamic cropping to create polished short-form content.
+VEA Playground is a video editing automation service that uses LLMs to understand video content and generate edited video responses. The system indexes long-form videos, comprehends their content, and responds to user prompts by extracting relevant clips, adding narration, music, and dynamic cropping to create polished short-form content.
+
+**LLM Architecture (Hybrid):**
+- **Memories.ai** - Video understanding (upload, indexing, chat with timestamped references)
+- **Gemini (Vertex AI)** - Structured JSON output (schemas, formatting)
 
 ## Development Commands
 
@@ -21,8 +25,14 @@ source .venv/bin/activate
 - `ffmpeg` must be installed on the system for video processing
 
 **Configuration files needed:**
-- `config/apiKeys.json` - API keys for Google Genai and Soundstripe (see `apiKeysExample.json`)
-- `config/gcp_credentials.json` - Google Cloud Platform service account credentials
+- `config.json` - Copy from `config.example.json` and fill in your API keys:
+  - `MEMORIES_API_KEY` - Memories.ai API key (required for video understanding)
+  - `GOOGLE_CLOUD_PROJECT` - GCP project ID (required for Gemini structured output)
+  - `ELEVENLABS_API_KEY` - ElevenLabs API key (required for narration TTS)
+  - `SOUNDSTRIPE_KEY` - Soundstripe API key (optional, for background music)
+
+**Google Cloud authentication:**
+- Run `gcloud auth application-default login` for Gemini access via Vertex AI
 
 ### Running the Service
 
@@ -96,7 +106,16 @@ The `FlexibleResponsePipeline` calls `edit_video_response.py` as a subprocess (n
 - `parse_time_to_seconds()` - Convert HH:MM:SS[,mmm] to float seconds
 - `seconds_to_hhmmss()` - Convert float seconds to HH:MM:SS,mmm
 
-**`lib/llm/GeminiGenaiManager.py`** - Gemini LLM interaction:
+**`lib/llm/MemoriesAiManager.py`** - Memories.ai video understanding:
+- `upload_video_url(video_url)` - Upload video by URL, returns `videoNo`
+- `upload_video_file(file_path)` - Upload local video file
+- `wait_for_ready(video_no)` - Poll until video indexing completes
+- `chat(video_nos, prompt)` - Query indexed videos, returns text + timestamped references
+- `search(query, search_type)` - Search indexed videos (BY_VIDEO, BY_AUDIO, BY_CLIP)
+- All methods include `[MEMORIES]` prefixed logging for debugging
+- Set `debug=True` for full raw API response logging
+
+**`lib/llm/GeminiGenaiManager.py`** - Gemini LLM interaction (for structured output):
 - `LLM_request(prompt_contents, schema=None)` - Call Gemini with structured output
 - Accepts mixed inputs: local file paths (Path), GCS URIs (`gs://...`), or text strings
 - Supports Pydantic schema for structured JSON responses
@@ -138,6 +157,10 @@ All endpoints use prefix: `/video-edit/v1`
 - `POST /movie_to_shorts` - Convert movie to shorts
 - `POST /screenplay` - Generate screenplay from video
 - `POST /quality_assessment` - Assess video quality
+
+**Webhook endpoints** (for Memories.ai async callbacks):
+- `POST /webhooks/memories/caption` - Callback for Video Caption API completion
+- `POST /webhooks/memories/upload` - Callback for video upload/indexing completion
 
 ## Cloud Deployment
 
