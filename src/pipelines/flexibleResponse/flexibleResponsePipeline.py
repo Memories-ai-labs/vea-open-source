@@ -1,9 +1,9 @@
 import os
 import json
+import logging
 import tempfile
 import random
 import string
-import gc
 import subprocess
 import uuid
 import shutil
@@ -22,11 +22,22 @@ from src.pipelines.flexibleResponse.tasks.generate_narration_script import Gener
 from src.pipelines.flexibleResponse.tasks.generate_video_clip_plan import GenerateVideoClipPlan
 from src.pipelines.common.refine_clip_timestamps import RefineClipTimestamps
 from src.pipelines.common.generate_narration_audio import GenerateNarrationAudio
-from src.pipelines.common.music_selection import MusicSelection 
+from src.pipelines.common.music_selection import MusicSelection
+
+logger = logging.getLogger(__name__)
 
 
 class FlexibleResponsePipeline:
-    def __init__(self, cloud_storage_media_path):
+    def __init__(
+        self,
+        cloud_storage_media_path: str,
+    ):
+        """
+        Initialize the FlexibleResponsePipeline.
+
+        Args:
+            cloud_storage_media_path: Path to the video file in cloud storage
+        """
         # Parse basic paths and setup
         self.cloud_storage_media_path = cloud_storage_media_path
         self.media_name = os.path.basename(cloud_storage_media_path.rstrip("/"))
@@ -155,7 +166,7 @@ class FlexibleResponsePipeline:
         indexing_data, file_descriptions = self._flatten_indexing()
         print("[INFO] Flattened indexing data and manifest loaded.")
 
-        # 1. Step 1: Generate the initial LLM response
+        # Step 1: Generate the initial LLM response using Gemini with pre-indexed data
         print("[INFO] Requesting initial Gemini response...")
         gemini_task = FlexibleGeminiAnswer(self.llm)
         with metrics_collector.track_step("flexible_gemini_answer"):
@@ -165,7 +176,6 @@ class FlexibleResponsePipeline:
                 file_descriptions=file_descriptions
             )
         print("[INFO] Initial Gemini response received.")
-        # print(f"[DEBUG] Initial response: {initial_response}")
 
         if not video_response:
             # --- Text/Evidence Response Path ---
@@ -237,7 +247,6 @@ class FlexibleResponsePipeline:
                         file_descriptions=file_descriptions
                     )
                 print("[INFO] Narration script generated.")
-                # print(f"[DEBUG] Refined narration script: {refined_script}")
             else:
                 print("[INFO] Skipping narration script generation as narration is disabled.")
                 refined_script = initial_response
@@ -297,9 +306,7 @@ class FlexibleResponsePipeline:
                 "aspect_ratio": aspect_ratio,
                 "subtitles": subtitles,
                 "snap_to_beat": snap_to_beat,
-                "workdir": self.workdir,
                 "bucket_name": BUCKET_NAME,
-                "output_path": f"{self.workdir}/video_response.mp4"
             }
 
             editor_input_path = os.path.join(self.workdir, f"edit_input_{uuid.uuid4().hex}.json")
@@ -318,12 +325,20 @@ class FlexibleResponsePipeline:
             ], check=True)
             print("[INFO] EditVideoResponse subprocess complete.")
 
+            # Read result file to get actual video path
+            result_file = editor_input_path.replace(".json", "_result.json")
+            with open(result_file, "r", encoding="utf-8") as f:
+                edit_result = json.load(f)
+            local_video_path = edit_result.get("video_path")
+            print(f"[INFO] Video created at: {local_video_path}")
+
             # Merge subprocess metrics into parent
             metrics_collector.merge_from_file(subprocess_metrics_file)
 
-            # Clean up temp metrics file
+            # Clean up temp files
             try:
                 os.remove(subprocess_metrics_file)
+                os.remove(result_file)
             except:
                 pass
 
@@ -332,7 +347,7 @@ class FlexibleResponsePipeline:
             if output_path:
                 final_gcs_path = output_path
             print(f"[INFO] Uploading final video to: {final_gcs_path}")
-            self.cloud_storage_client.upload_files(BUCKET_NAME, f"{self.workdir}/video_response.mp4", final_gcs_path)
+            self.cloud_storage_client.upload_files(BUCKET_NAME, local_video_path, final_gcs_path)
             print(f"[SUCCESS] Video response uploaded to GCS.")
 
             return {
