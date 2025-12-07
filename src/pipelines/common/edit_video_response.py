@@ -29,6 +29,7 @@ if __name__ == "__main__":
     )
 
     output_dir, video_path = asyncio.run(constructor.run(
+        project_name=config.get("project_name"),
         clips=config["clips"],
         narration_dir=config["narration_dir"],
         background_music_path=config.get("background_music_path"),

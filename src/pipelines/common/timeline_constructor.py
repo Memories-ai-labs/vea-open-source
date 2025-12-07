@@ -81,10 +81,8 @@ class TimelineConstructor:
     # Output Directory Management
     # =========================================================================
 
-    def _setup_output_dir(self, first_file_name: str) -> Path:
-        """Create output directory structure based on first video file name."""
-        # Use stem of first video file as project name
-        project_name = Path(first_file_name).stem
+    def _setup_output_dir(self, project_name: str) -> Path:
+        """Create output directory structure for the project."""
         self._output_dir = self.DATA_OUTPUTS_DIR / project_name
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -105,9 +103,9 @@ class TimelineConstructor:
         if file_name in self._downloaded_files:
             return self._downloaded_files[file_name]["path"]
 
-        # Ensure output dir is set up
+        # Ensure output dir is set up (fallback to file stem if called before run())
         if self._output_dir is None:
-            self._setup_output_dir(file_name)
+            self._setup_output_dir(Path(file_name).stem)
 
         # Download to cache, then normalize to output folder
         cache_dir = Path(tempfile.gettempdir()) / "vea_download_cache"
@@ -531,11 +529,12 @@ class TimelineConstructor:
         aspect_ratio: float = 16 / 9,
         subtitles: bool = True,
         snap_to_beat: bool = False,
+        project_name: str = None,
     ) -> Path:
         """
         Build video timeline from clip plan.
 
-        All outputs are saved to: data/outputs/{first_video_name}/
+        All outputs are saved to: data/outputs/{project_name}/
 
         Args:
             clips: List of clip dicts with id, file_name, start, end, narration, priority
@@ -546,6 +545,7 @@ class TimelineConstructor:
             aspect_ratio: Target aspect ratio (e.g., 16/9 or 9/16)
             subtitles: Whether to generate subtitles
             snap_to_beat: Whether to snap clip ends to music beats
+            project_name: Name for the output folder (defaults to first clip's file name)
 
         Returns:
             Path to output directory containing all files
@@ -553,10 +553,10 @@ class TimelineConstructor:
         if not clips:
             raise ValueError("No clips provided")
 
-        # Set up output directory based on first video file
-        first_file_name = clips[0]["file_name"]
-        self._setup_output_dir(first_file_name)
-        project_name = self._output_dir.name
+        # Set up output directory - use provided project name or fall back to first file name
+        if not project_name:
+            project_name = Path(clips[0]["file_name"]).stem
+        self._setup_output_dir(project_name)
 
         # Save clip plan to output directory
         clip_plan_path = self._output_dir / "clip_plan.json"

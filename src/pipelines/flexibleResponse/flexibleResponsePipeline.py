@@ -40,9 +40,25 @@ class FlexibleResponsePipeline:
         """
         # Parse basic paths and setup
         self.cloud_storage_media_path = cloud_storage_media_path
-        self.media_name = os.path.basename(cloud_storage_media_path.rstrip("/"))
+
+        # Extract project name from path:
+        # - If path is a folder (ends with /): use folder name
+        # - If path is a file: use parent folder name
+        path = cloud_storage_media_path.rstrip("/")
+        if cloud_storage_media_path.endswith("/") or not os.path.splitext(path)[1]:
+            # It's a folder path
+            self.project_name = os.path.basename(path)
+        else:
+            # It's a file path - use parent folder name
+            self.project_name = os.path.basename(os.path.dirname(path))
+
+        # Fallback to file stem if no folder structure
+        if not self.project_name:
+            self.project_name = os.path.splitext(os.path.basename(path))[0]
+
+        self.media_name = os.path.basename(path)
         self.media_base_name = os.path.splitext(self.media_name)[0]
-        self.cloud_storage_indexing_dir = f"{INDEXING_DIR}/{self.media_base_name}/"
+        self.cloud_storage_indexing_dir = f"{INDEXING_DIR}/{self.project_name}/"
         self.llm = GeminiGenaiManager(model="gemini-2.5-flash")
         self.cloud_storage_client = get_storage_client()
         self.workdir = tempfile.mkdtemp()
@@ -298,6 +314,7 @@ class FlexibleResponsePipeline:
 
             # Assemble and render the final video
             editor_input = {
+                "project_name": self.project_name,
                 "clips": selected_narrated_clips,
                 "narration_dir": narration_audio_dir,
                 "background_music_path": chosen_music_path,
