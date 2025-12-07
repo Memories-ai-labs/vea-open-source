@@ -179,7 +179,7 @@ class ScreenplayPipeline:
             f.write(final_screenplay)
         print(f"[SUCCESS] Final screenplay saved to {local_output_path}")
 
-        gcs_output_path = f"screenplay/{self.media_base_name}/{self.media_base_name}_screenplay.txt"
-        self.cloud_storage_client.upload_files(BUCKET_NAME, local_output_path,  gcs_output_path)
-        print(f"[SUCCESS] Uploaded to GCS: {gcs_output_path}")
-        return gcs_output_path
+        output_path = f"screenplay/{self.media_base_name}/{self.media_base_name}_screenplay.txt"
+        self.cloud_storage_client.upload_files(BUCKET_NAME, local_output_path, output_path)
+        print(f"[SUCCESS] Saved to: {output_path}")
+        return output_path
