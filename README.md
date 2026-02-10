@@ -3,7 +3,8 @@
   <h1>VEA: Video Editing Agent</h1>
 
   <h3>
-    Create Short-Form Content from Long-Form Videos with AI
+    Autonomous Comprehension of
+    Long-Form, Story-Driven Media
   </h3>
 
   <p>
@@ -88,9 +89,9 @@ cp config.example.json config.json
 
 **Required Keys in `config.json`:**
 
-* `MEMORIES_API_KEY`: [Get Key](https://memories.ai/app/service/key) (Video Understanding)
-* `GOOGLE_CLOUD_PROJECT`: [Google Cloud Console](https://console.cloud.google.com) (Gemini)
-* `ELEVENLABS_API_KEY`: [suspicious link removed] (TTS)
+* `MEMORIES_API_KEY`: [Get Key](https://memories.ai/app/service/key)
+* `GOOGLE_CLOUD_PROJECT`: [Google Cloud Console](https://console.cloud.google.com)
+* `ELEVENLABS_API_KEY`: [ELEVENLABS](https://elevenlabs.io/docs/api-reference/)
 
 ### 4. Run Server
 
