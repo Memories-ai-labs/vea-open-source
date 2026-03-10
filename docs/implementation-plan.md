@@ -46,8 +46,9 @@ vea-open-source/
 │           │   └── clip_postprocess.py
 │           ├── fcpxml/
 │           │   ├── __init__.py
-│           │   ├── fcpxml_agent.py
-│           │   └── fcpxml_validator.py
+│           │   ├── fcpxml_scaffold.py  # Programmatic valid baseline generator
+│           │   ├── fcpxml_compiler.py  # 3-layer validator + autofix
+│           │   └── fcpxml_agent.py     # Hybrid: scaffold → LLM enhance → compile → correct
 │           ├── narration/
 │           │   ├── __init__.py
 │           │   └── narration_pipeline.py
@@ -97,7 +98,8 @@ vea-open-source/
 │           └── session.ts              # TypeScript types matching server WS protocol
 │
 ├── context/
-│   └── fcpxml_formatting_guide.md      # UNCHANGED — injected into FCPXML agent
+│   ├── fcpxml_formatting_guide.md      # UNCHANGED — injected into FCPXML agent prompt
+│   └── fcpxml_1_10.dtd                 # NEW — Apple's official DTD for xmllint validation
 │
 ├── data/
 │   ├── videos/                         # UNCHANGED
@@ -687,80 +689,233 @@ class IterativePlanningLoop:
         # Look up source_path from session.videos by video_no
 ```
 
-### 4.8 `src/pipelines/v2/fcpxml/fcpxml_validator.py`
+### 4.8 `src/pipelines/v2/fcpxml/fcpxml_compiler.py`
 
-Pure XML validation. No LLM, no I/O.
+The FCPXML compiler is the core reliability layer between LLM output and a valid importable file. It combines three layers of checking and can auto-fix a subset of common errors before falling back to LLM correction.
 
 ```python
-def validate_fcpxml(xml_str: str, media_dir: Path) -> List[str]:
+class FcpxmlCompiler:
     """
-    Returns a list of error strings. Empty list = valid.
+    Three-layer FCPXML validation and auto-fix pipeline:
 
-    Checks:
-    - Well-formed XML
-    - root element is <fcpxml> with version attribute
-    - All ref= values resolve to a resource id=
-    - All time values have 's' suffix (no bare floats)
-    - All duration values > 0
-    - Spine offset values are non-decreasing
-    - asset media-rep src paths point to existing files under media_dir
-    - Total spine duration matches sequence duration attribute
+    Layer 1 — Structural (Python xml.etree): well-formed XML, required attributes,
+               ref resolution, time value format
+    Layer 2 — DTD (xmllint): validates against Apple's official FCPXML 1.10 DTD
+    Layer 3 — Semantic (Python): time math correctness, file existence,
+               spine continuity, duration consistency
+
+    Also provides auto-fix for common LLM mistakes before asking Gemini to retry.
     """
+
+    DTD_PATH = Path("context/fcpxml_1_10.dtd")  # Apple DTD, checked into repo
+    XMLLINT_AVAILABLE = shutil.which("xmllint") is not None  # macOS: yes, Linux: apt install libxml2-utils
+
+    def compile(self, xml_str: str, media_dir: Path) -> CompileResult:
+        """
+        Returns CompileResult(valid: bool, errors: List[str], warnings: List[str])
+        Runs all three layers. Stops at first layer that has errors.
+        """
+
+    def autofix(self, xml_str: str) -> str:
+        """
+        Attempt to fix the most common LLM FCPXML mistakes without LLM involvement:
+        - Float seconds → rational fractions (e.g. '2.0s' → '48/24s')
+        - Missing 's' suffix on time values
+        - Duplicate id= attributes (append suffix)
+        - Unclosed tags (via minidom re-serialization)
+        - Incorrect version attribute (normalize to '1.10')
+        Returns the fixed XML string. Does NOT fix structural/semantic errors.
+        """
+
+@dataclass
+class CompileResult:
+    valid: bool
+    errors: List[str]      # Blocking — must fix before import
+    warnings: List[str]    # Non-blocking — import may still work
+    layer: str             # Which layer caught the first error: "structural" | "dtd" | "semantic"
 ```
 
-### 4.9 `src/pipelines/v2/fcpxml/fcpxml_agent.py`
+**Getting Apple's FCPXML DTD:**
+
+Apple publishes FCPXML DTDs in Final Cut Pro itself. Extract with:
+```bash
+# macOS with FCP installed:
+find /Applications/Final\ Cut\ Pro.app -name "*.dtd" 2>/dev/null
+# Typically at: .../Contents/Resources/fcpxml_1_10.dtd
+# Copy to: context/fcpxml_1_10.dtd  (check into repo)
+```
+
+Without FCP, community-maintained DTDs are available at:
+`https://github.com/CommandPost/FCPCafe/tree/main/docs/fcpxml`
+
+**xmllint DTD validation (Layer 2):**
+```python
+result = subprocess.run(
+    ["xmllint", "--dtdvalid", str(self.DTD_PATH), "--noout", "-"],
+    input=xml_str.encode(),
+    capture_output=True
+)
+# stderr contains validation errors in standard format
+```
+
+**Semantic checks (Layer 3):**
+- All `asset` `media-rep src` paths resolve to existing files under `media_dir`
+- Spine `asset-clip` offsets are monotonically non-decreasing
+- No clip extends beyond its parent asset's duration
+- Sequence `duration` attribute matches sum of spine clip durations
+- Rational fractions are mathematically valid (denominator ≠ 0)
+- All audio lanes have valid `role` attributes
+
+### 4.9 `src/pipelines/v2/fcpxml/fcpxml_scaffold.py`
+
+The scaffold generates a **guaranteed-valid baseline FCPXML** from the storyboard programmatically — same approach as the existing `fcpxml_exporter.py` but adapted to v2 `Storyboard` + `RetrievedClip` inputs. The LLM then edits this scaffold rather than generating from scratch.
+
+```python
+class FcpxmlScaffold:
+    """
+    Programmatic FCPXML generator. Produces a simple but guaranteed-valid
+    FCPXML 1.10 from a Storyboard. No transitions, no effects, no audio mixing —
+    just correct spine with asset-clips, proper time math, and valid resources.
+
+    This is the starting point that FcpxmlAgent hands to Gemini for enhancement.
+    Adapts logic from src/pipelines/common/fcpxml_exporter.py.
+    """
+
+    def generate(self, storyboard: Storyboard, clips: List[RetrievedClip],
+                 media_dir: Path, fps: int = 24) -> str:
+        """
+        Returns a valid FCPXML 1.10 string with:
+        - resources: one <format> + one <asset> per unique source file
+        - spine: one <asset-clip> per shot with correct start/duration/offset
+        - NO transitions, effects, audio lanes, narration, or music yet
+        - asset names set to source filename (for crop pipeline correlation)
+        """
+```
+
+### 4.10 `src/pipelines/v2/fcpxml/fcpxml_agent.py`
+
+The agent uses a **hybrid strategy**: programmatic scaffold → LLM enhancement → compiler validation → LLM correction loop. This gives the LLM a valid starting point and structured feedback when it makes mistakes.
 
 ```python
 class FcpxmlAgent:
     """
-    Converts a finalized storyboard into a valid FCPXML 1.10 file.
-    Uses Gemini with fcpxml_formatting_guide.md as context.
-    Self-reviews and corrects up to MAX_FCPXML_ITERATIONS times.
-    """
-    MAX_FCPXML_ITERATIONS = 3
+    Hybrid FCPXML generation:
+    1. Scaffold: generate guaranteed-valid baseline programmatically
+    2. Enhance: LLM adds transitions, audio mixing, effects on top of scaffold
+    3. Compile: run FcpxmlCompiler — autofix trivial errors, report the rest
+    4. Correct: if errors remain, feed them back to LLM (up to MAX_ITERATIONS)
 
-    def __init__(self, workspace: WorkspaceManager, gemini: GeminiGenaiManager): ...
+    The LLM never generates from scratch — it always edits a valid XML document.
+    This dramatically reduces the surface area for errors.
+    """
+    MAX_ENHANCE_ITERATIONS = 3
+
+    def __init__(self, workspace: WorkspaceManager,
+                 gemini: GeminiGenaiManager,
+                 scaffold: FcpxmlScaffold,
+                 compiler: FcpxmlCompiler): ...
 
     async def run(self) -> Path:
         storyboard = self.workspace.load_storyboard()
         clips = self.workspace.load_clips()
-        session = self.workspace.load_session()
-
-        # Prepare media symlinks
-        source_paths = [c.source_path for c in clips]
-        self.workspace.ensure_media_symlinks(source_paths)
+        self.workspace.ensure_media_symlinks([c.source_path for c in clips])
         media_dir = self.workspace.get_media_dir()
 
-        narration_path = self.workspace.get_narration_path()
-        music_path = self.workspace.get_music_path()
+        # Step 1: Generate valid baseline
+        baseline_xml = self.scaffold.generate(storyboard, clips, media_dir)
+        # Sanity check — scaffold should always produce valid output
+        assert not self.compiler.compile(baseline_xml, media_dir).errors, \
+            "Scaffold produced invalid FCPXML — bug in scaffold code"
 
-        # Load FCPXML formatting guide from disk
-        guide = Path("context/fcpxml_formatting_guide.md").read_text()
+        # Step 2: LLM enhancement loop
+        current_xml = baseline_xml
+        for i in range(self.MAX_ENHANCE_ITERATIONS):
+            enhanced_xml = await self._enhance(current_xml, storyboard, clips,
+                                                media_dir, i)
 
-        fcpxml_str = None
-        errors = []
+            # Step 3: Compile
+            result = self.compiler.compile(enhanced_xml, media_dir)
 
-        for i in range(self.MAX_FCPXML_ITERATIONS):
-            prompt = self._build_prompt(storyboard, clips, media_dir,
-                                         narration_path, music_path, guide, errors)
-            fcpxml_str = await self._call_gemini(prompt)
-
-            errors = validate_fcpxml(fcpxml_str, media_dir)
-            if not errors:
+            if result.valid:
+                current_xml = enhanced_xml
                 break
-            # errors fed back into next iteration's prompt as correction instructions
+
+            # Autofix trivial issues (float seconds, missing 's' suffix, etc.)
+            fixed_xml = self.compiler.autofix(enhanced_xml)
+            result2 = self.compiler.compile(fixed_xml, media_dir)
+
+            if result2.valid:
+                current_xml = fixed_xml
+                break
+
+            # Feed structured errors back to LLM for correction
+            current_xml = fixed_xml  # give LLM the partially-fixed version
+            # errors injected into next enhance() call
+
+        # If still invalid after all iterations, fall back to scaffold
+        final_result = self.compiler.compile(current_xml, media_dir)
+        if not final_result.valid:
+            logger.warning("LLM enhancement produced invalid FCPXML after all "
+                           "iterations — falling back to scaffold baseline")
+            current_xml = baseline_xml
 
         output_path = self.workspace.get_fcpxml_path(version=i + 1)
-        output_path.write_text(fcpxml_str)
-
-        # If final version, also write as edit_final.fcpxml
-        self.workspace.get_final_fcpxml_path().write_text(fcpxml_str)
+        output_path.write_text(current_xml)
+        self.workspace.get_final_fcpxml_path().write_text(current_xml)
         return output_path
 
-    async def _call_gemini(self, prompt: str) -> str:
-        # GeminiGenaiManager.LLM_request() with text output (not structured)
-        # FCPXML is raw XML, not JSON
+    async def _enhance(self, current_xml: str, storyboard: Storyboard,
+                       clips: List[RetrievedClip], media_dir: Path,
+                       iteration: int, errors: List[str] = None) -> str:
+        """
+        LLM call: given the current FCPXML (valid scaffold or previous attempt),
+        add enhancements or fix errors. Returns raw XML string.
+
+        On first call (iteration=0): add transitions, audio lanes, narration/music
+        On subsequent calls: fix the provided compiler errors
+        """
+        # Uses GeminiGenaiManager.LLM_request() with text output (not structured JSON)
+        # Response is extracted from the text — strip markdown code fences if present
 ```
+
+**Enhancement prompt (first pass):**
+```
+You are editing a valid FCPXML 1.10 document. The document below is structurally
+correct. Your job is to ENHANCE it by adding:
+1. Cross-dissolve transitions (12 frames) between spine clips
+2. Narration audio track: lane="-1", role="music.narration", src={narration_path}
+3. Music audio track: lane="-2", role="music", adjust-volume="-12dB", src={music_path}
+4. Subtitles as <caption> elements under each asset-clip if narration is present
+
+RULES (do not break these — the document is currently valid):
+{key rules from fcpxml_formatting_guide.md, condensed}
+
+CURRENT FCPXML:
+{current_xml}
+
+Return ONLY the complete updated FCPXML document. No explanation, no markdown fences.
+```
+
+**Correction prompt (subsequent passes):**
+```
+The FCPXML you produced has validation errors. Fix them.
+
+COMPILER ERRORS:
+{errors joined by newline}
+
+CURRENT (INVALID) FCPXML:
+{current_xml}
+
+Return ONLY the corrected complete FCPXML document. No explanation, no markdown fences.
+```
+
+**Key design decisions:**
+- LLM always edits existing XML, never generates from scratch → smaller surface area for errors
+- Scaffold guarantees correct time math and resource IDs — the hardest parts for LLM to get right
+- Autofix handles the most common LLM mistake (float seconds) without burning an LLM call
+- Fallback to scaffold ensures we always produce something importable, even if plain
+- Compiler errors are passed as structured text so LLM understands exactly what to fix
+- `GeminiGenaiManager.LLM_request()` needs a raw text output mode — add `schema=None` path that returns `response.text` directly (likely already works, just needs verification)
 
 ### 4.10 `src/pipelines/v2/narration/narration_pipeline.py`
 
@@ -1106,11 +1261,14 @@ The `run_planning_loop` function creates the workspace, loop, and broadcasts eve
 18. `src/app.py` — add `WS /v2/session/{project_name}`, `POST /v2/plan`
 
 ### Phase 3 — FCPXML Generation
-19. `src/pipelines/v2/fcpxml/fcpxml_validator.py`
-20. `src/pipelines/v2/planning/planning_prompts.py` — add `GENERATE_FCPXML_*` prompts
-21. `src/pipelines/v2/fcpxml/fcpxml_agent.py`
-22. `src/schema.py` — add `V2GenerateFcpxmlRequest/Response`
-23. `src/app.py` — add `POST /v2/generate_fcpxml`
+19. Obtain Apple FCPXML 1.10 DTD → save to `context/fcpxml_1_10.dtd` (see §4.8)
+20. `src/pipelines/v2/fcpxml/fcpxml_scaffold.py` — programmatic baseline (adapt from `fcpxml_exporter.py`)
+21. `src/pipelines/v2/fcpxml/fcpxml_compiler.py` — 3-layer validator + autofix
+22. `src/pipelines/v2/planning/planning_prompts.py` — add `GENERATE_FCPXML_*` prompts
+23. `src/pipelines/v2/fcpxml/fcpxml_agent.py` — hybrid enhance → compile → correct loop
+24. `src/schema.py` — add `V2GenerateFcpxmlRequest/Response`
+25. `src/app.py` — add `POST /v2/generate_fcpxml`
+26. **Experiment:** test LLM FCPXML enhancement quality on real storyboard; tune prompts and compiler error messages based on actual failure modes
 
 ### Phase 4 — On-Demand Tools
 24. `src/pipelines/v2/narration/narration_pipeline.py`
