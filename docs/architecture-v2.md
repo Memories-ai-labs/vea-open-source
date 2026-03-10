@@ -213,125 +213,174 @@ Response: { "session_id": "googleio", "gist": "...", "status": "ready" }
 
 **Goal:** Build a complete, high-quality storyboard by iteratively querying the video and refining the plan. Max 4–5 iterations.
 
-### 5.1 Agent Tools
+### 5.1 Schemas
 
-The planning loop gives Gemini access to two tools expressed as structured output schemas:
+Each Gemini call in the loop is focused on a single task. The loop uses three distinct structured output schemas:
 
 ```python
+# --- Call A: Decide what information is needed ---
 class ChatTool(BaseModel):
-    question: str          # Question to ask Memories.ai Chat API
-    purpose: str           # Why this information is needed for the plan
+    question: str        # Question to ask Memories.ai Chat API
+    purpose: str         # Why this is needed for the plan
 
 class SearchTool(BaseModel):
-    query: str             # Semantic search query for clip retrieval
-    purpose: str           # What shot this clip is intended to fill
-    target_duration_sec: float  # Approximate desired clip length
+    query: str                   # Semantic search query
+    purpose: str                 # What shot this fills
+    target_duration_sec: float   # Desired clip length
 
-class PlanningDecision(BaseModel):
-    reasoning: str                    # Gemini's analysis of current state
-    chat_calls: List[ChatTool]        # Questions to ask about the video
-    search_calls: List[SearchTool]    # Clips to search for
-    updated_storyboard: Storyboard    # Revised plan incorporating new info
-    is_satisfied: bool                # True = stop iterating
-    open_questions: List[str]         # Things still uncertain (for next iter)
+class ToolCallPlan(BaseModel):
+    reasoning: str               # Text analysis of current gaps (free-form)
+    chat_calls: List[ChatTool]   # Questions to ask about the video
+    search_calls: List[SearchTool]  # Clips to search for
+    should_stop: bool            # True = plan is complete, skip tool calls
+
+# --- Call B: Update storyboard with new evidence ---
+class Shot(BaseModel):
+    id: str
+    purpose: str
+    search_query: str
+    retrieved_clip: Optional[RetrievedClip]
+    narration: Optional[str]
+    priority: Literal["narration", "clip_audio", "clip_video"]
+    duration_seconds: float
+
+class Storyboard(BaseModel):
+    iteration: int
+    target_duration_seconds: float
+    theme: str
+    narrative_arc: str
+    shots: List[Shot]
+    open_questions: List[str]   # Remaining uncertainties, carried to next iter
+    notes: str
 ```
 
 ### 5.2 Loop Structure
+
+Each iteration makes **two focused Gemini calls**: one to decide what tools to call (text reasoning + structured tool list), and one to update the storyboard after seeing the results. This mirrors the pattern used elsewhere in the codebase (e.g., `plan_questions.py` + `gather_information.py` + `plan_shots.py` as separate focused calls).
 
 ```python
 MAX_ITERATIONS = 5
 iteration = 0
 
 while iteration < MAX_ITERATIONS:
-    # Check for pause signal from dashboard (WebSocket)
+    # --- Check for pause signal from dashboard ---
     if pause_event.is_set():
         user_input = await wait_for_user_input()
-        inject_into_context(user_input)
+        accumulated_context += f"\n\n[USER INPUT at iteration {iteration}]: {user_input}"
         pause_event.clear()
 
-    # Gemini reviews state and decides what to do
-    decision = await gemini.plan(
-        prompt=user_prompt,
+    # --- Gemini Call A: Decide what tools to call ---
+    # Input:  user_prompt + gist + accumulated_context + current_storyboard
+    # Output: ToolCallPlan (reasoning + list of chat/search calls)
+    tool_plan = await decide_tool_calls(
+        user_prompt=user_prompt,
         gist=session.gist,
-        context=accumulated_context,    # All Q&A so far
-        storyboard=current_storyboard,  # Current plan
-        retrieved_clips=clips_so_far,
+        context=accumulated_context,
+        storyboard=current_storyboard,
         iteration=iteration,
         max_iterations=MAX_ITERATIONS,
     )
 
-    # Execute tool calls in parallel
-    chat_results = await asyncio.gather(*[
-        memories.chat(video_nos, call.question)
-        for call in decision.chat_calls
-    ])
-    search_results = await asyncio.gather(*[
-        memories.search(call.query, video_nos, top_k=5)
-        for call in decision.search_calls
-    ])
+    await ws_broadcast({"type": "tool_plan", "iteration": iteration,
+                        "reasoning": tool_plan.reasoning,
+                        "calls": tool_plan.chat_calls + tool_plan.search_calls})
 
-    # Update state
-    accumulated_context += format_results(chat_results, search_results)
-    current_storyboard = decision.updated_storyboard
-    clips_so_far = merge_clips(clips_so_far, search_results)
-
-    # Emit live update to dashboard
-    await ws_broadcast({
-        "type": "iteration_complete",
-        "iteration": iteration,
-        "storyboard": current_storyboard,
-        "new_context": format_results(chat_results, search_results),
-        "tool_calls": decision.chat_calls + decision.search_calls,
-    })
-
-    # Save snapshot
-    save_iteration_snapshot(iteration, decision)
-    iteration += 1
-
-    if decision.is_satisfied:
+    if tool_plan.should_stop:
         break
+
+    # --- Execute tool calls in parallel ---
+    chat_results, search_results = await asyncio.gather(
+        asyncio.gather(*[
+            memories.chat(video_nos, call.question, session_id=session.memories_session_id)
+            for call in tool_plan.chat_calls
+        ]),
+        asyncio.gather(*[
+            memories.search(call.query, video_nos, top_k=5)
+            for call in tool_plan.search_calls
+        ]),
+    )
+
+    await ws_broadcast({"type": "tool_results", "iteration": iteration,
+                        "chat": format_chat_results(chat_results),
+                        "clips_found": len(flatten(search_results))})
+
+    # Append all new evidence to context
+    new_evidence = format_evidence(tool_plan, chat_results, search_results)
+    accumulated_context += f"\n\n--- Iteration {iteration} Evidence ---\n{new_evidence}"
+    clips_so_far = merge_and_deduplicate(clips_so_far, search_results)
+
+    # --- Gemini Call B: Update storyboard with new evidence ---
+    # Input:  user_prompt + gist + full accumulated_context (now includes new evidence)
+    #         + current_storyboard + all retrieved clips
+    # Output: Storyboard (structured, replaces current_storyboard)
+    current_storyboard = await update_storyboard(
+        user_prompt=user_prompt,
+        gist=session.gist,
+        context=accumulated_context,
+        storyboard=current_storyboard,
+        all_clips=clips_so_far,
+        iteration=iteration,
+    )
+
+    await ws_broadcast({"type": "storyboard_updated", "iteration": iteration,
+                        "storyboard": current_storyboard})
+
+    save_iteration_snapshot(iteration, tool_plan, current_storyboard)
+    iteration += 1
 
 save_storyboard(current_storyboard)
 save_clips(clips_so_far)
 save_context(accumulated_context)
 ```
 
-### 5.3 Gemini Planning Prompt Structure
+### 5.3 Gemini Call A — Decide Tool Calls
 
-Gemini receives the following in each iteration:
+**Task:** Given the current state, identify what information is still missing and produce a concrete list of Chat questions and Search queries to fill the gaps.
 
+**Output schema:** `ToolCallPlan`
+
+**Prompt structure:**
 ```
-SYSTEM: You are a video editor planning an edit. You have access to a video
-indexed by Memories.ai. You can ask questions about the video (Chat API)
-and retrieve specific clips (Search API). Your goal is to build a complete
-storyboard matching the user's prompt.
+SYSTEM: You are a video editor planning an edit. Review the current storyboard
+and context, identify gaps, and decide what questions to ask or clips to search
+for. Do NOT update the storyboard — only produce the list of tool calls needed.
 
 USER PROMPT: {user_prompt}
+VIDEO GIST: {gist}
+ACCUMULATED CONTEXT: {accumulated_context}
+CURRENT STORYBOARD: {storyboard_json}
+RETRIEVED CLIPS SO FAR: {clips_summary}
 
-VIDEO GIST:
-{gist}
+This is iteration {n} of {max}.
+{"This is your last iteration — only call tools if truly critical." if n == max-1 else ""}
 
-ACCUMULATED CONTEXT (from previous questions):
-{accumulated_context}
-
-CURRENT STORYBOARD (iteration {n} of {max}):
-{current_storyboard_json}
-
-RETRIEVED CLIPS SO FAR:
-{clips_summary}
-
-INSTRUCTIONS:
-- Review the current storyboard and identify gaps or weak spots.
-- Use chat_calls to get information you're missing.
-- Use search_calls to find clips for shots that aren't yet filled, or to
-  find better alternatives to weak clips.
-- Update the storyboard to reflect what you've learned.
-- If the storyboard is complete and all key shots have good clips,
-  set is_satisfied=true.
-- This is iteration {n} of {max}. {"This is your last iteration." if n == max-1 else ""}
+Output a ToolCallPlan. Set should_stop=true if the storyboard is already
+complete and no further information is needed.
 ```
 
-### 5.4 Clip Anti-Clustering (carried forward from v1)
+### 5.4 Gemini Call B — Update Storyboard
+
+**Task:** Given all accumulated context (including the new evidence just retrieved), produce an updated storyboard. Assign retrieved clips to shots, refine narration, update the narrative arc.
+
+**Output schema:** `Storyboard`
+
+**Prompt structure:**
+```
+SYSTEM: You are a video editor. Using all available context and the retrieved
+clips, produce an updated storyboard. Assign the best available clip to each
+shot. Write narration text for each shot. Arrange shots for narrative coherence.
+
+USER PROMPT: {user_prompt}
+VIDEO GIST: {gist}
+ALL CONTEXT (including new evidence): {accumulated_context}
+PREVIOUS STORYBOARD: {storyboard_json}
+ALL RETRIEVED CLIPS: {clips_detail}
+
+Output a complete updated Storyboard. For shots where no good clip was found,
+keep them in open_questions for the next iteration.
+```
+
+### 5.5 Clip Anti-Clustering (carried forward from v1)
 
 After each search batch, apply:
 - **Score threshold:** drop clips with score < 0.3
@@ -339,14 +388,14 @@ After each search batch, apply:
 - **Temporal diversity:** if >30% of clips cluster in a 2-minute window, prune to top-scored
 - **Minimum gap:** enforce 2+ second gap between consecutive clips from the same file
 
-### 5.5 Session Continuity
+### 5.6 Session Continuity
 
 On resume (workspace already has `storyboard.json`, `clips.json`, `context.md`):
 - Load existing state into loop
 - If new user prompt provided, inject it as context and continue iterating
 - If `iteration_count` >= MAX_ITERATIONS, start a fresh planning round from the existing storyboard
 
-### 5.6 API Endpoint
+### 5.7 API Endpoint
 
 ```
 POST /v2/plan
