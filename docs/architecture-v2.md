@@ -339,11 +339,67 @@ save_context(accumulated_context)
 
 **Output schema:** `ToolCallPlan`
 
+**Memories.ai Tool Documentation (injected into system prompt)**
+
+Gemini must understand what each Memories.ai tool does, what inputs it expects, and what it returns. This is injected as a static block in the Call A system prompt:
+
+```
+MEMORIES.AI TOOLS AVAILABLE:
+
+--- CHAT API ---
+Use for: Understanding what happens in the video, who appears, what is said,
+when events occur, narrative context, relationships between moments.
+Input: A natural language question about the video.
+Returns: A free-text answer synthesized from the video's indexed content.
+         May include rough timestamp references (treat as approximate guides,
+         not frame-accurate — use Search API for precise clip retrieval).
+
+Good Chat questions:
+  "What are the top 3 most energetic or surprising moments in this video?"
+  "Who are the main speakers and when do they appear?"
+  "Describe what happens during the demo of [feature name]."
+  "What does the presenter say about [topic] and approximately when?"
+  "What is the emotional tone of the opening 5 minutes?"
+  "Are there any moments where the audience reacts strongly?"
+
+Bad Chat questions (too vague or mismatched to video content):
+  "What is this video about?" (use the gist instead)
+  "Give me a clip from 00:42" (use Search API for retrieval)
+  "List all scenes" (too broad, use for specific information gaps only)
+
+--- SEARCH API ---
+Use for: Finding specific clips matching a visual or audio description.
+         Returns clips with accurate start/end timestamps and relevance scores.
+Input: A short, concrete semantic query describing what should be seen or heard.
+       Write as if describing what a viewer would observe, not an abstract concept.
+Returns: List of clips with video_no, start_seconds, end_seconds, score, description.
+         Timestamps are accurate and suitable for FCPXML use.
+
+Good Search queries:
+  "presenter standing at podium on stage in front of large audience"
+  "phone screen showing AI assistant responding to spoken question"
+  "two people laughing and reacting with surprise"
+  "aerial drone shot of city skyline at night"
+  "close-up of hands typing on laptop keyboard"
+  "product demo showing new feature being demonstrated on screen"
+
+Bad Search queries (too abstract, too long, or narrative-level):
+  "the most exciting moment" (not visual/concrete)
+  "AI announcement that surprised everyone" (too abstract)
+  "when the presenter talks about the future of AI and what it means" (too long)
+
+Use Chat API to understand what you're looking for.
+Use Search API to actually retrieve the clip once you know what it looks like.
+```
+
 **Prompt structure:**
 ```
-SYSTEM: You are a video editor planning an edit. Review the current storyboard
-and context, identify gaps, and decide what questions to ask or clips to search
-for. Do NOT update the storyboard — only produce the list of tool calls needed.
+SYSTEM: You are a video editor planning an edit. You have two tools:
+the Memories.ai Chat API (for understanding) and Search API (for clip retrieval).
+Review the current storyboard, identify gaps, and output the tool calls needed
+to fill them. Do NOT update the storyboard — only produce the tool call list.
+
+{MEMORIES_AI_TOOL_DOCS}  ← static block above, always included
 
 USER PROMPT: {user_prompt}
 VIDEO GIST: {gist}
@@ -357,6 +413,11 @@ This is iteration {n} of {max}.
 Output a ToolCallPlan. Set should_stop=true if the storyboard is already
 complete and no further information is needed.
 ```
+
+> **Implementation note:** `MEMORIES_AI_TOOL_DOCS` should live in
+> `src/pipelines/v2/planning/planning_prompts.py` as a module-level constant,
+> separate from the dynamic parts of the prompt. Update it if the Memories.ai
+> API changes (e.g., new endpoints, updated response format).
 
 ### 5.4 Gemini Call B — Update Storyboard
 
