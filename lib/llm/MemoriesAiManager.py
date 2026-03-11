@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
 from lib.utils.metrics_collector import metrics_collector
 
 
@@ -264,7 +265,7 @@ class MemoriesAiManager:
         response = await self._request(
             "POST",
             "/serve/api/v1/list_videos",
-            {"video_name": video_name},
+            {"video_name": quote(video_name)},
         )
 
         if not response.get("success"):
@@ -274,8 +275,8 @@ class MemoriesAiManager:
         if not videos:
             return None
 
-        # Return the first match
-        video = videos[0]
+        # Prefer PARSE over UNPARSE if multiple matches exist
+        video = next((v for v in videos if v.get("status") == "PARSE"), videos[0])
         # API returns snake_case (video_no) not camelCase (videoNo)
         status = VideoStatus(
             video_no=video.get("video_no", "") or video.get("videoNo", ""),

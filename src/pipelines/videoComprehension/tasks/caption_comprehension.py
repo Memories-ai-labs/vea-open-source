@@ -198,7 +198,7 @@ class CaptionComprehension:
 
         # Wait for indexing
         print("[CAPTION COMPREHENSION] Waiting for video processing...")
-        await self.memories.wait_for_ready(video_no, timeout=600)
+        await self.memories.wait_for_ready(video_no, timeout=3600)
 
         return video_no
 

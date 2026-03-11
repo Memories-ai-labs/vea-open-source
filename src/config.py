@@ -73,6 +73,8 @@ _setup_api_keys(_config)
 VIDEOS_DIR = Path(_config.get("paths", {}).get("videos_dir", "data/videos"))
 INDEXING_DIR = Path(_config.get("paths", {}).get("indexing_dir", "data/indexing"))
 OUTPUTS_DIR = Path(_config.get("paths", {}).get("outputs_dir", "data/outputs"))
+WORKSPACES_DIR = Path(_config.get("paths", {}).get("workspaces_dir", "data/workspaces"))
+V2_API_PREFIX = "/video-edit/v2"
 
 # --- Optional Features ---
 _features = _config.get("optional_features", {})
@@ -110,7 +112,7 @@ def get_storage_mode() -> str:
 
 def ensure_local_directories():
     """Create local storage directories."""
-    dirs = [VIDEOS_DIR, INDEXING_DIR, OUTPUTS_DIR]
+    dirs = [VIDEOS_DIR, INDEXING_DIR, OUTPUTS_DIR, WORKSPACES_DIR]
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
-    print(f"[CONFIG] Local directories ready: {VIDEOS_DIR}, {INDEXING_DIR}, {OUTPUTS_DIR}")
+    print(f"[CONFIG] Local directories ready: {VIDEOS_DIR}, {INDEXING_DIR}, {OUTPUTS_DIR}, {WORKSPACES_DIR}")

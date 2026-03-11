@@ -3,24 +3,33 @@
 import asyncio
 import logging
 import traceback
+from pathlib import Path
 from typing import Dict, List, Optional
 import os
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.websockets import WebSocket, WebSocketDisconnect
 
 from lib.oss.storage_factory import get_storage_client
 from lib.llm.MemoriesAiManager import MemoriesAiManager, create_memories_manager
+from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from src.schema import (
     MovieFile,
     IndexRequest,
     IndexResponse,
     FlexibleResponseRequest,
     FlexibleResponseResult,
-    ShortsRequest,
-    ShortsResponse,
-    ScreenplayRequest,
-    ScreenplayResponse,
-    QualityAssessmentRequest,
-    QualityAssessmentResponse,
+    V2IndexRequest,
+    V2IndexResponse,
+    V2PlanRequest,
+    V2GenerateFcpxmlRequest,
+    V2GenerateFcpxmlResponse,
+    V2NarrationRequest,
+    V2MusicRequest,
+    V2CropRequest,
+    V2RenderRequest,
+    V2RenderResponse,
+    V2ResolveStatusResponse,
 )
 
 from src.config import (
@@ -29,13 +38,16 @@ from src.config import (
     VIDEOS_DIR,
     get_storage_mode,
     ensure_local_directories,
+    V2_API_PREFIX,
+    WORKSPACES_DIR,
 )
+from src.pipelines.v2.workspace import WorkspaceManager
+from src.pipelines.v2.comprehension.lightweight_comprehension import LightweightComprehension
+from src.pipelines.v2.planning.iterative_planning_loop import IterativePlanningLoop
+from src.pipelines.v2.fcpxml.fcpxml_agent import generate_fcpxml
 
 from src.pipelines.videoComprehension.comprehensionPipeline import ComprehensionPipeline
 from src.pipelines.flexibleResponse.flexibleResponsePipeline import FlexibleResponsePipeline
-from src.pipelines.movieToShort.movie_to_short_pipeline import MovieToShortsPipeline
-from src.pipelines.screenplay.screenplay_pipeline import ScreenplayPipeline
-from src.pipelines.qualityAnalysis.quality_assesment_pipeline import QualityAssessmentPipeline
 
 
 # --- Initialize logging ---
@@ -44,6 +56,12 @@ logger = logging.getLogger(__name__)
 
 # --- Initialize FastAPI app ---
 app = FastAPI()
+
+# --- Serve React dashboard ---
+_DASHBOARD_DIST = Path(__file__).parent.parent / "dashboard" / "dist"
+if _DASHBOARD_DIST.exists():
+    app.mount("/app", StaticFiles(directory=str(_DASHBOARD_DIST), html=True), name="dashboard")
+    logger.info(f"Dashboard served from {_DASHBOARD_DIST}")
 
 # --- Initialize Storage client (local or cloud based on config) ---
 storage_client = get_storage_client()
@@ -66,6 +84,18 @@ try:
 except Exception as e:
     logger.warning(f"Failed to initialize Memories.ai client: {e}")
 
+# --- Initialize Gemini client ---
+try:
+    gemini_manager = GeminiGenaiManager()
+    logger.info("Gemini client initialized")
+except Exception as e:
+    gemini_manager = None
+    logger.warning(f"Failed to initialize Gemini client: {e}")
+
+# --- Active planning sessions (project_name → asyncio state) ---
+# Each entry: {event_queue, pause_event, inject_queue, task}
+_planning_sessions: Dict[str, Dict] = {}
+
 # Caption API callback URL - loaded from config.json api_keys section
 # Set to your public ngrok/server URL, e.g., "https://xxx.ngrok-free.app/webhooks/memories/caption"
 _callback_url = os.environ.get("MEMORIES_CAPTION_CALLBACK_URL", "")
@@ -79,6 +109,534 @@ else:
 @app.get("/")
 async def root():
     return {"message": "FastAPI inference service is running."}
+
+
+# ─── V2: Project management ───────────────────────────────────────────────────
+
+@app.get(f"{V2_API_PREFIX}/projects")
+async def v2_list_projects():
+    """
+    List all project workspaces, including ones with footage but not yet indexed.
+    The dashboard uses this to show the project browser.
+    """
+    projects = WorkspaceManager.list_projects(WORKSPACES_DIR)
+    return {"projects": projects}
+
+
+@app.post(f"{V2_API_PREFIX}/projects/create")
+async def v2_create_project(project_name: str):
+    """
+    Create an empty project workspace directory with the standard layout.
+    After creation, drop footage into  data/workspaces/{project_name}/footage/
+    and then call /v2/index.
+    """
+    if not project_name or not project_name.replace("-", "").replace("_", "").isalnum():
+        raise HTTPException(
+            status_code=400,
+            detail="project_name must contain only letters, numbers, hyphens, and underscores."
+        )
+    workspace = WorkspaceManager(project_name, WORKSPACES_DIR)
+    if workspace.dir_exists():
+        return {"status": "exists", "project_name": project_name, "path": str(workspace.root)}
+    workspace.create()
+    return {
+        "status": "created",
+        "project_name": project_name,
+        "path": str(workspace.root),
+        "next_step": f"Drop footage into {workspace.get_footage_dir()}, then call /v2/index",
+    }
+
+
+@app.post(f"{V2_API_PREFIX}/index", response_model=V2IndexResponse)
+async def v2_index(request: V2IndexRequest):
+    """
+    V2: Lightweight video comprehension.
+    Uploads to Memories.ai (or reuses cached video_no), gets a broad gist.
+    Much faster than v1 /index — no scene-by-scene analysis.
+
+    source_dir is optional. If omitted, footage is read from the workspace's
+    footage/ subdirectory (data/workspaces/{project_name}/footage/).
+    """
+    try:
+        workspace = WorkspaceManager(request.project_name, WORKSPACES_DIR)
+
+        # Auto-detect source_dir from workspace footage/ when not explicitly provided
+        source_dir = request.source_dir
+        if not source_dir:
+            footage_files = workspace.scan_footage()
+            if footage_files:
+                source_dir = str(workspace.get_footage_dir())
+                logger.info(f"[V2 INDEX] Auto-detected footage dir: {source_dir} ({len(footage_files)} files)")
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No source_dir provided and no footage found in {workspace.get_footage_dir()}. "
+                           f"Drop video files there or pass source_dir explicitly."
+                )
+
+        logger.info(f"[V2 INDEX] project={request.project_name} source={source_dir} fresh={request.start_fresh}")
+
+        if not memories_manager:
+            raise HTTPException(status_code=500, detail="Memories.ai not configured. Set MEMORIES_API_KEY.")
+
+        pipeline = LightweightComprehension(
+            project_name=request.project_name,
+            source_dir=source_dir,
+            memories=memories_manager,
+            workspace=workspace,
+        )
+        session = await pipeline.run(start_fresh=request.start_fresh)
+
+        return V2IndexResponse(
+            project_name=request.project_name,
+            video_nos=[v.video_no for v in session.videos],
+            gist=session.gist,
+            status=session.status,
+        )
+    except Exception as e:
+        logger.error(f"[V2 INDEX] Error: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(f"{V2_API_PREFIX}/plan")
+async def v2_plan(request: V2PlanRequest):
+    """
+    V2: Start the iterative planning loop for a project.
+
+    Launches planning as a background task. Connect to the WebSocket endpoint
+    WS /video-edit/v2/session/{project_name} to receive live events.
+
+    Returns immediately with {"status": "started"} or {"status": "already_running"}.
+    """
+    if not memories_manager:
+        raise HTTPException(status_code=500, detail="Memories.ai not configured. Set MEMORIES_API_KEY.")
+    if not gemini_manager:
+        raise HTTPException(status_code=500, detail="Gemini not configured. Check GCP credentials.")
+
+    project_name = request.project_name
+
+    # Check for existing running session
+    session_state = _planning_sessions.get(project_name)
+    if session_state and not session_state["task"].done():
+        return {"status": "already_running", "project_name": project_name}
+
+    # Load workspace — must have been indexed first
+    workspace = WorkspaceManager(project_name, WORKSPACES_DIR)
+    if not workspace.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found. Run /v2/index first.")
+
+    try:
+        session = workspace.load_session()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load session: {e}")
+
+    if not session.videos:
+        raise HTTPException(status_code=400, detail="No videos indexed for this project.")
+
+    # Set up async coordination primitives
+    event_queue: asyncio.Queue = asyncio.Queue()
+    pause_event: asyncio.Event = asyncio.Event()
+    inject_queue: asyncio.Queue = asyncio.Queue()
+
+    video_nos = [v.video_no for v in session.videos]
+
+    loop_obj = IterativePlanningLoop(
+        project_name=project_name,
+        user_prompt=request.prompt,
+        workspace=workspace,
+        memories=memories_manager,
+        gemini=gemini_manager,
+        video_nos=video_nos,
+        video_entries=session.videos,
+        max_iterations=request.max_iterations,
+        target_duration_seconds=request.target_duration_seconds,
+        event_queue=event_queue,
+        pause_event=pause_event,
+        inject_prompt_queue=inject_queue,
+    )
+
+    async def _run_planning():
+        try:
+            workspace.update_status("planning")
+            await loop_obj.run()
+        except Exception as e:
+            logger.error(f"[V2 PLAN] Planning loop error for {project_name}: {e}")
+            logger.error(traceback.format_exc())
+            await event_queue.put({"event_type": "error", "data": {"message": str(e)}})
+
+    task = asyncio.create_task(_run_planning())
+    _planning_sessions[project_name] = {
+        "task": task,
+        "event_queue": event_queue,
+        "pause_event": pause_event,
+        "inject_queue": inject_queue,
+    }
+
+    logger.info(f"[V2 PLAN] Started planning for project={project_name}")
+    return {"status": "started", "project_name": project_name}
+
+
+@app.post(f"{V2_API_PREFIX}/plan/pause")
+async def v2_plan_pause(project_name: str):
+    """Pause the running planning loop for a project."""
+    state = _planning_sessions.get(project_name)
+    if not state or state["task"].done():
+        raise HTTPException(status_code=404, detail="No active planning session for this project.")
+    state["pause_event"].set()
+    return {"status": "paused", "project_name": project_name}
+
+
+@app.post(f"{V2_API_PREFIX}/plan/resume")
+async def v2_plan_resume(project_name: str):
+    """Resume a paused planning loop."""
+    state = _planning_sessions.get(project_name)
+    if not state or state["task"].done():
+        raise HTTPException(status_code=404, detail="No active planning session for this project.")
+    state["pause_event"].clear()
+    return {"status": "resumed", "project_name": project_name}
+
+
+@app.post(f"{V2_API_PREFIX}/plan/inject")
+async def v2_plan_inject(project_name: str, prompt: str):
+    """Inject a user prompt into the running planning loop."""
+    state = _planning_sessions.get(project_name)
+    if not state or state["task"].done():
+        raise HTTPException(status_code=404, detail="No active planning session for this project.")
+    await state["inject_queue"].put(prompt)
+    return {"status": "injected", "project_name": project_name, "prompt": prompt}
+
+
+@app.get(f"{V2_API_PREFIX}/plan/status")
+async def v2_plan_status(project_name: str):
+    """Get current planning status for a project."""
+    workspace = WorkspaceManager(project_name, WORKSPACES_DIR)
+    if not workspace.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
+    session = workspace.load_session()
+    storyboard = workspace.load_storyboard()
+    clips = workspace.load_clips()
+
+    state = _planning_sessions.get(project_name)
+    running = bool(state and not state["task"].done())
+
+    return {
+        "project_name": project_name,
+        "status": session.status,
+        "running": running,
+        "iteration": session.planning.iteration_count,
+        "shots": len(storyboard.shots) if storyboard else 0,
+        "clips": len(clips),
+    }
+
+
+@app.post(f"{V2_API_PREFIX}/generate_fcpxml", response_model=V2GenerateFcpxmlResponse)
+async def v2_generate_fcpxml(request: V2GenerateFcpxmlRequest):
+    """
+    V2: Generate FCPXML for a project that has completed planning.
+
+    Runs the scaffold → LLM enhance → validate → correct loop.
+    Uses narration and music from workspace if present.
+    Returns the path to the generated .fcpxml file.
+    """
+    if not gemini_manager:
+        raise HTTPException(status_code=500, detail="Gemini not configured.")
+
+    project_name = request.project_name
+    workspace = WorkspaceManager(project_name, WORKSPACES_DIR)
+    if not workspace.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
+
+    try:
+        storyboard = workspace.load_storyboard()
+        if not storyboard:
+            raise HTTPException(status_code=400, detail="No storyboard — run /v2/plan first.")
+
+        # Optional narration / music (set by on-demand tools later; skip if absent)
+        narration_path_obj = workspace.get_narration_path()
+        narration_path = str(narration_path_obj) if narration_path_obj.exists() else None
+
+        music_path_obj = workspace.get_music_path()
+        music_path = str(music_path_obj) if music_path_obj.exists() else None
+
+        narration_duration = 0.0
+        music_duration = 0.0
+
+        if narration_path:
+            from lib.utils.media import get_video_duration
+            try:
+                narration_duration = get_video_duration(narration_path)
+            except Exception:
+                narration_duration = 0.0
+
+        if music_path:
+            from lib.utils.media import get_video_duration
+            try:
+                music_duration = get_video_duration(music_path)
+            except Exception:
+                music_duration = 0.0
+
+        fcpxml_path = await generate_fcpxml(
+            gemini_manager,
+            workspace,
+            narration_path=narration_path,
+            narration_duration=narration_duration,
+            music_path=music_path,
+            music_duration=music_duration,
+        )
+
+        return V2GenerateFcpxmlResponse(project_name=project_name, fcpxml_path=fcpxml_path)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[V2 FCPXML] Error: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.websocket(f"{V2_API_PREFIX}/session/{{project_name}}")
+async def v2_session_ws(websocket: WebSocket, project_name: str):
+    """
+    WebSocket endpoint for live planning dashboard updates.
+
+    Connect here to receive a stream of PlanningEvent JSON objects while the
+    planning loop is running. The connection stays open until the loop finishes
+    or the client disconnects.
+
+    Also accepts incoming messages:
+        {"action": "pause"}
+        {"action": "resume"}
+        {"action": "inject", "prompt": "..."}
+    """
+    await websocket.accept()
+    logger.info(f"[WS] Client connected for project={project_name}")
+
+    state = _planning_sessions.get(project_name)
+    if not state:
+        await websocket.send_json({"event_type": "error", "data": {"message": "No active planning session."}})
+        await websocket.close()
+        return
+
+    event_queue: asyncio.Queue = state["event_queue"]
+
+    # Drain events and forward to client; also handle incoming control messages
+    try:
+        while True:
+            # Forward any queued events
+            while not event_queue.empty():
+                try:
+                    event = event_queue.get_nowait()
+                    if hasattr(event, "to_dict"):
+                        payload = event.to_dict()
+                    elif isinstance(event, dict):
+                        payload = event
+                    else:
+                        payload = {"event_type": "unknown", "data": str(event)}
+                    await websocket.send_json(payload)
+                    if payload.get("event_type") in ("done", "error"):
+                        await websocket.close()
+                        return
+                except asyncio.QueueEmpty:
+                    break
+
+            # Check for incoming control messages (non-blocking)
+            try:
+                msg = await asyncio.wait_for(websocket.receive_json(), timeout=0.1)
+                action = msg.get("action")
+                if action == "pause":
+                    state["pause_event"].set()
+                    await websocket.send_json({"event_type": "paused", "data": {}})
+                elif action == "resume":
+                    state["pause_event"].clear()
+                    await websocket.send_json({"event_type": "resumed", "data": {}})
+                elif action == "inject":
+                    prompt = msg.get("prompt", "")
+                    if prompt:
+                        await state["inject_queue"].put(prompt)
+                        await websocket.send_json({"event_type": "prompt_injected", "data": {"prompt": prompt}})
+            except asyncio.TimeoutError:
+                pass  # No message from client — normal
+
+            # If task is done and queue is empty, close
+            if state["task"].done() and event_queue.empty():
+                await websocket.send_json({"event_type": "session_ended", "data": {}})
+                break
+
+            await asyncio.sleep(0.05)
+
+    except WebSocketDisconnect:
+        logger.info(f"[WS] Client disconnected from project={project_name}")
+    except Exception as e:
+        logger.error(f"[WS] Error in WebSocket handler: {e}")
+
+
+@app.post(f"{V2_API_PREFIX}/narration")
+async def v2_narration(request: V2NarrationRequest):
+    """
+    V2 On-demand: Generate narration script + audio for a project.
+
+    Requires a completed storyboard (run /v2/plan first).
+    """
+    if not gemini_manager:
+        raise HTTPException(status_code=500, detail="Gemini not configured.")
+
+    workspace = WorkspaceManager(request.project_name, WORKSPACES_DIR)
+    if not workspace.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{request.project_name}' not found.")
+
+    try:
+        from src.pipelines.v2.narration.narration_pipeline import NarrationPipeline
+        session = workspace.load_session()
+        user_prompt = " ".join(session.planning.user_prompts) or "Create an engaging edit"
+        pipeline = NarrationPipeline(gemini_manager, workspace)
+        audio_path = await pipeline.run(
+            user_prompt=user_prompt,
+            override_script=request.override_script,
+        )
+        return {"status": "ok", "project_name": request.project_name, "audio_path": audio_path}
+    except Exception as e:
+        logger.error(f"[V2 NARRATION] Error: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(f"{V2_API_PREFIX}/music")
+async def v2_music(request: V2MusicRequest):
+    """
+    V2 On-demand: Select and download background music for a project.
+    """
+    if not gemini_manager:
+        raise HTTPException(status_code=500, detail="Gemini not configured.")
+
+    workspace = WorkspaceManager(request.project_name, WORKSPACES_DIR)
+    if not workspace.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{request.project_name}' not found.")
+
+    try:
+        from src.pipelines.v2.music.music_pipeline import MusicPipeline
+        session = workspace.load_session()
+        user_prompt = " ".join(session.planning.user_prompts) or ""
+        pipeline = MusicPipeline(gemini_manager, workspace)
+        music_path = await pipeline.run(
+            user_prompt=user_prompt,
+            mood=request.mood,
+            prompt=request.prompt,
+        )
+        if music_path:
+            return {"status": "ok", "project_name": request.project_name, "music_path": music_path}
+        else:
+            return {"status": "skipped", "project_name": request.project_name, "music_path": None}
+    except Exception as e:
+        logger.error(f"[V2 MUSIC] Error: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(f"{V2_API_PREFIX}/crop")
+async def v2_crop(request: V2CropRequest):
+    """
+    V2 On-demand: Inject dynamic crop transforms into existing FCPXML.
+
+    Runs ViNet saliency detection and injects <adjust-transform> elements.
+    Returns path to new FCPXML version with transforms applied.
+    """
+    workspace = WorkspaceManager(request.project_name, WORKSPACES_DIR)
+    if not workspace.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{request.project_name}' not found.")
+
+    try:
+        from src.pipelines.v2.cropping.crop_pipeline import CropPipeline
+        pipeline = CropPipeline(workspace)
+        new_fcpxml_path = await pipeline.run(aspect_ratio=request.aspect_ratio)
+        return {
+            "status": "ok",
+            "project_name": request.project_name,
+            "fcpxml_path": new_fcpxml_path,
+        }
+    except Exception as e:
+        logger.error(f"[V2 CROP] Error: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(f"{V2_API_PREFIX}/render", response_model=V2RenderResponse)
+async def v2_render(request: V2RenderRequest):
+    """
+    V2: Render FCPXML via DaVinci Resolve Studio.
+
+    Requires:
+    - DaVinci Resolve Studio running as -nogui daemon
+    - A valid FCPXML in the workspace (run /v2/generate_fcpxml first)
+    - Media files accessible from workspace/media/
+
+    quality: "preview" (H.264 MP4) or "final" (ProRes 422 QuickTime)
+    """
+    workspace = WorkspaceManager(request.project_name, WORKSPACES_DIR)
+    if not workspace.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{request.project_name}' not found.")
+
+    quality = request.quality if request.quality in ("preview", "final") else "preview"
+
+    try:
+        from lib.utils.resolve_render import ResolveRenderer
+
+        # Find latest FCPXML
+        fcpxml_dir = workspace.root / "fcpxml"
+        best_ver = 0
+        fcpxml_path = None
+        for f in fcpxml_dir.glob("edit_v*.fcpxml"):
+            try:
+                ver = int(f.stem.replace("edit_v", ""))
+                if ver > best_ver:
+                    best_ver = ver
+                    fcpxml_path = str(f)
+            except ValueError:
+                pass
+        if not fcpxml_path:
+            final = fcpxml_dir / "edit_final.fcpxml"
+            if final.exists():
+                fcpxml_path = str(final)
+        if not fcpxml_path:
+            raise HTTPException(status_code=400, detail="No FCPXML found — run /v2/generate_fcpxml first.")
+
+        media_dir = str(workspace.get_footage_dir())
+        output_path = str(workspace.get_render_path(quality))
+
+        renderer = ResolveRenderer()
+        rendered = await renderer.render(
+            fcpxml_path=fcpxml_path,
+            media_dir=media_dir,
+            output_path=output_path,
+            quality=quality,
+        )
+
+        workspace.update_status("rendered")
+        return V2RenderResponse(project_name=request.project_name, output_path=rendered)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[V2 RENDER] Error: {e}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{V2_API_PREFIX}/resolve/status", response_model=V2ResolveStatusResponse)
+async def v2_resolve_status():
+    """
+    V2: Check whether DaVinci Resolve Studio is running and accessible.
+    """
+    from lib.utils.resolve_setup import check_resolve_status
+    loop = asyncio.get_event_loop()
+    status = await loop.run_in_executor(None, check_resolve_status)
+    return V2ResolveStatusResponse(
+        running=status.get("running", False),
+        version=status.get("version"),
+        studio=status.get("studio", False),
+        error=status.get("error"),
+    )
+
 
 @app.get(f"{API_PREFIX}/movies", response_model=List[MovieFile])
 async def list_available_movies() -> List[MovieFile]:
@@ -129,69 +687,27 @@ async def index_longform(request: IndexRequest):
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to process video: {str(e)}")
     
-@app.post(f"{API_PREFIX}/flexible_respond", response_model=FlexibleResponseResult)
-async def flexible_respond(request: FlexibleResponseRequest):
+@app.post(f"{API_PREFIX}/generate_edit", response_model=FlexibleResponseResult)
+async def generate_edit(request: FlexibleResponseRequest):
+    """
+    V1: Generate an edited video response from a long-form source video.
+
+    Uses the FlexibleResponsePipeline to extract relevant clips, add narration,
+    music, and dynamic cropping based on the user prompt.
+    """
     try:
-        logger.info(f"Flexible response for: {request.blob_path} with prompt: {request.prompt}")
+        logger.info(f"Generate edit for: {request.blob_path} | prompt: {request.prompt}")
         pipeline = FlexibleResponsePipeline(request.blob_path)
-        response = await pipeline.run(request.prompt, request.video_response, request.original_audio, request.music, request.narration, request.aspect_ratio, request.subtitles, request.snap_to_beat, request.output_path)
+        response = await pipeline.run(
+            request.prompt, request.video_response, request.original_audio,
+            request.music, request.narration, request.aspect_ratio,
+            request.subtitles, request.snap_to_beat, request.output_path
+        )
         return response
     except Exception as e:
-        logger.error(f"Flexible response error: {e}")
+        logger.error(f"Generate edit error: {e}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Flexible response failed: {str(e)}")
-    
-
-@app.post(f"{API_PREFIX}/movie_to_shorts", response_model=ShortsResponse)
-async def movie_to_shorts(request: ShortsRequest):
-    """
-    Generate all 1-minute shorts for a movie using the MovieToShortsPipeline.
-    """
-    try:
-        pipeline = MovieToShortsPipeline(request.blob_path)
-        shorts = await pipeline.run()
-        return ShortsResponse(shorts=shorts)
-    except Exception as e:
-        logger.error(f"Error generating shorts for {request.blob_path}: {e}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Failed to generate shorts: {str(e)}")
-        
-@app.post(f"{API_PREFIX}/screenplay", response_model=ScreenplayResponse)
-async def generate_screenplay(request: ScreenplayRequest):
-    try:
-        logger.info(f"Starting screenplay generation for: {request.blob_path}")
-        pipeline = ScreenplayPipeline(request.blob_path)
-        gcs_output_path = await pipeline.run()
-
-        return ScreenplayResponse(
-            message=f"Screenplay generated for: {request.blob_path}",
-            output_path=gcs_output_path
-        )
-    except Exception as e:
-        logger.error(f"Screenplay generation failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to generate screenplay.")
-
-@app.post(f"{API_PREFIX}/quality_assessment", response_model=QualityAssessmentResponse)
-async def assess_quality(request: QualityAssessmentRequest):
-    """
-    Assess the quality of a generated video using LLM.
-    """
-    try:
-        logger.info(f"Starting quality assessment for: {request.blob_path}")
-        pipeline = QualityAssessmentPipeline(
-            cloud_storage_video_path=request.blob_path,
-            ground_truth_text=request.ground_truth,
-            user_prompt=request.user_prompt,
-        )
-        result = await pipeline.run()
-
-        return QualityAssessmentResponse(
-            message=f"Quality assessment completed for: {request.blob_path}",
-            result=result,
-        )
-    except Exception as e:
-        logger.error(f"Quality assessment failed: {e}")
-        raise HTTPException(status_code=500, detail="Failed to assess video quality.")
+        raise HTTPException(status_code=500, detail=f"Edit generation failed: {str(e)}")
 
 
 # --- Memories.ai Webhook Endpoints ---
@@ -222,7 +738,7 @@ async def memories_caption_callback(request: Request):
         logger.info(f"[MEMORIES WEBHOOK] Saved callback to {output_file}")
 
         # Log response preview
-        response_text = data.get("data", {}).get("response", "")
+        response_text = (data.get("data") or {}).get("response", "") or (data.get("data") or {}).get("text", "")
         if response_text:
             preview = response_text[:500] + "..." if len(response_text) > 500 else response_text
             logger.info(f"[MEMORIES WEBHOOK] Response preview: {preview}")

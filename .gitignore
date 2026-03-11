@@ -45,3 +45,14 @@ benchmark_outputs
 .cache/
 .env
 debug_output/
+
+# V2 workspace sessions (runtime state)
+data/workspaces/
+
+# Debug artifacts
+failed_recaps.txt
+quiz_predictions.txt
+
+# Dashboard
+dashboard/node_modules/
+dashboard/dist/
