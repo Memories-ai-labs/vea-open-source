@@ -17,8 +17,8 @@ from src.pipelines.v2.agent.tools import TOOL_DECLARATIONS, ToolExecutor
 
 logger = logging.getLogger(__name__)
 
-MAX_HISTORY_TURNS = 40  # keep last N turns (user + model pairs)
-MAX_TOOL_ROUNDS = 20    # max tool call rounds per user message
+MAX_HISTORY_TURNS = 80  # keep last N turns (user + model + tool rounds)
+MAX_TOOL_ROUNDS = 40    # max tool call rounds per user message
 
 
 @dataclass
@@ -109,13 +109,19 @@ class AgentSession:
                     pass
 
         # Tool executor — use a wrapper so reassigning self._emit propagates
+        async def _tool_emit(event_type: str, data: dict):
+            await self._emit(event_type, data)
+            # Persist substep events so they survive page refresh
+            if event_type == "refine_progress":
+                self._event_log.append({"type": event_type, "data": data})
+
         self.tools = ToolExecutor(
             memories_manager=memories_manager,
             gemini_manager=gemini_manager,
             workspace=workspace,
             scratchpads=self.scratchpads,
             video_nos=self.video_nos,
-            event_callback=lambda *a, **kw: self._emit(*a, **kw),
+            event_callback=_tool_emit,
         )
 
         # Conversation history (Gemini Content objects)
@@ -334,7 +340,7 @@ class AgentSession:
         # If we hit the max rounds, notify
         logger.warning(f"[AGENT] Hit max tool rounds ({MAX_TOOL_ROUNDS})")
         await self._emit("agent_message", {
-            "text": "I've made several tool calls — let me pause and check in. What would you like me to focus on?",
+            "text": "I've completed this round of work. Let me know if you'd like me to continue or adjust anything.",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
 

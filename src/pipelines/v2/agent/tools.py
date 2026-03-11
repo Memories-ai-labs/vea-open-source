@@ -498,9 +498,10 @@ class ToolExecutor:
         track_descriptions = []
         for i, t in enumerate(tracks[:50]):  # Cap at 50 for context
             attrs = t.get("attributes", {})
-            name = attrs.get("title", attrs.get("name", f"Track {i+1}"))
-            mood = attrs.get("mood", "")
-            genre = attrs.get("genre", "")
+            name = attrs.get("title", f"Track {i+1}")
+            tags = attrs.get("tags", {})
+            mood = ", ".join(tags.get("mood", []))
+            genre = ", ".join(tags.get("genre", []))
             energy = attrs.get("energy", "")
             desc = attrs.get("description", "")
             bpm = attrs.get("bpm", "")
@@ -562,12 +563,13 @@ class ToolExecutor:
         # Get duration
         duration = await self._get_audio_duration(str(music_path))
 
+        tags = track_attrs.get("tags", {})
         return {
             "status": "downloaded",
             "music_path": str(music_path),
             "track_name": track_name,
-            "mood": track_attrs.get("mood", ""),
-            "genre": track_attrs.get("genre", ""),
+            "mood": ", ".join(tags.get("mood", [])),
+            "genre": ", ".join(tags.get("genre", [])),
             "duration_seconds": duration,
         }
 
@@ -807,43 +809,58 @@ def _tts_sync(text: str, output_path: str, api_key: str) -> None:
 
 
 def _fetch_soundstripe_tracks(api_key: str, page_count: int = 3) -> list:
-    """Fetch tracks from Soundstripe API."""
+    """Fetch tracks from Soundstripe API with audio_files sideloaded."""
     import requests
     headers = {
         "Authorization": f"Token {api_key}",
         "Accept": "application/vnd.api+json",
     }
     all_tracks = []
+    # Map audio_file id → mp3 URL from sideloaded includes
+    audio_urls: dict = {}
     for page in range(1, page_count + 1):
         try:
             resp = requests.get(
                 "https://api.soundstripe.com/v1/songs",
                 headers=headers,
-                params={"page[size]": 50, "page[number]": page},
+                params={
+                    "page[size]": 50,
+                    "page[number]": page,
+                    "include": "audio_files",
+                },
                 timeout=15,
             )
             if resp.status_code != 200:
                 break
-            all_tracks.extend(resp.json().get("data", []))
+            body = resp.json()
+            # Collect audio_file URLs from the `included` sideload
+            for inc in body.get("included", []):
+                if inc.get("type") == "audio_files":
+                    versions = inc.get("attributes", {}).get("versions", {})
+                    mp3_url = versions.get("mp3")
+                    if mp3_url:
+                        audio_urls[inc["id"]] = mp3_url
+            all_tracks.extend(body.get("data", []))
         except Exception as e:
             logger.warning(f"[MUSIC] Soundstripe fetch error: {e}")
             break
+
+    # Attach the resolved mp3 URL to each track for easy download later
+    for track in all_tracks:
+        audio_rels = track.get("relationships", {}).get("audio_files", {}).get("data", [])
+        for af in audio_rels:
+            url = audio_urls.get(af.get("id"))
+            if url:
+                track["_mp3_url"] = url
+                break
+
     return all_tracks
 
 
 def _download_soundstripe_track(track: dict, output_path: str) -> bool:
     """Download the mp3 for the selected track."""
     import requests
-    attrs = track.get("attributes", {})
-    versions = attrs.get("versions", [])
-    url = None
-    for v in versions:
-        if isinstance(v, dict):
-            url = v.get("audio_file_url") or v.get("download_url")
-            if url:
-                break
-    if not url:
-        url = attrs.get("mp3_url") or attrs.get("download_url")
+    url = track.get("_mp3_url")
     if not url:
         logger.warning(f"[MUSIC] No download URL found for track {track.get('id')}")
         return False

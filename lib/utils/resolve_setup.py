@@ -162,9 +162,21 @@ def print_setup_instructions() -> None:
 def ensure_pythonpath() -> bool:
     """Add Resolve Modules to sys.path if not already there. Returns True if successful."""
     import sys
+
     api_path = os.environ.get("RESOLVE_SCRIPT_API")
     if not api_path:
-        return False
+        # Fall back to platform defaults
+        if platform.system() == "Darwin":
+            api_path = MACOS_ENV["RESOLVE_SCRIPT_API"]
+            os.environ["RESOLVE_SCRIPT_API"] = api_path
+            os.environ.setdefault("RESOLVE_SCRIPT_LIB", MACOS_ENV["RESOLVE_SCRIPT_LIB"])
+        elif platform.system() == "Linux":
+            api_path = LINUX_ENV["RESOLVE_SCRIPT_API"]
+            os.environ["RESOLVE_SCRIPT_API"] = api_path
+            os.environ.setdefault("RESOLVE_SCRIPT_LIB", LINUX_ENV["RESOLVE_SCRIPT_LIB"])
+        else:
+            return False
+
     modules_path = os.path.join(api_path, "Modules")
     if modules_path not in sys.path:
         sys.path.insert(0, modules_path)
