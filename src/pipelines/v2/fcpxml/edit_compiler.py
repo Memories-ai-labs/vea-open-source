@@ -190,15 +190,23 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
         #     _add_transition(spine, clip.transition_after, fps_frac, fps)
         #     timeline_frames -= trans_frames
 
-    total_duration = Fraction(timeline_frames, 1) / fps_frac
+    spine_total_duration = Fraction(timeline_frames, 1) / fps_frac
+    total_duration = spine_total_duration
     sequence_el.set("duration", _format_fraction_seconds(total_duration))
 
     # --- Place narration segments (lane -1, attached to spine clips) ---
+    # Clamp narration to not extend beyond the spine to avoid black frames.
     spine_clips = [el for el in spine if el.tag == "asset-clip"]
+    spine_end_sec = float(spine_total_duration)
     for seg in edit.narration:
         nar_aid = narration_asset_map.get(seg.file)
         if not nar_aid:
             continue
+        # Skip segments that start beyond the spine
+        if seg.timeline_offset >= spine_end_sec:
+            logger.warning(f"[FCPXML] Narration at {seg.timeline_offset}s starts beyond spine end {spine_end_sec}s — skipping")
+            continue
+
         parent_clip, parent_idx = _find_parent_clip(
             spine_clips, clip_timeline_ranges, seg.timeline_offset, fps_frac
         )
@@ -208,7 +216,10 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
         parent_start_sec = float(Fraction(clip_timeline_ranges[parent_idx][0], 1) / fps_frac)
         rel_offset = seg.timeline_offset - parent_start_sec
 
-        nar_dur = _fraction_from_seconds(seg.duration, fps_hint=fps)
+        # Clamp duration so narration doesn't extend past the spine
+        effective_duration = min(seg.duration, spine_end_sec - seg.timeline_offset)
+
+        nar_dur = _fraction_from_seconds(effective_duration, fps_hint=fps)
         nar_tl_dur, _ = _quantize_duration_to_timeline(nar_dur, fps)
         nar_start = _fraction_from_seconds(seg.start, fps_hint=fps)
         nar_offset = _fraction_from_seconds(rel_offset, fps_hint=fps)
@@ -228,9 +239,11 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
             SubElement(nar_el, "adjust-volume", amount=f"{seg.gain_db:.1f}dB")
 
     # --- Place music (lane -2, attached to first spine clip) ---
+    # Clamp music duration to the spine duration to avoid black frames.
     if edit.music and music_aid and spine_clips:
         mus = edit.music
-        mus_dur_sec = mus.duration if mus.duration > 0 else float(total_duration)
+        mus_dur_sec = mus.duration if mus.duration > 0 else spine_end_sec
+        mus_dur_sec = min(mus_dur_sec, spine_end_sec)  # clamp to spine
         mus_dur = _fraction_from_seconds(mus_dur_sec, fps_hint=fps)
         mus_tl_dur, _ = _quantize_duration_to_timeline(mus_dur, fps)
         mus_start = _fraction_from_seconds(mus.start, fps_hint=fps)

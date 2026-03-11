@@ -107,12 +107,13 @@ class MemoriesAiManager:
         endpoint: str,
         data: Optional[Dict] = None,
         host: Optional[str] = None,
+        params: Optional[Dict] = None,
     ) -> Dict:
         """Make an API request."""
         session = await self._get_session()
         url = f"{host or self.API_HOST}{endpoint}"
 
-        async with session.request(method, url, json=data) as response:
+        async with session.request(method, url, json=data, params=params) as response:
             result = await response.json()
 
             if self.debug:
@@ -449,6 +450,36 @@ class MemoriesAiManager:
             raise RuntimeError(f"[MEMORIES] Delete failed for {video_no}: {response.get('msg')}")
         logger.info(f"[MEMORIES] Deleted video: {video_no}")
         return True
+
+    # -------------------------------------------------------------------------
+    # Transcription API
+    # -------------------------------------------------------------------------
+
+    async def get_audio_transcription(
+        self,
+        video_no: str,
+    ) -> List[Dict]:
+        """
+        Fetch the timestamped audio transcription for a video.
+
+        Returns a list of segments: [{index, content, startTime, endTime}, ...].
+        startTime and endTime are in seconds (as strings from the API).
+        """
+        print(f"[MEMORIES] Fetching audio transcription for {video_no}")
+
+        response = await self._request(
+            "GET",
+            "/serve/api/v1/get_audio_transcription",
+            params={"video_no": video_no},  # GET query params
+        )
+
+        if not response.get("success"):
+            raise RuntimeError(f"[MEMORIES] Audio transcription failed: {response.get('msg')}")
+
+        data = response.get("data", {})
+        transcriptions = data.get("transcriptions", [])
+        print(f"[MEMORIES] Got {len(transcriptions)} transcription segments")
+        return transcriptions
 
     # -------------------------------------------------------------------------
     # Search API

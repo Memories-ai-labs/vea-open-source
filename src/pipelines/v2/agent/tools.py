@@ -167,7 +167,10 @@ TOOL_DECLARATIONS = Tool(
                 "Generate narration voiceover audio from a script. Takes the narration script text "
                 "and produces a single narration.mp3 file in the workspace. Call this ONLY after "
                 "an edit plan exists (so you know clip durations). The user must have requested "
-                "narration — do NOT call this unprompted. Returns the file path and duration."
+                "narration — do NOT call this unprompted. Returns the file path, duration, and a "
+                "transcript with per-sentence timestamps ({text, start, end}). Use the transcript "
+                "to align clips to the narration — adjust clip order and durations so visuals "
+                "match what's being narrated at each moment."
             ),
             parameters={
                 "type": "object",
@@ -457,12 +460,31 @@ class ToolExecutor:
         # Get duration
         duration = await self._get_audio_duration(str(audio_path))
 
+        # Build per-sentence transcript with estimated timestamps.
+        # Pro-rate by word count so the agent can align clips to narration.
+        import re
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', script.strip()) if s.strip()]
+        word_counts = [len(s.split()) for s in sentences]
+        total_words = sum(word_counts) or 1
+        transcript = []
+        cursor = 0.0
+        for sent, wc in zip(sentences, word_counts):
+            sent_dur = duration * (wc / total_words)
+            transcript.append({
+                "text": sent,
+                "start": round(cursor, 2),
+                "end": round(cursor + sent_dur, 2),
+                "word_count": wc,
+            })
+            cursor += sent_dur
+
         return {
             "status": "generated",
             "narration_path": str(audio_path),
             "script_length": len(script),
             "duration_seconds": duration,
             "word_count": len(script.split()),
+            "transcript": transcript,
         }
 
     async def _select_music(self, args: Dict) -> Dict:
@@ -671,7 +693,34 @@ class ToolExecutor:
                 None, lambda: subprocess.run(downsample_cmd, check=True)
             )
 
-            # Step 3: Send to Gemini for analysis (Gemini watches the video + listens to audio directly)
+            # Step 3: Fetch audio transcript from Memories.ai for the clip range
+            clip_transcript = ""
+            transcript_segments = []
+            try:
+                # Get full transcript for the video, filter to our time range
+                video_no = self.video_nos[0] if self.video_nos else None
+                if video_no:
+                    all_segments = await self.memories.get_audio_transcription(video_no)
+                    # Filter to segments overlapping our clip range
+                    for seg in all_segments:
+                        seg_start = float(seg.get("startTime", 0))
+                        seg_end = float(seg.get("endTime", 0))
+                        if seg_end >= source_start and seg_start <= source_end:
+                            transcript_segments.append({
+                                "text": seg.get("content", "").strip(),
+                                "start": seg_start,
+                                "end": seg_end,
+                            })
+                    if transcript_segments:
+                        clip_transcript = "\n".join(
+                            f"[{s['start']:.0f}s–{s['end']:.0f}s] {s['text']}"
+                            for s in transcript_segments
+                        )
+                        logger.info(f"[AGENT] Got {len(transcript_segments)} transcript segments for clip")
+            except Exception as e:
+                logger.warning(f"[AGENT] Could not fetch transcript: {e}")
+
+            # Step 4: Send to Gemini for analysis (Gemini watches the video + listens to audio directly)
             await self._emit("refine_progress", {
                 "step": "analyzing",
                 "message": "Gemini analyzing video + audio...",
@@ -685,6 +734,7 @@ class ToolExecutor:
                 target_duration=target_duration,
                 prompt=prompt,
                 clip_description=clip_description,
+                transcript=clip_transcript,
             )
 
             # Step 5: Call Gemini with video + prompt, structured output
@@ -720,7 +770,7 @@ class ToolExecutor:
                 f"focus={refined.focus_type}"
             )
 
-            return {
+            result = {
                 "original_start": source_start,
                 "original_end": source_end,
                 "new_start": new_start,
@@ -729,6 +779,12 @@ class ToolExecutor:
                 "reasoning": refined.reasoning,
                 "focus_type": refined.focus_type,
             }
+
+            # Include transcript if available — helps agent align clips with narration
+            if transcript_segments:
+                result["transcript"] = transcript_segments
+
+            return result
 
         finally:
             # Clean up temp files
@@ -745,9 +801,26 @@ class ToolExecutor:
         target_duration: float,
         prompt: str,
         clip_description: str,
+        transcript: str = "",
     ) -> str:
         """Build the Gemini prompt for timestamp refinement."""
         segment_duration = source_end - source_start
+
+        transcript_section = ""
+        if transcript:
+            transcript_section = f"""
+## Audio transcript (from Memories.ai)
+
+The following is the dialogue/speech transcription for this segment. Timestamps are absolute
+(relative to the full source video, not this excerpt). The excerpt starts at {source_start:.1f}s.
+
+{transcript}
+
+CRITICAL: Use the transcript to find natural speech boundaries. NEVER cut in the middle of a
+sentence or word. Start just before a sentence begins and end after it completes with a
+natural pause. The transcript timestamps help you align what you hear with precise timing.
+"""
+
         return f"""\
 You are a professional video editor refining clip timestamps. You are watching a video segment
 and must choose the best start and end points for a clip.
@@ -766,7 +839,7 @@ For example, if the best moment starts 5 seconds into this video, return new_sta
 
 ## What to look for
 {prompt}
-
+{transcript_section}
 ## Instructions
 
 Watch the video AND listen to the audio carefully. Use both to decide the best cut points.

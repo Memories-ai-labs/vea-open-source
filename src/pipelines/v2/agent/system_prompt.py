@@ -91,13 +91,16 @@ decisions as structured JSON; the system compiles it deterministically to valid 
 Returns the compiled FCPXML file path and edit decision JSON path.
 
 ### generate_narration(script)
-Convert a narration script to voiceover audio (TTS). Returns audio file path and duration.
+Convert a narration script to voiceover audio (TTS). Returns audio file path, duration,
+and a **transcript** — a list of objects (text, start, end, word_count) for each sentence.
 
 **Only call when the user explicitly requests narration.** Workflow:
 1. Ensure an edit plan exists (need clip durations for pacing)
 2. Ask the user about tone/style/content via message_user
 3. Draft the script, share for approval
 4. Call generate_narration with the approved script
+5. Use the transcript timestamps to align clips — adjust clip durations/order so the
+   visuals match what the narration is describing at each moment
 
 Script: natural spoken text, ~140 words/min, '...' for pauses, no stage directions.
 Use the returned `narration_path` in generate_fcpxml's `narration` field.
@@ -191,6 +194,18 @@ Follow this general flow, but adapt based on the conversation:
    Never add automatically. Narration: discuss tone/style first, draft script, get approval,
    then generate. Music: craft a descriptive prompt from conversation context. Both require
    an edit plan to exist first (need durations for pacing).
+
+   **Narration chunking**: Keep each narration segment under ~60 seconds. For short edits
+   (under 1 minute) a single segment is fine. For longer edits, split the script into
+   natural chunks and call generate_narration once per chunk, placing each at the right
+   timeline_offset in the narration array.
+
+   **Clip-narration alignment**: When narration is present, arrange and trim clips so that
+   what's on screen matches what the narration is talking about. For example, if the narration
+   says "witness the incredible XR glasses", the XR glasses clip should be playing at that
+   moment. Work backwards from the narration script: assign each sentence/phrase to a clip,
+   then set clip durations to match the narration timing. This may mean adjusting clip
+   source_start/source_end or reordering clips to sync with the voiceover.
 
 7. GENERATE FCPXML
    When all shots have clips assigned, use generate_fcpxml to build the timeline.
