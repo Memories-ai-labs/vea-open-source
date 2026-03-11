@@ -332,5 +332,12 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     }
   }, []);
 
-  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, send };
+  const requestRender = useCallback(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      setRenderState({ status: 'rendering', progress: 0, filename: null, error: null });
+      wsRef.current.send(JSON.stringify({ type: 'render' }));
+    }
+  }, []);
+
+  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, send, requestRender };
 }

@@ -76,6 +76,7 @@ export default function App() {
       connected={agent.connected}
       busy={agent.busy}
       onSend={agent.send}
+      onRequestRender={agent.requestRender}
       onBack={handleBack}
     />
   );

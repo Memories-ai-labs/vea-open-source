@@ -5,9 +5,10 @@ interface VideoPreviewProps {
   projectName: string;
   renderState: RenderState;
   hasEditDecision: boolean;
+  onRequestRender?: () => void;
 }
 
-export function VideoPreview({ projectName, renderState, hasEditDecision }: VideoPreviewProps) {
+export function VideoPreview({ projectName, renderState, hasEditDecision, onRequestRender }: VideoPreviewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
 
   // Auto-play when render completes
@@ -92,9 +93,15 @@ export function VideoPreview({ projectName, renderState, hasEditDecision }: Vide
             fontSize: '8px',
             fontFamily: 'var(--font-mono)',
             color: 'var(--text-muted)',
+            flex: 1,
           }}>
             {renderState.filename}
           </span>
+          {onRequestRender && (
+            <button onClick={onRequestRender} style={renderBtnStyle} title="Re-render">
+              &#8635;
+            </button>
+          )}
         </div>
         {/* Video player */}
         <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000' }}>
@@ -131,6 +138,11 @@ export function VideoPreview({ projectName, renderState, hasEditDecision }: Vide
           }}>
             {renderState.error}
           </span>
+          {onRequestRender && (
+            <button onClick={onRequestRender} style={{ ...renderBtnStyle, marginTop: '4px', padding: '4px 12px' }}>
+              Retry Render
+            </button>
+          )}
         </div>
       </div>
     );
@@ -153,6 +165,11 @@ export function VideoPreview({ projectName, renderState, hasEditDecision }: Vide
             ? 'Waiting for Resolve render...'
             : 'Preview will appear after edit generation'}
         </span>
+        {hasEditDecision && onRequestRender && (
+          <button onClick={onRequestRender} style={{ ...renderBtnStyle, padding: '4px 12px' }}>
+            Render Preview
+          </button>
+        )}
         {hasEditDecision && (
           <span style={{ ...labelStyle, fontSize: '8px', color: 'var(--text-muted)' }}>
             Ensure DaVinci Resolve Studio is running
@@ -188,4 +205,16 @@ const labelStyle: React.CSSProperties = {
   letterSpacing: '0.06em',
   textTransform: 'uppercase',
   color: 'var(--text-muted)',
+};
+
+const renderBtnStyle: React.CSSProperties = {
+  background: 'rgba(255,255,255,0.06)',
+  border: '1px solid rgba(255,255,255,0.1)',
+  borderRadius: '3px',
+  color: 'var(--text-secondary)',
+  fontSize: '10px',
+  fontFamily: 'var(--font-mono)',
+  cursor: 'pointer',
+  padding: '2px 6px',
+  letterSpacing: '0.04em',
 };

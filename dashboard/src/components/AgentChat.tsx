@@ -19,6 +19,7 @@ interface AgentChatProps {
   connected: boolean;
   busy: boolean;
   onSend: (text: string) => void;
+  onRequestRender: () => void;
   onBack: () => void;
 }
 
@@ -102,7 +103,7 @@ function useDragDivider(
 }
 
 export function AgentChat({
-  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, onSend, onBack,
+  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, onSend, onRequestRender, onBack,
 }: AgentChatProps) {
   const [project, setProject] = useState(initialProject);
   const [input, setInput] = useState('');
@@ -215,17 +216,11 @@ export function AgentChat({
     const items: TimelineItem[] = [];
     let msgIdx = 0;
 
-    // Build a set of tool_call timestamps that have a matching tool_result
-    const completedTools = new Set<string>();
-    for (const e of events) {
-      if (e.type === 'tool_result' && e.data.tool) {
-        // Match by tool name + find the latest unmatched tool_call
-        completedTools.add(e.data.tool + '|' + e.data.timestamp);
-      }
-    }
+    // Check if the LATEST turn is finished — only look at done/error after the last tool_call
+    const lastToolCallIdx = events.reduce((acc, e, i) => e.type === 'tool_call' ? i : acc, -1);
+    const turnDone = lastToolCallIdx >= 0 && events.slice(lastToolCallIdx).some(e => e.type === 'done' || e.type === 'error');
 
     // Track which tool_calls have been completed (by index)
-    let toolCallIdx = 0;
     const toolCallCompleted: boolean[] = [];
     const toolCalls: AgentEvent[] = [];
     const toolResults: AgentEvent[] = [];
@@ -246,10 +241,15 @@ export function AgentChat({
           break;
         }
       }
-      if (!found) toolCallCompleted.push(false);
+      // If turn is done, mark all tool_calls as completed even without explicit result
+      if (!found) toolCallCompleted.push(turnDone);
     }
 
-    toolCallIdx = 0;
+    // Collect refine_progress events to determine which are "done"
+    // A refine_progress is done if it's not the last one, or if the turn is complete
+    const refineEvents: AgentEvent[] = events.filter(e => e.type === 'refine_progress');
+
+    let toolCallIdx = 0;
     for (const e of events) {
       if (e.type === 'init') continue;
       while (msgIdx < messages.length) {
@@ -266,7 +266,11 @@ export function AgentChat({
       }
       // Skip tool_result as separate rows — they're merged into tool_call
       else if (e.type === 'tool_result') continue;
-      else if (e.type === 'refine_progress') items.push({ kind: 'refine_progress', event: e });
+      else if (e.type === 'refine_progress') {
+        const isLast = e === refineEvents[refineEvents.length - 1];
+        const done = !isLast || turnDone;
+        items.push({ kind: 'refine_progress', event: e, completed: done });
+      }
       else if (e.type === 'scratchpad_update') items.push({ kind: 'scratchpad_update', event: e });
     }
     while (msgIdx < messages.length) {
@@ -625,6 +629,7 @@ export function AgentChat({
               projectName={project.project_name}
               renderState={renderState}
               hasEditDecision={editDecision !== null && editDecision.clips.length > 0}
+              onRequestRender={onRequestRender}
             />
           </div>
         )}
@@ -727,9 +732,12 @@ export function AgentChat({
               }
 
               if (item.kind === 'refine_progress') {
+                const done = item.completed;
                 return (
-                  <div key={i} style={{ ...toolCallStyle, paddingLeft: '24px', fontSize: '10px', color: 'var(--accent-yellow)' }}>
-                    <span className="activity-spinner" style={{ color: 'var(--accent-yellow)', width: '8px', height: '8px', borderWidth: '1.5px' }} />
+                  <div key={i} style={{ ...toolCallStyle, paddingLeft: '24px', fontSize: '10px', color: done ? 'var(--text-muted)' : 'var(--accent-yellow)' }}>
+                    {done
+                      ? <span style={{ color: 'var(--accent-green)', fontSize: '8px', width: '8px', textAlign: 'center' }}>&#10003;</span>
+                      : <span className="activity-spinner" style={{ color: 'var(--accent-yellow)', width: '8px', height: '8px', borderWidth: '1.5px' }} />}
                     <span>{item.event!.data.message || item.event!.data.step}</span>
                   </div>
                 );
@@ -903,8 +911,14 @@ function toolLabel(toolName: string, args?: Record<string, any>): string {
       return `Searching clips: "${truncate(args?.query || '', 60)}"`;
     case 'update_scratchpad':
       return `Updating ${args?.name || 'scratchpad'}`;
-    case 'generate_fcpxml':
-      return `Generating FCPXML (${args?.shots?.length || 0} shots)`;
+    case 'generate_fcpxml': {
+      let clipCount = 0;
+      try {
+        const ed = typeof args?.edit_decision_json === 'string' ? JSON.parse(args.edit_decision_json) : args?.edit_decision_json;
+        clipCount = ed?.clips?.length || 0;
+      } catch { /* ignore */ }
+      return `Generating FCPXML (${clipCount} clips)`;
+    }
     case 'refine_clip_timestamps': {
       const file = args?.source_file || '';
       const start = args?.source_start != null ? Number(args.source_start).toFixed(1) : '?';

@@ -263,6 +263,14 @@ class WorkspaceManager:
     def get_final_fcpxml_path(self) -> Path:
         return self.root / "fcpxml" / "edit_final.fcpxml"
 
+    def get_latest_fcpxml(self) -> Path | None:
+        """Return the most recently modified .fcpxml file, or None."""
+        fcpxml_dir = self.root / "fcpxml"
+        if not fcpxml_dir.is_dir():
+            return None
+        files = sorted(fcpxml_dir.glob("*.fcpxml"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return files[0] if files else None
+
     def get_narration_path(self) -> Path:
         return self.root / "narration" / "narration.mp3"
 

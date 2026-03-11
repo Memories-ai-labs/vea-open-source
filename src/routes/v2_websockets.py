@@ -258,8 +258,20 @@ def register_websocket_routes(app: FastAPI):
                                 "type": "queued",
                                 "data": {"text": text, "message": "Agent is working. Your message will be processed next."},
                             })
-                            # We'll handle queued messages when the current task finishes
-                            # For now, just notify the user
+
+                    elif msg_type == "render":
+                        # Force re-render via Resolve
+                        agent._emit = emit
+                        fcpxml = agent.workspace.get_latest_fcpxml()
+                        if fcpxml:
+                            asyncio.create_task(
+                                agent._auto_render_preview({"fcpxml_path": str(fcpxml)})
+                            )
+                        else:
+                            await websocket.send_json({
+                                "type": "render_error",
+                                "data": {"error": "No FCPXML found. Generate one first."},
+                            })
 
                 except asyncio.TimeoutError:
                     pass
