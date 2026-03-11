@@ -158,6 +158,7 @@ class ClipDecision(BaseModel):
     source_start: float         # in-point in seconds
     source_end: float           # out-point in seconds
     label: str = ""             # human-readable description
+    description: str = ""       # brief content description (what's in this clip)
     gain_db: Optional[float] = None
     speed: Optional[SpeedChange] = None
     transform: Optional[TransformSettings] = None
@@ -200,3 +201,11 @@ class EditDecision(BaseModel):
     narration: List[NarrationSegment] = []
     music: Optional[MusicTrack] = None
     titles: List[TextOverlay] = []
+
+
+class RefinedTimestamps(BaseModel):
+    """Gemini's structured output for clip timestamp refinement."""
+    new_start: float          # refined in-point in seconds (absolute in source video)
+    new_end: float            # refined out-point in seconds (absolute in source video)
+    reasoning: str            # why these timestamps were chosen
+    focus_type: str = ""      # "visual" | "dialogue" | "audio" — what drove the decision

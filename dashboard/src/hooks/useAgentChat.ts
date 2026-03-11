@@ -33,11 +33,40 @@ export interface EditDecisionClip {
   source_start: number;
   source_end: number;
   label?: string;
+  description?: string;
+  gain_db?: number | null;
+  speed?: { rate: number } | null;
+  transition_after?: { type: string; duration_seconds: number } | null;
+}
+
+export interface NarrationSegment {
+  file: string;
+  timeline_offset: number;
+  start: number;
+  duration: number;
+  gain_db: number;
+}
+
+export interface MusicTrack {
+  file: string;
+  start: number;
+  duration: number;
+  gain_db: number;
+}
+
+export interface TextOverlay {
+  text: string;
+  timeline_offset: number;
+  duration: number;
+  font_size?: number;
 }
 
 export interface EditDecision {
-  timeline?: { name?: string; fps?: number };
+  timeline?: { name?: string; fps?: number; width?: number; height?: number };
   clips: EditDecisionClip[];
+  narration?: NarrationSegment[];
+  music?: MusicTrack | null;
+  titles?: TextOverlay[];
   fcpxml_path?: string;
 }
 
