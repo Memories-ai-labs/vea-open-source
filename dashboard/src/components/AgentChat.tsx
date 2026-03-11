@@ -5,6 +5,7 @@ import type { ProjectSummary } from '../types';
 import { listProjects, clearGists, clearPlanning, clearMemories, indexProject } from '../api';
 import { useBreakpoint } from '../hooks/useBreakpoint';
 import { SimpleMarkdown } from './SimpleMarkdown';
+import { NLETimeline } from './NLETimeline';
 
 interface AgentChatProps {
   project: ProjectSummary;
@@ -40,8 +41,8 @@ const PAD_EMPTY_HINTS: Record<string, string> = {
 };
 
 // ── Resizable row divider ──
-const ROW_MINS = [48, 44, 200]; // min heights for top, middle, bottom
-const ROW_MAXS = [400, 300, Infinity]; // max heights
+const ROW_MINS = [48, 80, 200]; // min heights for top, middle, bottom
+const ROW_MAXS = [400, 400, Infinity]; // max heights
 
 function useDragDivider(
   rowHeights: number[],
@@ -117,7 +118,7 @@ export function AgentChat({
 
   // Row heights: [top, middle, bottom]. Bottom uses flex to fill remaining space.
   // We store top and middle as fixed px, bottom is flex: 1.
-  const [rowHeights, setRowHeights] = useState<number[]>([120, 52, 500]);
+  const [rowHeights, setRowHeights] = useState<number[]>([120, 140, 500]);
 
   const onDrag0 = useDragDivider(rowHeights, setRowHeights, 0);
   const onDrag1 = useDragDivider(rowHeights, setRowHeights, 1);
@@ -222,7 +223,6 @@ export function AgentChat({
 
   const padContent = scratchpads[activePad as keyof ScratchpadState] || '';
   const isIndexed = project.status !== 'new';
-  const middleHeight = isTablet ? '60px' : `${rowHeights[1]}px`;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', padding: isMobile ? '10px' : '0' }}>
@@ -484,60 +484,20 @@ export function AgentChat({
         </div>
       )}
 
-      {/* ── Middle row: timeline placeholder ── */}
+      {/* ── Middle row: NLE timeline ── */}
       <div
         className="glass-card"
         style={{
           margin: isMobile ? '10px 0 0' : '0 16px',
-          padding: isMobile ? '10px 12px' : '12px 16px',
+          padding: '0',
           flexShrink: 0,
-          display: 'flex',
-          alignItems: 'center',
-          gap: '12px',
-          height: middleHeight,
-          minHeight: isTablet ? '60px' : `${ROW_MINS[1]}px`,
-          maxHeight: isTablet ? '60px' : `${ROW_MAXS[1]}px`,
+          height: isTablet ? '120px' : `${rowHeights[1]}px`,
+          minHeight: isTablet ? '80px' : `${ROW_MINS[1]}px`,
+          maxHeight: isTablet ? '160px' : `${ROW_MAXS[1]}px`,
           overflow: 'hidden',
         }}
       >
-        <div className="eyebrow" style={{ flexShrink: 0 }}>timeline{editDecision ? ` · ${editDecision.clips.length} clips` : ''}</div>
-        {editDecision ? (
-          <div style={{ flex: 1, display: 'flex', gap: '2px', height: '32px', alignItems: 'stretch', overflow: 'hidden' }}>
-            {editDecision.clips.map((clip, i) => {
-              const dur = clip.source_end - clip.source_start;
-              const totalDur = editDecision.clips.reduce((s, c) => s + (c.source_end - c.source_start), 0) || 1;
-              const pct = (dur / totalDur) * 100;
-              const colors = ['var(--accent-blue)', 'var(--accent-purple)', 'var(--accent-green)', 'var(--accent-orange)', 'var(--accent-yellow)', 'var(--accent-red)'];
-              const color = colors[i % colors.length];
-              return (
-                <div
-                  key={clip.id}
-                  title={`${clip.id}: ${clip.label || clip.source_file} (${dur.toFixed(1)}s)`}
-                  style={{
-                    flex: `0 0 ${pct}%`,
-                    minWidth: '4px',
-                    background: `${color}22`,
-                    border: `1px solid ${color}66`,
-                    borderRadius: '3px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    overflow: 'hidden',
-                    cursor: 'default',
-                  }}
-                >
-                  <span style={{ fontSize: '8px', color, fontWeight: 700, whiteSpace: 'nowrap' }}>{clip.id}</span>
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <div style={{ flex: 1, height: '24px', borderRadius: '4px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <span style={{ color: 'var(--text-muted)', fontSize: '10px', fontFamily: 'var(--font-mono)', letterSpacing: '0.06em' }}>
-              Timeline will appear after FCPXML generation
-            </span>
-          </div>
-        )}
+        <NLETimeline editDecision={editDecision} />
       </div>
 
       {/* Divider */}
