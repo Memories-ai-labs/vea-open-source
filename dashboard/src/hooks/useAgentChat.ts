@@ -34,11 +34,19 @@ export interface EditDecision {
   fcpxml_path?: string;
 }
 
+export interface RenderState {
+  status: 'idle' | 'rendering' | 'complete' | 'error';
+  progress: number; // 0-100
+  filename: string | null;
+  error: string | null;
+}
+
 interface UseAgentChatResult {
   events: AgentEvent[];
   messages: ChatMessage[];
   scratchpads: ScratchpadState;
   editDecision: EditDecision | null;
+  renderState: RenderState;
   connected: boolean;
   busy: boolean;
   send: (text: string) => void;
@@ -54,6 +62,9 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     fcpxml: '',
   });
   const [editDecision, setEditDecision] = useState<EditDecision | null>(null);
+  const [renderState, setRenderState] = useState<RenderState>({
+    status: 'idle', progress: 0, filename: null, error: null,
+  });
   const [connected, setConnected] = useState(false);
   const [busy, setBusy] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -100,6 +111,15 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
             if (event.data.edit_decision) {
               setEditDecision(event.data.edit_decision as EditDecision);
             }
+            if (event.data.render_state) {
+              const rs = event.data.render_state;
+              setRenderState({
+                status: rs.status || 'idle',
+                progress: rs.status === 'complete' ? 100 : 0,
+                filename: rs.filename || null,
+                error: null,
+              });
+            }
             return; // skip the append below
 
           case 'agent_message':
@@ -130,6 +150,31 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
                 fcpxml_path: event.data.fcpxml_path,
               });
             }
+            break;
+
+          case 'render_start':
+            setRenderState({ status: 'rendering', progress: 0, filename: null, error: null });
+            break;
+
+          case 'render_progress':
+            setRenderState(prev => ({ ...prev, progress: event.data.percent || 0 }));
+            break;
+
+          case 'render_complete':
+            setRenderState({
+              status: 'complete',
+              progress: 100,
+              filename: event.data.filename || null,
+              error: null,
+            });
+            break;
+
+          case 'render_error':
+            setRenderState(prev => ({
+              ...prev,
+              status: 'error',
+              error: event.data.error || 'Render failed',
+            }));
             break;
 
           case 'done':
@@ -172,6 +217,7 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
       setMessages([]);
       setScratchpads({ comprehension: '', creative_direction: '', planning: '', fcpxml: '' });
       setEditDecision(null);
+      setRenderState({ status: 'idle', progress: 0, filename: null, error: null });
       setConnected(false);
       setBusy(false);
       return;
@@ -223,5 +269,5 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     }
   }, []);
 
-  return { events, messages, scratchpads, editDecision, connected, busy, send };
+  return { events, messages, scratchpads, editDecision, renderState, connected, busy, send };
 }

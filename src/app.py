@@ -674,6 +674,15 @@ async def v2_agent_chat_ws(websocket: WebSocket, project_name: str):
         except Exception:
             pass
 
+    # Check for existing preview render
+    render_path = workspace.get_render_path("preview")
+    render_state = None
+    if render_path.exists():
+        render_state = {
+            "status": "complete",
+            "filename": render_path.name,
+        }
+
     # Send initial state on connect
     try:
         init_data: dict = {
@@ -684,6 +693,8 @@ async def v2_agent_chat_ws(websocket: WebSocket, project_name: str):
         }
         if edit_decision_data:
             init_data["edit_decision"] = edit_decision_data
+        if render_state:
+            init_data["render_state"] = render_state
         await websocket.send_json({
             "type": "init",
             "data": init_data,
@@ -910,6 +921,19 @@ async def v2_render(request: V2RenderRequest):
         logger.error(f"[V2 RENDER] Error: {e}")
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get(f"{V2_API_PREFIX}/projects/{{project_name}}/renders/{{filename}}")
+async def v2_serve_render(project_name: str, filename: str):
+    """Serve a rendered video file from the workspace."""
+    from fastapi.responses import FileResponse
+    workspace = WorkspaceManager(project_name, WORKSPACES_DIR)
+    if not workspace.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
+    render_path = workspace.root / "renders" / filename
+    if not render_path.exists():
+        raise HTTPException(status_code=404, detail=f"Render '{filename}' not found.")
+    return FileResponse(str(render_path), media_type="video/mp4")
 
 
 @app.get(f"{V2_API_PREFIX}/resolve/status", response_model=V2ResolveStatusResponse)

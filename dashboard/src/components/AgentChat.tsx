@@ -1,11 +1,12 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import type { AgentEvent, ChatMessage, ScratchpadState, EditDecision } from '../hooks/useAgentChat';
+import type { AgentEvent, ChatMessage, ScratchpadState, EditDecision, RenderState } from '../hooks/useAgentChat';
 import type { ProjectSummary } from '../types';
 import { listProjects, clearGists, clearPlanning, clearMemories, indexProject } from '../api';
 import { useBreakpoint } from '../hooks/useBreakpoint';
 import { SimpleMarkdown } from './SimpleMarkdown';
 import { NLETimeline } from './NLETimeline';
+import { VideoPreview } from './VideoPreview';
 
 interface AgentChatProps {
   project: ProjectSummary;
@@ -13,6 +14,7 @@ interface AgentChatProps {
   messages: ChatMessage[];
   scratchpads: ScratchpadState;
   editDecision: EditDecision | null;
+  renderState: RenderState;
   connected: boolean;
   busy: boolean;
   onSend: (text: string) => void;
@@ -99,7 +101,7 @@ function useDragDivider(
 }
 
 export function AgentChat({
-  project: initialProject, events, messages, scratchpads, editDecision, connected, busy, onSend, onBack,
+  project: initialProject, events, messages, scratchpads, editDecision, renderState, connected, busy, onSend, onBack,
 }: AgentChatProps) {
   const [project, setProject] = useState(initialProject);
   const [input, setInput] = useState('');
@@ -119,9 +121,37 @@ export function AgentChat({
   // Row heights: [top, middle, bottom]. Bottom uses flex to fill remaining space.
   // We store top and middle as fixed px, bottom is flex: 1.
   const [rowHeights, setRowHeights] = useState<number[]>([120, 140, 500]);
+  // Column split for middle row: percentage of width for the timeline (0-100)
+  const [timelinePct, setTimelinePct] = useState(70);
 
   const onDrag0 = useDragDivider(rowHeights, setRowHeights, 0);
   const onDrag1 = useDragDivider(rowHeights, setRowHeights, 1);
+
+  // Horizontal column drag divider for timeline/preview split
+  const colDragging = useRef(false);
+  const colContainerRef = useRef<HTMLDivElement>(null);
+  const onColDragDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    colDragging.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const onMove = (ev: MouseEvent) => {
+      if (!colDragging.current || !colContainerRef.current) return;
+      const rect = colContainerRef.current.getBoundingClientRect();
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      setTimelinePct(Math.max(30, Math.min(85, pct)));
+    };
+    const onUp = () => {
+      colDragging.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -484,8 +514,9 @@ export function AgentChat({
         </div>
       )}
 
-      {/* ── Middle row: NLE timeline ── */}
+      {/* ── Middle row: NLE timeline + video preview ── */}
       <div
+        ref={colContainerRef}
         className="glass-card"
         style={{
           margin: isMobile ? '10px 0 0' : '0 16px',
@@ -495,9 +526,59 @@ export function AgentChat({
           minHeight: isTablet ? '80px' : `${ROW_MINS[1]}px`,
           maxHeight: isTablet ? '160px' : `${ROW_MAXS[1]}px`,
           overflow: 'hidden',
+          display: 'flex',
         }}
       >
-        <NLETimeline editDecision={editDecision} />
+        {/* Timeline */}
+        <div style={{ width: isTablet ? '100%' : `${timelinePct}%`, minWidth: 0, overflow: 'hidden' }}>
+          <NLETimeline editDecision={editDecision} />
+        </div>
+
+        {/* Column divider */}
+        {!isTablet && (
+          <div
+            onMouseDown={onColDragDown}
+            style={{
+              width: '6px',
+              cursor: 'col-resize',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
+              background: 'transparent',
+              transition: 'background 0.15s',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
+              const inner = e.currentTarget.firstChild as HTMLElement;
+              if (inner) { inner.style.background = 'rgba(255,255,255,0.2)'; inner.style.height = '40px'; }
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'transparent';
+              const inner = e.currentTarget.firstChild as HTMLElement;
+              if (inner) { inner.style.background = 'rgba(255,255,255,0.08)'; inner.style.height = '28px'; }
+            }}
+          >
+            <div style={{
+              width: '2px',
+              height: '28px',
+              borderRadius: '999px',
+              background: 'rgba(255,255,255,0.08)',
+              transition: 'background 0.15s, height 0.15s',
+            }} />
+          </div>
+        )}
+
+        {/* Video preview */}
+        {!isTablet && (
+          <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
+            <VideoPreview
+              projectName={project.project_name}
+              renderState={renderState}
+              hasEditDecision={editDecision !== null && editDecision.clips.length > 0}
+            />
+          </div>
+        )}
       </div>
 
       {/* Divider */}

@@ -250,6 +250,9 @@ class AgentSession:
                         except Exception:
                             pass  # non-critical
 
+                    # Auto-trigger preview render via Resolve
+                    asyncio.create_task(self._auto_render_preview(result))
+
                 # Special handling for scratchpad updates — emit the update
                 if tool_name == "update_scratchpad":
                     await self._emit("scratchpad_update", {
@@ -283,6 +286,54 @@ class AgentSession:
             "text": "I've made several tool calls — let me pause and check in. What would you like me to focus on?",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
+
+    # ── Auto-render ─────────────────────────────────────────────────────
+
+    async def _auto_render_preview(self, fcpxml_result: Dict) -> None:
+        """Kick off a Resolve preview render in the background after FCPXML generation."""
+        try:
+            from lib.utils.resolve_render import ResolveRenderer
+
+            fcpxml_path = fcpxml_result.get("fcpxml_path")
+            if not fcpxml_path:
+                return
+
+            media_dir = str(self.workspace.get_footage_dir())
+            output_path = str(self.workspace.get_render_path("preview"))
+
+            await self._emit("render_start", {
+                "quality": "preview",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+            async def progress_cb(pct: float):
+                await self._emit("render_progress", {
+                    "percent": pct,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+            renderer = ResolveRenderer()
+            rendered = await renderer.render(
+                fcpxml_path=fcpxml_path,
+                media_dir=media_dir,
+                output_path=output_path,
+                quality="preview",
+                progress_callback=progress_cb,
+            )
+
+            await self._emit("render_complete", {
+                "output_path": rendered,
+                "filename": Path(rendered).name,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            logger.info(f"[AGENT] Auto-render complete: {rendered}")
+
+        except Exception as e:
+            logger.warning(f"[AGENT] Auto-render failed (non-fatal): {e}")
+            await self._emit("render_error", {
+                "error": str(e),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
 
     # ── History management ────────────────────────────────────────────────
 

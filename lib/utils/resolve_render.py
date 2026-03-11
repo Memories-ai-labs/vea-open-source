@@ -92,12 +92,23 @@ class ResolveRenderer:
         """
         preset = RENDER_PRESETS[quality]
         project_name = f"vea_{uuid.uuid4().hex[:8]}"
-        output_dir = str(Path(output_path).parent)
-        output_name = Path(output_path).stem
+        abs_output = Path(output_path).resolve()
+        abs_output.parent.mkdir(parents=True, exist_ok=True)
+        output_dir = str(abs_output.parent)
+        output_name = abs_output.stem
 
         logger.info(f"[RESOLVE] Starting render: {quality} quality, project={project_name}")
+        logger.info(f"[RESOLVE] Output dir: {output_dir}, name: {output_name}")
+        logger.info(f"[RESOLVE] FCPXML: {fcpxml_path}, Media: {media_dir}")
 
         pm = self._resolve.GetProjectManager()
+
+        # Close any currently open project so we can create a new one
+        current = pm.GetCurrentProject()
+        if current is not None:
+            logger.info(f"[RESOLVE] Closing current project: {current.GetName()}")
+            pm.CloseProject(current)
+
         project = pm.CreateProject(project_name)
         if project is None:
             raise RuntimeError(f"[RESOLVE] Failed to create project: {project_name}")
@@ -122,6 +133,7 @@ class ResolveRenderer:
                 )
 
             project.SetCurrentTimeline(timeline)
+            logger.info(f"[RESOLVE] Timeline imported: {timeline.GetName()}, clips: {timeline.GetTrackCount('video')}")
 
             # Configure render settings
             project.SetRenderSettings({
@@ -147,16 +159,22 @@ class ResolveRenderer:
 
             # Poll for completion
             while project.IsRenderingInProgress():
-                status = project.GetRenderJobStatus(job_id)
-                pct = float(status.get("CompletionPercentage", 0))
-                logger.info(f"[RESOLVE] Render progress: {pct:.0f}%")
-                if progress_callback:
-                    await progress_callback(pct)
+                try:
+                    status = project.GetRenderJobStatus(job_id)
+                    if status:
+                        pct = float(status.get("CompletionPercentage", 0))
+                        logger.info(f"[RESOLVE] Render progress: {pct:.0f}%")
+                        if progress_callback:
+                            await progress_callback(pct)
+                except Exception as e:
+                    logger.debug(f"[RESOLVE] Status poll error (non-fatal): {e}")
                 await asyncio.sleep(2)
 
             # Check final status
             final_status = project.GetRenderJobStatus(job_id)
-            job_status = final_status.get("JobStatus", "Unknown")
+            job_status = "Unknown"
+            if final_status:
+                job_status = final_status.get("JobStatus", "Unknown")
             logger.info(f"[RESOLVE] Render complete. Status: {job_status}")
 
             if job_status == "Failed":

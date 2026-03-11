@@ -71,6 +71,7 @@ export default function App() {
       messages={agent.messages}
       scratchpads={agent.scratchpads}
       editDecision={agent.editDecision}
+      renderState={agent.renderState}
       connected={agent.connected}
       busy={agent.busy}
       onSend={agent.send}
