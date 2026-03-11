@@ -12,6 +12,7 @@ from src.pipelines.v2.agent.tool_definitions import TOOL_DECLARATIONS  # noqa: F
 from src.pipelines.v2.agent.tool_helpers import (
     download_soundstripe_track,
     fetch_soundstripe_tracks,
+    stt_word_timestamps,
     tts_sync,
 )
 
@@ -562,31 +563,50 @@ class ToolExecutor:
                 None, lambda: subprocess.run(downsample_cmd, check=True)
             )
 
-            # Step 3: Fetch audio transcript, filtered to padded range, with video-relative timestamps
+            # Step 3: Transcribe segment audio with ElevenLabs STT (word-level timestamps)
             clip_transcript = ""
             transcript_segments = []
             try:
-                all_transcript = await self._get_transcript_segments()
-                for seg in all_transcript:
-                    if seg["end"] >= padded_start and seg["start"] <= padded_end:
-                        # Convert to video-relative timestamps (offset from padded_start)
-                        rel_start = seg["start"] - padded_start
-                        rel_end = seg["end"] - padded_start
-                        transcript_segments.append({
-                            "text": seg["text"],
-                            "start": seg["start"],  # absolute (for return value)
-                            "end": seg["end"],       # absolute (for return value)
-                            "rel_start": rel_start,  # relative to video excerpt
-                            "rel_end": rel_end,      # relative to video excerpt
-                        })
-                if transcript_segments:
-                    clip_transcript = "\n".join(
-                        f"[{s['rel_start']:.1f}s–{s['rel_end']:.1f}s] {s['text']}"
-                        for s in transcript_segments
+                import os as _os
+                el_key = _os.environ.get("ELEVENLABS_API_KEY", "")
+                if el_key:
+                    # Extract audio from the segment for STT
+                    audio_path = tmp_dir / "audio.mp3"
+                    audio_cmd = [
+                        "ffmpeg", "-y", "-loglevel", "error",
+                        "-i", str(segment_path),
+                        "-vn", "-c:a", "libmp3lame", "-b:a", "64k",
+                        str(audio_path),
+                    ]
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: subprocess.run(audio_cmd, check=True)
                     )
-                    logger.info(f"[AGENT] Got {len(transcript_segments)} transcript segments for clip")
+
+                    words = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: stt_word_timestamps(str(audio_path), el_key)
+                    )
+                    logger.info(f"[AGENT] ElevenLabs STT: {len(words)} words transcribed")
+
+                    # Words have timestamps relative to the extracted segment (0-based).
+                    # Group into sentence-like segments and also keep word-level detail.
+                    for w in words:
+                        transcript_segments.append({
+                            "text": w["text"],
+                            "start": padded_start + w["start"],   # absolute
+                            "end": padded_start + w["end"],       # absolute
+                            "rel_start": w["start"],              # relative to video excerpt
+                            "rel_end": w["end"],                  # relative to video excerpt
+                        })
+
+                    if transcript_segments:
+                        clip_transcript = "\n".join(
+                            f"[{s['rel_start']:.2f}s–{s['rel_end']:.2f}s] {s['text']}"
+                            for s in transcript_segments
+                        )
+                else:
+                    logger.warning("[AGENT] ELEVENLABS_API_KEY not set — skipping STT for refinement")
             except Exception as e:
-                logger.warning(f"[AGENT] Could not fetch transcript: {e}")
+                logger.warning(f"[AGENT] Could not transcribe segment: {e}")
 
             # Step 4: Send to Gemini for analysis
             await self._emit("refine_progress", {
@@ -698,16 +718,17 @@ class ToolExecutor:
         transcript_section = ""
         if transcript:
             transcript_section = f"""
-## Audio transcript
+## Audio transcript (word-level)
 
-The following is the dialogue/speech transcription for this segment. Timestamps are relative
-to the video you are watching (matching the video timecode).
+The following is a WORD-LEVEL transcription with precise timestamps (relative to video timecode).
+Each line is one word with its exact start and end time.
 
 {transcript}
 
-CRITICAL: Use the transcript to find natural speech boundaries. NEVER cut in the middle of a
-sentence or word. Start just before a sentence begins and end after it completes with a
-natural pause.
+CRITICAL: Use these precise word timestamps to find natural speech boundaries. NEVER cut in the
+middle of a word. Prefer cutting at sentence boundaries (after periods, question marks, etc.).
+Align your new_start to just before the first word of a sentence and new_end to just after the
+last word of a sentence, including a brief natural pause (~0.2s).
 """
 
         return f"""\

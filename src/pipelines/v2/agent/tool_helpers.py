@@ -1,6 +1,7 @@
-"""Standalone helper functions for narration (TTS) and music (Soundstripe)."""
+"""Standalone helper functions for narration (TTS), STT, and music (Soundstripe)."""
 
 import logging
+from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,29 @@ def tts_sync(text: str, output_path: str, api_key: str) -> None:
         for chunk in audio:
             if chunk:
                 f.write(chunk)
+
+
+def stt_word_timestamps(audio_path: str, api_key: str) -> List[Dict]:
+    """Transcribe audio with word-level timestamps via ElevenLabs Scribe.
+
+    Returns a list of word dicts: [{"text": "Hello", "start": 0.12, "end": 0.45}, ...]
+    """
+    from elevenlabs.client import ElevenLabs
+    client = ElevenLabs(api_key=api_key)
+    with open(audio_path, "rb") as f:
+        result = client.speech_to_text.convert(
+            file=f,
+            model_id="scribe_v1",
+            timestamps_granularity="word",
+        )
+    words = []
+    for w in getattr(result, "words", []) or []:
+        text = getattr(w, "text", "") if not isinstance(w, dict) else w.get("text", "")
+        start = getattr(w, "start", 0) if not isinstance(w, dict) else w.get("start", 0)
+        end = getattr(w, "end", 0) if not isinstance(w, dict) else w.get("end", 0)
+        if text.strip():
+            words.append({"text": text.strip(), "start": float(start), "end": float(end)})
+    return words
 
 
 def fetch_soundstripe_tracks(api_key: str, page_count: int = 3) -> list:
