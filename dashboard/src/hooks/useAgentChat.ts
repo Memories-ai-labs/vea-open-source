@@ -20,6 +20,13 @@ export interface ScratchpadState {
   fcpxml: string;
 }
 
+export interface ScratchpadTimestamps {
+  comprehension: string | null;
+  creative_direction: string | null;
+  planning: string | null;
+  fcpxml: string | null;
+}
+
 export interface EditDecisionClip {
   id: string;
   source_file: string;
@@ -45,6 +52,7 @@ interface UseAgentChatResult {
   events: AgentEvent[];
   messages: ChatMessage[];
   scratchpads: ScratchpadState;
+  scratchpadTimestamps: ScratchpadTimestamps;
   editDecision: EditDecision | null;
   renderState: RenderState;
   connected: boolean;
@@ -60,6 +68,12 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     creative_direction: '',
     planning: '',
     fcpxml: '',
+  });
+  const [scratchpadTimestamps, setScratchpadTimestamps] = useState<ScratchpadTimestamps>({
+    comprehension: null,
+    creative_direction: null,
+    planning: null,
+    fcpxml: null,
   });
   const [editDecision, setEditDecision] = useState<EditDecision | null>(null);
   const [renderState, setRenderState] = useState<RenderState>({
@@ -98,12 +112,14 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
 
         // Handle specific event types
         switch (event.type) {
-          case 'init':
-            // New connection — reset events to just this init
-            setEvents([event]);
+          case 'init': {
+            // New connection — hydrate from persisted state
             setBusy(false);
             if (event.data.scratchpads) {
               setScratchpads(event.data.scratchpads as ScratchpadState);
+            }
+            if (event.data.scratchpad_timestamps) {
+              setScratchpadTimestamps(event.data.scratchpad_timestamps as ScratchpadTimestamps);
             }
             if (event.data.chat_history) {
               setMessages(event.data.chat_history as ChatMessage[]);
@@ -120,7 +136,18 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
                 error: null,
               });
             }
+            // Replay persisted events (tool calls, results, scratchpad updates)
+            if (event.data.event_log && Array.isArray(event.data.event_log)) {
+              const replayed: AgentEvent[] = (event.data.event_log as Array<{ type: string; data: Record<string, any> }>).map((e) => ({
+                type: e.type,
+                data: e.data,
+              }));
+              setEvents([event, ...replayed]);
+            } else {
+              setEvents([event]);
+            }
             return; // skip the append below
+          }
 
           case 'agent_message':
             setMessages((prev) => [...prev, {
@@ -140,6 +167,12 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
                 ...prev,
                 [event.data.name]: event.data.content,
               }));
+              if (event.data.timestamp) {
+                setScratchpadTimestamps((prev) => ({
+                  ...prev,
+                  [event.data.name]: event.data.timestamp,
+                }));
+              }
             }
             break;
 
@@ -216,6 +249,7 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
       setEvents([]);
       setMessages([]);
       setScratchpads({ comprehension: '', creative_direction: '', planning: '', fcpxml: '' });
+      setScratchpadTimestamps({ comprehension: null, creative_direction: null, planning: null, fcpxml: null });
       setEditDecision(null);
       setRenderState({ status: 'idle', progress: 0, filename: null, error: null });
       setConnected(false);
@@ -269,5 +303,5 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     }
   }, []);
 
-  return { events, messages, scratchpads, editDecision, renderState, connected, busy, send };
+  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, send };
 }

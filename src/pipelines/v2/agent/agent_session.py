@@ -60,10 +60,30 @@ class AgentSession:
 
         # Build video info for system prompt and tools
         self.video_nos = [v.video_no for v in video_entries if v.video_no]
-        self.video_list = "\n".join(
-            f"- {v.video_name} (video_no: {v.video_no})"
-            for v in video_entries
-        )
+
+        # Build video list with footage filenames for source_file mapping
+        footage_files = workspace.scan_footage() if workspace.get_footage_dir().is_dir() else []
+        footage_names = [f.name for f in footage_files]
+        video_lines = []
+        for v in video_entries:
+            # Try to match video_name to a footage filename
+            matched_file = ""
+            for fn in footage_names:
+                if v.video_name.lower().replace(" ", "") in fn.lower().replace(" ", "").replace("_", "").replace("-", ""):
+                    matched_file = fn
+                    break
+                if fn.lower().rsplit(".", 1)[0].replace("_", " ").replace("-", " ") in v.video_name.lower():
+                    matched_file = fn
+                    break
+            if matched_file:
+                video_lines.append(f"- {v.video_name} → filename: `{matched_file}` (video_no: {v.video_no})")
+            else:
+                video_lines.append(f"- {v.video_name} (video_no: {v.video_no})")
+        if footage_names:
+            unmatched = [fn for fn in footage_names if not any(fn in line for line in video_lines)]
+            for fn in unmatched:
+                video_lines.append(f"- (unmatched footage file: `{fn}`)")
+        self.video_list = "\n".join(video_lines)
 
         # Scratchpads
         self.scratchpads = ScratchpadManager(workspace.root)
@@ -78,6 +98,15 @@ class AgentSession:
             self.scratchpads.seed_comprehension("\n\n".join(gist_parts))
         elif session_data.gist:
             self.scratchpads.seed_comprehension(session_data.gist)
+
+        # Seed fcpxml scratchpad from existing FCPXML file if present
+        if not self.scratchpads.read("fcpxml"):
+            fcpxml_path = workspace.get_fcpxml_path(version=1)
+            if fcpxml_path.exists():
+                try:
+                    self.scratchpads.update("fcpxml", "replace", fcpxml_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
 
         # Tool executor — use a wrapper so reassigning self._emit propagates
         self.tools = ToolExecutor(
@@ -94,7 +123,9 @@ class AgentSession:
 
         # Persistent chat log (for reloading sessions)
         self._chat_log: List[ChatMessage] = []
+        self._event_log: List[Dict] = []  # persisted tool call/result events
         self._load_chat_log()
+        self._load_event_log()
 
         # Safety settings — permissive for creative content
         self._safety = [
@@ -135,6 +166,7 @@ class AgentSession:
             # Trim and persist
             self._trim_history()
             self._save_chat_log()
+            self._save_event_log()
         except Exception as e:
             import traceback; traceback.print_exc()
             print(f"[AGENT] handle_user_message FAILED: {e}", flush=True)
@@ -217,11 +249,13 @@ class AgentSession:
                 tool_args = dict(fc.args) if fc.args else {}
 
                 # Emit tool_call event
-                await self._emit("tool_call", {
+                tool_call_data = {
                     "tool": tool_name,
                     "args": tool_args,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
+                }
+                await self._emit("tool_call", tool_call_data)
+                self._event_log.append({"type": "tool_call", "data": tool_call_data})
 
                 # Execute the tool
                 result = await self.tools.execute(tool_name, tool_args)
@@ -238,13 +272,28 @@ class AgentSession:
                 if tool_name == "generate_fcpxml" and "error" not in result:
                     import json as _json
                     edit_json_path = result.get("edit_decision_path")
+                    fcpxml_path = result.get("fcpxml_path")
                     if edit_json_path:
                         try:
                             with open(edit_json_path) as f:
                                 edit_data = _json.load(f)
                             await self._emit("timeline_update", {
                                 "edit_decision": edit_data,
-                                "fcpxml_path": result.get("fcpxml_path"),
+                                "fcpxml_path": fcpxml_path,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
+                        except Exception:
+                            pass  # non-critical
+
+                    # Push FCPXML content into the fcpxml scratchpad
+                    if fcpxml_path:
+                        try:
+                            fcpxml_content = Path(fcpxml_path).read_text(encoding="utf-8")
+                            self.scratchpads.update("fcpxml", "replace", fcpxml_content)
+                            await self._emit("scratchpad_update", {
+                                "name": "fcpxml",
+                                "operation": "replace",
+                                "content": fcpxml_content,
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
                             })
                         except Exception:
@@ -263,11 +312,13 @@ class AgentSession:
                     })
 
                 # Emit tool_result event
-                await self._emit("tool_result", {
+                tool_result_data = {
                     "tool": tool_name,
                     "result": result,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
+                }
+                await self._emit("tool_result", tool_result_data)
+                self._event_log.append({"type": "tool_result", "data": tool_result_data})
 
                 function_response_parts.append(
                     Part(function_response=FunctionResponse(
@@ -385,9 +436,33 @@ class AgentSession:
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
 
+    def _load_event_log(self) -> None:
+        """Load persisted events (tool calls, results) for replay on reconnect."""
+        path = self.workspace.root / "event_log.json"
+        if not path.exists():
+            return
+        try:
+            with open(path) as f:
+                self._event_log = json.load(f)
+            logger.info(f"[AGENT] Loaded {len(self._event_log)} events from event log")
+        except Exception as e:
+            logger.warning(f"[AGENT] Could not load event log: {e}")
+
+    def _save_event_log(self) -> None:
+        """Persist event log to workspace."""
+        path = self.workspace.root / "event_log.json"
+        # Keep last 200 events to prevent unbounded growth
+        trimmed = self._event_log[-200:]
+        with open(path, "w") as f:
+            json.dump(trimmed, f, indent=2)
+
     def get_scratchpad_state(self) -> Dict[str, str]:
         """Return current scratchpad contents for the frontend."""
         return {name: self.scratchpads.read(name) for name in self.scratchpads.pads}
+
+    def get_scratchpad_timestamps(self) -> Dict[str, str | None]:
+        """Return last_updated timestamps for each scratchpad."""
+        return self.scratchpads.get_timestamps()
 
     def get_chat_history(self) -> List[Dict]:
         """Return chat log for the frontend to hydrate on reconnect."""
@@ -395,3 +470,7 @@ class AgentSession:
             {"role": m.role, "text": m.text, "timestamp": m.timestamp}
             for m in self._chat_log
         ]
+
+    def get_event_log(self) -> List[Dict]:
+        """Return persisted events for the frontend to hydrate on reconnect."""
+        return self._event_log

@@ -1,8 +1,10 @@
 """ScratchpadManager — persistent context pads that survive the sliding window."""
 
+import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Literal
+from typing import Dict, Literal, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +25,9 @@ class ScratchpadManager:
         self._dir = workspace_root / "scratchpads"
         self._dir.mkdir(parents=True, exist_ok=True)
         self.pads: Dict[str, str] = {name: "" for name in PAD_NAMES}
+        self.last_updated: Dict[str, Optional[str]] = {name: None for name in PAD_NAMES}
         self._load()
+        self._load_timestamps()
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -54,12 +58,16 @@ class ScratchpadManager:
             )
             self.pads[name] = self.pads[name][-MAX_PAD_SIZE:]
 
+        now = datetime.now(timezone.utc).isoformat()
+        self.last_updated[name] = now
         self._save(name)
+        self._save_timestamps()
         return {
             "status": "updated",
             "name": name,
             "operation": operation,
             "length": len(self.pads[name]),
+            "last_updated": now,
         }
 
     def read(self, name: str) -> str:
@@ -79,11 +87,17 @@ class ScratchpadManager:
             )
         return "\n\n".join(blocks)
 
+    def get_timestamps(self) -> Dict[str, Optional[str]]:
+        """Return last_updated ISO timestamps for all pads."""
+        return dict(self.last_updated)
+
     def seed_comprehension(self, gist: str) -> None:
         """Pre-populate comprehension from indexing gist if pad is empty."""
         if not self.pads["comprehension"] and gist:
             self.pads["comprehension"] = gist
+            self.last_updated["comprehension"] = datetime.now(timezone.utc).isoformat()
             self._save("comprehension")
+            self._save_timestamps()
 
     # ── Persistence ───────────────────────────────────────────────────────
 
@@ -96,3 +110,18 @@ class ScratchpadManager:
     def _save(self, name: str) -> None:
         path = self._dir / f"{name}.md"
         path.write_text(self.pads[name])
+
+    def _load_timestamps(self) -> None:
+        path = self._dir / "timestamps.json"
+        if path.exists():
+            try:
+                data = json.loads(path.read_text())
+                for name in PAD_NAMES:
+                    if name in data:
+                        self.last_updated[name] = data[name]
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+    def _save_timestamps(self) -> None:
+        path = self._dir / "timestamps.json"
+        path.write_text(json.dumps(self.last_updated))

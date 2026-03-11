@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import type { AgentEvent, ChatMessage, ScratchpadState, EditDecision, RenderState } from '../hooks/useAgentChat';
+import type { AgentEvent, ChatMessage, ScratchpadState, ScratchpadTimestamps, EditDecision, RenderState } from '../hooks/useAgentChat';
 import type { ProjectSummary } from '../types';
 import { listProjects, clearGists, clearPlanning, clearMemories, indexProject } from '../api';
 import { useBreakpoint } from '../hooks/useBreakpoint';
@@ -13,6 +13,7 @@ interface AgentChatProps {
   events: AgentEvent[];
   messages: ChatMessage[];
   scratchpads: ScratchpadState;
+  scratchpadTimestamps: ScratchpadTimestamps;
   editDecision: EditDecision | null;
   renderState: RenderState;
   connected: boolean;
@@ -101,7 +102,7 @@ function useDragDivider(
 }
 
 export function AgentChat({
-  project: initialProject, events, messages, scratchpads, editDecision, renderState, connected, busy, onSend, onBack,
+  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, onSend, onBack,
 }: AgentChatProps) {
   const [project, setProject] = useState(initialProject);
   const [input, setInput] = useState('');
@@ -123,6 +124,13 @@ export function AgentChat({
   const [rowHeights, setRowHeights] = useState<number[]>([120, 140, 500]);
   // Column split for middle row: percentage of width for the timeline (0-100)
   const [timelinePct, setTimelinePct] = useState(70);
+
+  // Tick every 30s to keep "updated X ago" labels fresh
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const iv = setInterval(() => setTick((t) => t + 1), 30_000);
+    return () => clearInterval(iv);
+  }, []);
 
   const onDrag0 = useDragDivider(rowHeights, setRowHeights, 0);
   const onDrag1 = useDragDivider(rowHeights, setRowHeights, 1);
@@ -202,11 +210,46 @@ export function AgentChat({
     return null;
   }, [events, busy]);
 
-  // Timeline items
+  // Timeline items — merge tool_call + tool_result into single entries
   const timeline = useMemo(() => {
     const items: TimelineItem[] = [];
     let msgIdx = 0;
 
+    // Build a set of tool_call timestamps that have a matching tool_result
+    const completedTools = new Set<string>();
+    for (const e of events) {
+      if (e.type === 'tool_result' && e.data.tool) {
+        // Match by tool name + find the latest unmatched tool_call
+        completedTools.add(e.data.tool + '|' + e.data.timestamp);
+      }
+    }
+
+    // Track which tool_calls have been completed (by index)
+    let toolCallIdx = 0;
+    const toolCallCompleted: boolean[] = [];
+    const toolCalls: AgentEvent[] = [];
+    const toolResults: AgentEvent[] = [];
+    for (const e of events) {
+      if (e.type === 'tool_call') toolCalls.push(e);
+      if (e.type === 'tool_result') toolResults.push(e);
+    }
+    // Match tool_calls to tool_results by order (1st call → 1st result of same tool, etc.)
+    const resultUsed = new Array(toolResults.length).fill(false);
+    for (let ci = 0; ci < toolCalls.length; ci++) {
+      const tc = toolCalls[ci];
+      let found = false;
+      for (let ri = 0; ri < toolResults.length; ri++) {
+        if (!resultUsed[ri] && toolResults[ri].data.tool === tc.data.tool) {
+          toolCallCompleted.push(true);
+          resultUsed[ri] = true;
+          found = true;
+          break;
+        }
+      }
+      if (!found) toolCallCompleted.push(false);
+    }
+
+    toolCallIdx = 0;
     for (const e of events) {
       if (e.type === 'init') continue;
       while (msgIdx < messages.length) {
@@ -216,8 +259,14 @@ export function AgentChat({
           msgIdx++;
         } else break;
       }
-      if (e.type === 'tool_call') items.push({ kind: 'tool_call', event: e });
-      else if (e.type === 'tool_result') items.push({ kind: 'tool_result', event: e });
+      if (e.type === 'tool_call') {
+        const completed = toolCallCompleted[toolCallIdx] || false;
+        items.push({ kind: 'tool_call', event: e, completed });
+        toolCallIdx++;
+      }
+      // Skip tool_result as separate rows — they're merged into tool_call
+      else if (e.type === 'tool_result') continue;
+      else if (e.type === 'refine_progress') items.push({ kind: 'refine_progress', event: e });
       else if (e.type === 'scratchpad_update') items.push({ kind: 'scratchpad_update', event: e });
     }
     while (msgIdx < messages.length) {
@@ -664,19 +713,24 @@ export function AgentChat({
               }
 
               if (item.kind === 'tool_call') {
+                const done = item.completed;
                 return (
                   <div key={i} style={toolCallStyle}>
-                    <span className="activity-spinner" style={{ color: 'var(--accent-blue)', width: '10px', height: '10px', borderWidth: '1.5px' }} />
-                    <span>{toolLabel(item.event!.data.tool, item.event!.data.args)}</span>
+                    {done
+                      ? <span style={{ color: 'var(--accent-green)', fontSize: '10px', width: '10px', textAlign: 'center' }}>&#10003;</span>
+                      : <span className="activity-spinner" style={{ color: 'var(--accent-blue)', width: '10px', height: '10px', borderWidth: '1.5px' }} />}
+                    <span style={{ color: done ? 'var(--text-muted)' : undefined }}>
+                      {toolLabel(item.event!.data.tool, item.event!.data.args)}
+                    </span>
                   </div>
                 );
               }
 
-              if (item.kind === 'tool_result') {
+              if (item.kind === 'refine_progress') {
                 return (
-                  <div key={i} style={toolCallStyle}>
-                    <span style={{ color: 'var(--accent-green)', fontSize: '10px' }}>&#10003;</span>
-                    <span>{item.event!.data.tool} completed</span>
+                  <div key={i} style={{ ...toolCallStyle, paddingLeft: '24px', fontSize: '10px', color: 'var(--accent-yellow)' }}>
+                    <span className="activity-spinner" style={{ color: 'var(--accent-yellow)', width: '8px', height: '8px', borderWidth: '1.5px' }} />
+                    <span>{item.event!.data.message || item.event!.data.step}</span>
                   </div>
                 );
               }
@@ -759,29 +813,47 @@ export function AgentChat({
         <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, background: 'rgba(0,0,0,0.12)', maxHeight: isTablet ? '40vh' : undefined }}>
           {/* Tabs */}
           <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', flexShrink: 0, overflowX: 'auto' }}>
-            {Object.keys(PAD_LABELS).map((key) => (
-              <button
-                key={key}
-                onClick={() => setActivePad(key)}
-                style={{
-                  flex: isTablet ? '0 0 auto' : 1,
-                  padding: '10px 4px',
-                  background: activePad === key ? 'rgba(255,255,255,0.04)' : 'transparent',
-                  border: 'none',
-                  borderBottom: activePad === key ? `2px solid ${PAD_COLORS[key]}` : '2px solid transparent',
-                  color: activePad === key ? PAD_COLORS[key] : 'var(--text-muted)',
-                  fontSize: '9px',
-                  fontFamily: 'var(--font-mono)',
-                  letterSpacing: '0.06em',
-                  textTransform: 'uppercase',
-                  cursor: 'pointer',
-                  whiteSpace: 'nowrap',
-                  minWidth: isTablet ? '120px' : undefined,
-                }}
-              >
-                {PAD_LABELS[key]}
-              </button>
-            ))}
+            {Object.keys(PAD_LABELS).map((key) => {
+              const ts = scratchpadTimestamps[key as keyof ScratchpadTimestamps];
+              const ago = timeAgo(ts);
+              return (
+                <button
+                  key={key}
+                  onClick={() => setActivePad(key)}
+                  style={{
+                    flex: isTablet ? '0 0 auto' : 1,
+                    padding: '8px 4px 6px',
+                    background: activePad === key ? 'rgba(255,255,255,0.04)' : 'transparent',
+                    border: 'none',
+                    borderBottom: activePad === key ? `2px solid ${PAD_COLORS[key]}` : '2px solid transparent',
+                    color: activePad === key ? PAD_COLORS[key] : 'var(--text-muted)',
+                    fontSize: '9px',
+                    fontFamily: 'var(--font-mono)',
+                    letterSpacing: '0.06em',
+                    textTransform: 'uppercase',
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap',
+                    minWidth: isTablet ? '120px' : undefined,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: '2px',
+                  }}
+                >
+                  {PAD_LABELS[key]}
+                  {ago && (
+                    <span style={{
+                      fontSize: '7px',
+                      opacity: 0.5,
+                      textTransform: 'none',
+                      letterSpacing: '0.02em',
+                    }}>
+                      {ago}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
 
           {/* Content */}
@@ -802,10 +874,25 @@ export function AgentChat({
 
 // ── Helpers ──
 
+function timeAgo(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 0) return 'just now';
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60) return 'just now';
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+}
+
 type TimelineItem = {
-  kind: 'message' | 'tool_call' | 'tool_result' | 'scratchpad_update';
+  kind: 'message' | 'tool_call' | 'tool_result' | 'refine_progress' | 'scratchpad_update';
   message?: ChatMessage;
   event?: AgentEvent;
+  completed?: boolean;  // for tool_call: has a matching tool_result
 };
 
 function toolLabel(toolName: string, args?: Record<string, any>): string {
@@ -818,6 +905,13 @@ function toolLabel(toolName: string, args?: Record<string, any>): string {
       return `Updating ${args?.name || 'scratchpad'}`;
     case 'generate_fcpxml':
       return `Generating FCPXML (${args?.shots?.length || 0} shots)`;
+    case 'refine_clip_timestamps': {
+      const file = args?.source_file || '';
+      const start = args?.source_start != null ? Number(args.source_start).toFixed(1) : '?';
+      const end = args?.source_end != null ? Number(args.source_end).toFixed(1) : '?';
+      const target = args?.target_duration != null ? Number(args.target_duration).toFixed(0) : '?';
+      return `Refining ${truncate(file, 24)} [${start}s–${end}s] → ${target}s`;
+    }
     case 'message_user':
       return 'Composing message...';
     default:

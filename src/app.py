@@ -177,12 +177,12 @@ async def v2_clear_planning(project_name: str):
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
 
-    for fname in ["storyboard.json", "clips.json", "context.md", "chat_history.json"]:
+    for fname in ["storyboard.json", "clips.json", "context.md", "chat_history.json", "event_log.json"]:
         p = workspace.root / fname
         if p.exists():
             p.unlink()
 
-    for subdir in ["iterations", "scratchpads", "fcpxml"]:
+    for subdir in ["iterations", "scratchpads", "fcpxml", "renders"]:
         d = workspace.root / subdir
         if d.exists():
             shutil.rmtree(d)
@@ -687,7 +687,9 @@ async def v2_agent_chat_ws(websocket: WebSocket, project_name: str):
     try:
         init_data: dict = {
             "scratchpads": agent.get_scratchpad_state(),
+            "scratchpad_timestamps": agent.get_scratchpad_timestamps(),
             "chat_history": agent.get_chat_history(),
+            "event_log": agent.get_event_log(),
             "project_name": project_name,
             "video_count": len(session_data.videos),
         }

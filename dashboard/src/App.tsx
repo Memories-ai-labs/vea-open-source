@@ -70,6 +70,7 @@ export default function App() {
       events={agent.events}
       messages={agent.messages}
       scratchpads={agent.scratchpads}
+      scratchpadTimestamps={agent.scratchpadTimestamps}
       editDecision={agent.editDecision}
       renderState={agent.renderState}
       connected={agent.connected}
