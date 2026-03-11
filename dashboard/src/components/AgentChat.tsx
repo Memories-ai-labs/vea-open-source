@@ -912,6 +912,10 @@ function toolLabel(toolName: string, args?: Record<string, any>): string {
       const target = args?.target_duration != null ? Number(args.target_duration).toFixed(0) : '?';
       return `Refining ${truncate(file, 24)} [${start}s–${end}s] → ${target}s`;
     }
+    case 'generate_narration':
+      return `Generating voiceover (${(args?.script || '').split(/\s+/).length} words)`;
+    case 'select_music':
+      return `Selecting music: "${truncate(args?.prompt || '', 50)}"`;
     case 'message_user':
       return 'Composing message...';
     default:
