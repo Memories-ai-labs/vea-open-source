@@ -56,3 +56,16 @@ quiz_predictions.txt
 # Dashboard
 dashboard/node_modules/
 dashboard/dist/
+dashboard/test-results/
+
+# Playwright MCP logs
+.playwright-mcp/
+
+# Claude Code
+.claude/
+
+# Screenshots
+e2e_test_result.png
+
+# OS
+.DS_Store

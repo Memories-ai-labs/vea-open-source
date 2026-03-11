@@ -1,4 +1,0 @@
-[   65777ms] [ERROR] WebSocket connection to 'ws://localhost:8000/video-edit/v2/agent/googleio/chat' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/src/hooks/useAgentChat.ts?t=1773201426252:25
-[   66780ms] [ERROR] WebSocket connection to 'ws://localhost:8000/video-edit/v2/agent/googleio/chat' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/src/hooks/useAgentChat.ts?t=1773201426252:25
-[  180003ms] [ERROR] WebSocket connection to 'ws://localhost:8000/video-edit/v2/agent/googleio/chat' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/src/hooks/useAgentChat.ts?t=1773201756918:25
-[  181006ms] [ERROR] WebSocket connection to 'ws://localhost:8000/video-edit/v2/agent/googleio/chat' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3000/src/hooks/useAgentChat.ts?t=1773201756918:25
