@@ -16,7 +16,7 @@ from lib.utils.media import (
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.llm.MemoriesAiManager import MemoriesAiManager
 from src.config import BUCKET_NAME, VIDEO_EXTS, INDEXING_DIR
-from src.pipelines.videoComprehension.tasks.caption_comprehension import CaptionComprehension
+from src.pipelines.v1_legacy.videoComprehension.tasks.caption_comprehension import CaptionComprehension
 
 logger = logging.getLogger(__name__)
 

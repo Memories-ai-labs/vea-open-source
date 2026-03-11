@@ -33,7 +33,7 @@ def video_entry() -> VideoEntry:
 def test_create_makes_directories(tmp_path):
     ws = WorkspaceManager("myproject", tmp_path)
     ws.create()
-    for subdir in ["iterations", "media", "narration", "music", "fcpxml", "renders"]:
+    for subdir in ["footage", "iterations", "narration", "music", "fcpxml", "renders", "logs"]:
         assert (tmp_path / "myproject" / subdir).is_dir()
 
 
@@ -202,26 +202,3 @@ def test_narration_path(workspace):
 def test_music_path(workspace):
     p = workspace.get_music_path()
     assert p.name == "track.mp3"
-
-
-# ---------------------------------------------------------------------------
-# Media symlinks
-# ---------------------------------------------------------------------------
-
-def test_ensure_media_symlinks(workspace, tmp_path):
-    src = tmp_path / "video.mp4"
-    src.write_bytes(b"fake")
-
-    workspace.ensure_media_symlinks([str(src)])
-    link = workspace.get_media_dir() / "video.mp4"
-    assert link.exists()
-    assert link.is_symlink()
-
-
-def test_ensure_media_symlinks_idempotent(workspace, tmp_path):
-    src = tmp_path / "video.mp4"
-    src.write_bytes(b"fake")
-    workspace.ensure_media_symlinks([str(src)])
-    workspace.ensure_media_symlinks([str(src)])  # should not raise
-    link = workspace.get_media_dir() / "video.mp4"
-    assert link.exists()

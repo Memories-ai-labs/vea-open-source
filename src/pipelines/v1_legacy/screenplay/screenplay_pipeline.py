@@ -14,7 +14,7 @@ from lib.utils.media import (
 )
 from src.config import BUCKET_NAME, INDEXING_DIR
 from src.pipelines.common.generate_subtitles import GenerateSubtitles
-from src.pipelines.screenplay.schema import SegmentTimestamp, SegmentTimestamps, SectionScreenplay
+from src.pipelines.v1_legacy.screenplay.schema import SegmentTimestamp, SegmentTimestamps, SectionScreenplay
 
 
 class ScreenplayPipeline:

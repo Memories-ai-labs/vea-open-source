@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel
 from typing import List, Optional
-from src.pipelines.qualityAnalysis.schema import QualityAssessmentResult
+from src.pipelines.v1_legacy.qualityAnalysis.schema import QualityAssessmentResult
 
 class MovieFile(BaseModel):
     """

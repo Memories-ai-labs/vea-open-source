@@ -40,7 +40,7 @@ def project_workspace(tmp_path, monkeypatch):
     entries = [VideoEntry("v1", "clip.mp4", "/media/clip.mp4", 120.0)]
     ws.init_session(entries, gist="Test gist for keynote")
 
-    monkeypatch.setattr("src.app.WORKSPACES_DIR", tmp_path)
+    monkeypatch.setattr("src.config.WORKSPACES_DIR", tmp_path)
     return ws, tmp_path
 
 
@@ -60,8 +60,8 @@ def test_root_health(client):
 
 def test_v2_index_missing_memories(client, tmp_path, monkeypatch):
     """Should return 500 if memories_manager is None."""
-    monkeypatch.setattr("src.app.memories_manager", None)
-    monkeypatch.setattr("src.app.WORKSPACES_DIR", tmp_path)
+    monkeypatch.setattr("src.services.memories_manager", None)
+    monkeypatch.setattr("src.config.WORKSPACES_DIR", tmp_path)
     resp = client.post("/video-edit/v2/index", json={
         "project_name": "p1",
         "source_dir": str(tmp_path),
@@ -76,9 +76,9 @@ def test_v2_index_missing_memories(client, tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_v2_plan_project_not_found(client, tmp_path, monkeypatch):
-    monkeypatch.setattr("src.app.WORKSPACES_DIR", tmp_path)
-    monkeypatch.setattr("src.app.memories_manager", MagicMock())
-    monkeypatch.setattr("src.app.gemini_manager", MagicMock())
+    monkeypatch.setattr("src.config.WORKSPACES_DIR", tmp_path)
+    monkeypatch.setattr("src.services.memories_manager", MagicMock())
+    monkeypatch.setattr("src.services.gemini_manager", MagicMock())
     resp = client.post("/video-edit/v2/plan", json={
         "project_name": "doesnotexist",
         "prompt": "Make a highlights reel",
@@ -88,8 +88,8 @@ def test_v2_plan_project_not_found(client, tmp_path, monkeypatch):
 
 def test_v2_plan_starts_for_existing_project(client, project_workspace, monkeypatch):
     ws, tmp_path = project_workspace
-    monkeypatch.setattr("src.app.memories_manager", MagicMock())
-    monkeypatch.setattr("src.app.gemini_manager", MagicMock())
+    monkeypatch.setattr("src.services.memories_manager", MagicMock())
+    monkeypatch.setattr("src.services.gemini_manager", MagicMock())
 
     # Patch IterativePlanningLoop.run to return immediately
     async def fake_run(self):
@@ -120,7 +120,7 @@ def test_v2_plan_status(client, project_workspace, monkeypatch):
 
 
 def test_v2_plan_status_not_found(client, tmp_path, monkeypatch):
-    monkeypatch.setattr("src.app.WORKSPACES_DIR", tmp_path)
+    monkeypatch.setattr("src.config.WORKSPACES_DIR", tmp_path)
     resp = client.get("/video-edit/v2/plan/status", params={"project_name": "ghost"})
     assert resp.status_code == 404
 
@@ -131,16 +131,16 @@ def test_v2_plan_status_not_found(client, tmp_path, monkeypatch):
 
 def test_v2_generate_fcpxml_no_storyboard(client, project_workspace, monkeypatch):
     """Should return 400 if no storyboard exists."""
-    monkeypatch.setattr("src.app.gemini_manager", MagicMock())
+    monkeypatch.setattr("src.services.gemini_manager", MagicMock())
     resp = client.post("/video-edit/v2/generate_fcpxml", json={"project_name": "test_proj"})
-    # No storyboard → 400
+    # No storyboard -> 400
     assert resp.status_code == 400
     assert "storyboard" in resp.json()["detail"].lower()
 
 
 def test_v2_generate_fcpxml_with_storyboard(client, project_workspace, tmp_path, monkeypatch):
     ws, _ = project_workspace
-    monkeypatch.setattr("src.app.gemini_manager", MagicMock())
+    monkeypatch.setattr("src.services.gemini_manager", MagicMock())
 
     # Create a storyboard
     clip = RetrievedClip(
@@ -159,7 +159,7 @@ def test_v2_generate_fcpxml_with_storyboard(client, project_workspace, tmp_path,
     async def fake_generate(*args, **kwargs):
         return fake_path
 
-    with patch("src.app.generate_fcpxml", fake_generate):
+    with patch("src.routes.v2_pipelines.generate_fcpxml", fake_generate):
         resp = client.post("/video-edit/v2/generate_fcpxml", json={"project_name": "test_proj"})
 
     assert resp.status_code == 200
@@ -188,8 +188,8 @@ def test_v2_resolve_status(client):
 # ---------------------------------------------------------------------------
 
 def test_v2_narration_not_found(client, tmp_path, monkeypatch):
-    monkeypatch.setattr("src.app.WORKSPACES_DIR", tmp_path)
-    monkeypatch.setattr("src.app.gemini_manager", MagicMock())
+    monkeypatch.setattr("src.config.WORKSPACES_DIR", tmp_path)
+    monkeypatch.setattr("src.services.gemini_manager", MagicMock())
     resp = client.post("/video-edit/v2/narration", json={"project_name": "ghost"})
     assert resp.status_code == 404
 
@@ -199,7 +199,7 @@ def test_v2_narration_not_found(client, tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_v2_crop_not_found(client, tmp_path, monkeypatch):
-    monkeypatch.setattr("src.app.WORKSPACES_DIR", tmp_path)
+    monkeypatch.setattr("src.config.WORKSPACES_DIR", tmp_path)
     resp = client.post("/video-edit/v2/crop", json={"project_name": "ghost", "aspect_ratio": 0.5625})
     assert resp.status_code == 404
 

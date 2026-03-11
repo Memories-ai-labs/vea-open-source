@@ -1,4 +1,4 @@
-"""Tool declarations and implementations for the agentic editing session."""
+"""Tool executor for the agentic editing session."""
 
 import asyncio
 import logging
@@ -7,228 +7,15 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from google.genai.types import FunctionDeclaration, Tool
-
 from src.pipelines.v2.agent.scratchpad import ScratchpadManager
+from src.pipelines.v2.agent.tool_definitions import TOOL_DECLARATIONS  # noqa: F401 — re-exported
+from src.pipelines.v2.agent.tool_helpers import (
+    download_soundstripe_track,
+    fetch_soundstripe_tracks,
+    tts_sync,
+)
 
 logger = logging.getLogger(__name__)
-
-# ── Gemini function declarations ──────────────────────────────────────────────
-
-TOOL_DECLARATIONS = Tool(
-    function_declarations=[
-        FunctionDeclaration(
-            name="ask_memories",
-            description=(
-                "Ask a natural-language question about the indexed video footage. "
-                "Memories.ai has watched every frame and can answer questions about "
-                "content, people, dialogue, visuals, timing, and structure. "
-                "Returns a text answer."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "The question to ask about the videos.",
-                    },
-                },
-                "required": ["question"],
-            },
-        ),
-        FunctionDeclaration(
-            name="search_footage",
-            description=(
-                "Search for specific video clips matching a query. "
-                "Returns clips with video_name, start/end timestamps, "
-                "relevance score, and description."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query describing the clip you want.",
-                    },
-                    "target_duration_seconds": {
-                        "type": "number",
-                        "description": "Desired clip length in seconds. Default 5.",
-                    },
-                },
-                "required": ["query"],
-            },
-        ),
-        FunctionDeclaration(
-            name="update_scratchpad",
-            description=(
-                "Modify one of your 4 persistent scratchpads. These survive the "
-                "sliding window — they are your ONLY durable memory. "
-                "Names: comprehension, creative_direction, planning, fcpxml. "
-                "Operations: replace (overwrite), append (add to end), prepend (add to start)."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "enum": ["comprehension", "creative_direction", "planning", "fcpxml"],
-                        "description": "Which scratchpad to update.",
-                    },
-                    "operation": {
-                        "type": "string",
-                        "enum": ["replace", "append", "prepend"],
-                        "description": "How to apply the content.",
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "The text to write.",
-                    },
-                },
-                "required": ["name", "operation", "content"],
-            },
-        ),
-        FunctionDeclaration(
-            name="generate_fcpxml",
-            description=(
-                "Generate a Final Cut Pro XML timeline from a complete edit decision. "
-                "Call this when the edit plan is finalized and clips are assigned. "
-                "Provide the edit as a JSON string. The system compiles it deterministically "
-                "to valid FCPXML 1.10."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "edit_decision_json": {
-                        "type": "string",
-                        "description": (
-                            "A JSON string representing the full edit decision. Schema: "
-                            '{"timeline": {"name": str, "fps": number, "width": int, "height": int}, '
-                            '"clips": [{"id": str, "source_file": str, "source_start": number, '
-                            '"source_end": number, "label": str, "description": str, "gain_db": number, '
-                            '"speed": {"rate": number}, '
-                            '"transition_after": {"type": "cross-dissolve"|"fade-in"|"fade-out", "duration_seconds": number}}], '
-                            '"narration": [{"file": str, "timeline_offset": number, "start": number, '
-                            '"duration": number, "gain_db": number}], '
-                            '"music": {"file": str, "start": number, "duration": number, "gain_db": number}, '
-                            '"titles": [{"text": str, "timeline_offset": number, "duration": number, "font_size": int}]}. '
-                            "Only clips is required. timeline defaults to 24fps 1920x1080."
-                        ),
-                    },
-                },
-                "required": ["edit_decision_json"],
-            },
-        ),
-        FunctionDeclaration(
-            name="refine_clip_timestamps",
-            description=(
-                "Refine the in/out points of a clip to find the best segment within a larger range. "
-                "Use this after search_footage returns a broad segment — this tool trims the source video, "
-                "transcribes dialogue via Memories.ai, sends both the video and transcript to Gemini, "
-                "and returns optimized start/end timestamps. Works for both dialogue-heavy and visual clips. "
-                "The tool automatically decides whether to focus on visuals, dialogue, or audio cues."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "source_file": {
-                        "type": "string",
-                        "description": "Filename of the source video (must be in the footage directory).",
-                    },
-                    "source_start": {
-                        "type": "number",
-                        "description": "Current in-point in seconds (start of the broad segment).",
-                    },
-                    "source_end": {
-                        "type": "number",
-                        "description": "Current out-point in seconds (end of the broad segment).",
-                    },
-                    "target_duration": {
-                        "type": "number",
-                        "description": "Desired clip duration in seconds. The refined clip should be close to this length.",
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "description": (
-                            "What makes a good clip here — e.g. 'Find the moment where the speaker announces the product' "
-                            "or 'Best visual of the crowd reacting' or 'The clearest explanation of the feature'."
-                        ),
-                    },
-                    "clip_description": {
-                        "type": "string",
-                        "description": "Brief description of what this clip is supposed to show in the edit.",
-                    },
-                },
-                "required": ["source_file", "source_start", "source_end", "target_duration", "prompt"],
-            },
-        ),
-        FunctionDeclaration(
-            name="generate_narration",
-            description=(
-                "Generate narration voiceover audio from a script. Takes the narration script text "
-                "and produces a single narration.mp3 file in the workspace. Call this ONLY after "
-                "an edit plan exists (so you know clip durations). The user must have requested "
-                "narration — do NOT call this unprompted. Returns the file path, duration, and a "
-                "transcript with per-sentence timestamps ({text, start, end}). Use the transcript "
-                "to align clips to the narration — adjust clip order and durations so visuals "
-                "match what's being narrated at each moment."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "script": {
-                        "type": "string",
-                        "description": (
-                            "The full narration script to convert to speech. Write it as natural "
-                            "spoken text — no stage directions, no shot labels. Pace at ~140 words/minute. "
-                            "Use '...' for pauses between sections."
-                        ),
-                    },
-                },
-                "required": ["script"],
-            },
-        ),
-        FunctionDeclaration(
-            name="select_music",
-            description=(
-                "Search for and download a background music track. Fetches candidate tracks from "
-                "the music library, uses an LLM to pick the best match based on your prompt, and "
-                "downloads it. Returns the file path, track name, and duration. Use this when the "
-                "user wants background music in their edit."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": (
-                            "Describe the ideal music — mood, energy, genre, instruments, tempo. "
-                            "Be specific: 'upbeat electronic with synths, 120bpm, energetic but not aggressive' "
-                            "is better than just 'upbeat'."
-                        ),
-                    },
-                },
-                "required": ["prompt"],
-            },
-        ),
-        FunctionDeclaration(
-            name="message_user",
-            description=(
-                "Send a visible message to the user in the chat interface. "
-                "Use this to share findings, propose plans, ask questions, or report progress."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": "The message to show to the user.",
-                    },
-                },
-                "required": ["message"],
-            },
-        ),
-    ]
-)
 
 
 # ── Tool executor ─────────────────────────────────────────────────────────────
@@ -452,7 +239,7 @@ class ToolExecutor:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(
                 None,
-                lambda: _tts_sync(script, str(audio_path), api_key),
+                lambda: tts_sync(script, str(audio_path), api_key),
             )
         except Exception as e:
             return {"error": f"TTS generation failed: {e}"}
@@ -490,7 +277,6 @@ class ToolExecutor:
     async def _select_music(self, args: Dict) -> Dict:
         """Fetch tracks from Soundstripe, use Gemini to pick best match, download it."""
         import os
-        import requests
 
         prompt = args.get("prompt", "")
         if not prompt.strip():
@@ -510,7 +296,7 @@ class ToolExecutor:
 
         loop = asyncio.get_event_loop()
         tracks = await loop.run_in_executor(
-            None, lambda: _fetch_soundstripe_tracks(soundstripe_key)
+            None, lambda: fetch_soundstripe_tracks(soundstripe_key)
         )
 
         if not tracks:
@@ -576,7 +362,7 @@ class ToolExecutor:
 
         downloaded = await loop.run_in_executor(
             None,
-            lambda: _download_soundstripe_track(selected_track, str(music_path)),
+            lambda: download_soundstripe_track(selected_track, str(music_path)),
         )
 
         if not downloaded:
@@ -861,91 +647,3 @@ The clip duration should be close to {target_duration:.1f}s but can vary if a na
 makes it slightly shorter or longer.
 
 Set `focus_type` to "dialogue", "visual", or "audio" based on what primarily drove your decision."""
-
-
-# ── Standalone helpers for narration & music ──────────────────────────────────
-
-
-def _tts_sync(text: str, output_path: str, api_key: str) -> None:
-    """Blocking ElevenLabs TTS call."""
-    from elevenlabs.client import ElevenLabs
-    client = ElevenLabs(api_key=api_key)
-    audio = client.text_to_speech.convert(
-        text=text,
-        voice_id="JBFqnCBsd6RMkjVDRZzb",
-        model_id="eleven_flash_v2_5",
-    )
-    with open(output_path, "wb") as f:
-        for chunk in audio:
-            if chunk:
-                f.write(chunk)
-
-
-def _fetch_soundstripe_tracks(api_key: str, page_count: int = 3) -> list:
-    """Fetch tracks from Soundstripe API with audio_files sideloaded."""
-    import requests
-    headers = {
-        "Authorization": f"Token {api_key}",
-        "Accept": "application/vnd.api+json",
-    }
-    all_tracks = []
-    # Map audio_file id → mp3 URL from sideloaded includes
-    audio_urls: dict = {}
-    for page in range(1, page_count + 1):
-        try:
-            resp = requests.get(
-                "https://api.soundstripe.com/v1/songs",
-                headers=headers,
-                params={
-                    "page[size]": 50,
-                    "page[number]": page,
-                    "include": "audio_files",
-                },
-                timeout=15,
-            )
-            if resp.status_code != 200:
-                break
-            body = resp.json()
-            # Collect audio_file URLs from the `included` sideload
-            for inc in body.get("included", []):
-                if inc.get("type") == "audio_files":
-                    versions = inc.get("attributes", {}).get("versions", {})
-                    mp3_url = versions.get("mp3")
-                    if mp3_url:
-                        audio_urls[inc["id"]] = mp3_url
-            all_tracks.extend(body.get("data", []))
-        except Exception as e:
-            logger.warning(f"[MUSIC] Soundstripe fetch error: {e}")
-            break
-
-    # Attach the resolved mp3 URL to each track for easy download later
-    for track in all_tracks:
-        audio_rels = track.get("relationships", {}).get("audio_files", {}).get("data", [])
-        for af in audio_rels:
-            url = audio_urls.get(af.get("id"))
-            if url:
-                track["_mp3_url"] = url
-                break
-
-    return all_tracks
-
-
-def _download_soundstripe_track(track: dict, output_path: str) -> bool:
-    """Download the mp3 for the selected track."""
-    import requests
-    url = track.get("_mp3_url")
-    if not url:
-        logger.warning(f"[MUSIC] No download URL found for track {track.get('id')}")
-        return False
-
-    try:
-        resp = requests.get(url, timeout=60, stream=True)
-        resp.raise_for_status()
-        with open(output_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-        return True
-    except Exception as e:
-        logger.error(f"[MUSIC] Download failed: {e}")
-        return False

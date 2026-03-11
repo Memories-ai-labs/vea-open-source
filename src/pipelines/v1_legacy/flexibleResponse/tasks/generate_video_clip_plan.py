@@ -1,4 +1,4 @@
-from src.pipelines.flexibleResponse.schema import ChosenClips
+from src.pipelines.v1_legacy.flexibleResponse.schema import ChosenClips
 from src.pipelines.common.schema import convert_timestamp_to_string
 from lib.utils.media import parse_time_to_seconds
 import asyncio

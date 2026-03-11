@@ -5,7 +5,7 @@ from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from lib.oss.storage_factory import get_storage_client
 from lib.utils.media import download_and_cache_video
 from src.config import BUCKET_NAME
-from src.pipelines.qualityAnalysis.schema import QualityAssessmentResult, BrandSafetyScores
+from src.pipelines.v1_legacy.qualityAnalysis.schema import QualityAssessmentResult, BrandSafetyScores
 
 
 class QualityAssessmentPipeline:

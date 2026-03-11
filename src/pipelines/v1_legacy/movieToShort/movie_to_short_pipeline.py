@@ -3,10 +3,10 @@ import json
 import asyncio
 from lib.oss.storage_factory import get_storage_client
 from src.config import BUCKET_NAME
-from src.pipelines.flexibleResponse.flexibleResponsePipeline import FlexibleResponsePipeline
+from src.pipelines.v1_legacy.flexibleResponse.flexibleResponsePipeline import FlexibleResponsePipeline
 from lib.utils.media import get_video_duration, download_and_cache_video
 from lib.utils.metrics_collector import metrics_collector
-from src.pipelines.movieToShort.schema import ShortsPlans
+from src.pipelines.v1_legacy.movieToShort.schema import ShortsPlans
 from src.pipelines.common.schema import convert_timestamp_to_string
 
 class MovieToShortsPipeline:

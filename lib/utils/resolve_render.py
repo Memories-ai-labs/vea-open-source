@@ -17,13 +17,17 @@ RENDER_PRESETS = {
         "format": "MP4",
         "codec": "H264_NVENC",  # fallback to H264 if NVENC unavailable
         "codec_fallback": "H264",
-        "description": "H.264 preview render",
+        "description": "H.264 preview render (480p)",
+        "width": 854,
+        "height": 480,
     },
     "final": {
         "format": "QuickTime",
         "codec": "ProRes422",
         "codec_fallback": "ProRes422",
-        "description": "ProRes 422 final render",
+        "description": "ProRes 422 final render (native resolution)",
+        "width": None,  # use timeline native resolution
+        "height": None,
     },
 }
 
@@ -136,14 +140,20 @@ class ResolveRenderer:
             logger.info(f"[RESOLVE] Timeline imported: {timeline.GetName()}, clips: {timeline.GetTrackCount('video')}")
 
             # Configure render settings
-            project.SetRenderSettings({
+            render_settings = {
                 "SelectAllFrames": True,
                 "TargetDir": output_dir,
                 "CustomName": output_name,
                 "UniqueFilenameStyle": 0,
                 "ExportVideo": True,
                 "ExportAudio": True,
-            })
+            }
+            # Set resolution for preview renders (480p for speed)
+            if preset.get("width") and preset.get("height"):
+                render_settings["FormatWidth"] = preset["width"]
+                render_settings["FormatHeight"] = preset["height"]
+                logger.info(f"[RESOLVE] Preview resolution: {preset['width']}x{preset['height']}")
+            project.SetRenderSettings(render_settings)
 
             # Try preferred codec, fall back if not available
             codec = preset["codec"]

@@ -1,11 +1,22 @@
 """Tests for fcpxml_compiler.py — autofix and 3-layer validation."""
 import pytest
+import tempfile
+from xml.etree.ElementTree import fromstring
+
 from src.pipelines.v2.fcpxml.fcpxml_compiler import (
     autofix,
     compile_fcpxml,
     ValidationResult,
     _fix_float_times,
     _strip_markdown,
+)
+from src.pipelines.v2.fcpxml.edit_compiler import compile_edit_decision
+from src.pipelines.v2.schemas import (
+    ClipDecision,
+    EditDecision,
+    MusicTrack,
+    NarrationSegment,
+    TimelineSettings,
 )
 
 # ---------------------------------------------------------------------------
@@ -191,3 +202,118 @@ def test_validation_result_error_summary():
     summary = r.error_summary()
     assert "error A" in summary
     assert "error B" in summary
+
+
+# ---------------------------------------------------------------------------
+# edit_compiler: duration clamping tests
+# ---------------------------------------------------------------------------
+
+def _make_edit_decision(
+    clips=None, narration=None, music=None, fps=24.0,
+) -> EditDecision:
+    """Helper to build a simple EditDecision for testing."""
+    if clips is None:
+        clips = [
+            ClipDecision(
+                id="clip1",
+                source_file="/media/source.mp4",
+                source_start=0.0,
+                source_end=10.0,
+                label="shot1",
+            ),
+        ]
+    return EditDecision(
+        timeline=TimelineSettings(name="Test", fps=fps, width=1920, height=1080),
+        clips=clips,
+        narration=narration or [],
+        music=music,
+    )
+
+
+def _compile_and_parse(edit: EditDecision) -> fromstring:
+    """Compile an EditDecision to FCPXML and return the parsed XML root."""
+    with tempfile.NamedTemporaryFile(suffix=".fcpxml", delete=False) as f:
+        path = f.name
+    compile_edit_decision(edit, path)
+    with open(path, "r") as f:
+        content = f.read()
+    # Strip the XML declaration and DOCTYPE to parse cleanly
+    xml_start = content.index("<fcpxml")
+    return fromstring(content[xml_start:])
+
+
+def test_narration_duration_clamped_to_spine():
+    """When narration duration exceeds spine duration, it gets clamped to spine length."""
+    # Spine has 10s of content (one clip from 0-10s at 24fps)
+    edit = _make_edit_decision(
+        narration=[
+            NarrationSegment(
+                file="/audio/narration.mp3",
+                timeline_offset=0.0,
+                start=0.0,
+                duration=30.0,  # 30s narration, but spine is only 10s
+            ),
+        ],
+    )
+    root = _compile_and_parse(edit)
+
+    # Find the narration asset-clip (lane="-1")
+    nar_clips = root.findall(".//" + "asset-clip[@lane='-1']")
+    assert len(nar_clips) == 1
+
+    # Parse the duration — it should be clamped to ~10s, not 30s
+    dur_str = nar_clips[0].get("duration")
+    # Duration is in fraction format like "240/24s" for 10s
+    # Parse the fraction to seconds
+    frac_part = dur_str.rstrip("s")
+    if "/" in frac_part:
+        num, den = frac_part.split("/")
+        dur_seconds = int(num) / int(den)
+    else:
+        dur_seconds = float(frac_part)
+    assert dur_seconds <= 10.0 + 0.05, f"Narration duration {dur_seconds}s should be clamped to spine (~10s)"
+
+
+def test_music_duration_clamped_to_spine():
+    """When music duration exceeds spine duration, it gets clamped to spine length."""
+    edit = _make_edit_decision(
+        music=MusicTrack(
+            file="/audio/music.mp3",
+            start=0.0,
+            duration=120.0,  # 120s music, but spine is only 10s
+            gain_db=-12.0,
+        ),
+    )
+    root = _compile_and_parse(edit)
+
+    # Find the music asset-clip (lane="-2")
+    music_clips = root.findall(".//" + "asset-clip[@lane='-2']")
+    assert len(music_clips) == 1
+
+    dur_str = music_clips[0].get("duration")
+    frac_part = dur_str.rstrip("s")
+    if "/" in frac_part:
+        num, den = frac_part.split("/")
+        dur_seconds = int(num) / int(den)
+    else:
+        dur_seconds = float(frac_part)
+    assert dur_seconds <= 10.0 + 0.05, f"Music duration {dur_seconds}s should be clamped to spine (~10s)"
+
+
+def test_narration_beyond_spine_skipped():
+    """Narration segments starting beyond the spine end are skipped entirely."""
+    edit = _make_edit_decision(
+        narration=[
+            NarrationSegment(
+                file="/audio/narration.mp3",
+                timeline_offset=20.0,  # starts at 20s, but spine is only 10s
+                start=0.0,
+                duration=5.0,
+            ),
+        ],
+    )
+    root = _compile_and_parse(edit)
+
+    # No narration should be placed (lane="-1")
+    nar_clips = root.findall(".//" + "asset-clip[@lane='-1']")
+    assert len(nar_clips) == 0, "Narration starting beyond spine should be skipped"

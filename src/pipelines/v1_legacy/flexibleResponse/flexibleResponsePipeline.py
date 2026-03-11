@@ -14,12 +14,12 @@ from lib.utils.media import clean_stale_tempdirs, download_and_cache_video, get_
 from lib.utils.metrics_collector import metrics_collector
 from src.config import BUCKET_NAME, INDEXING_DIR, OUTPUTS_DIR
 
-from src.pipelines.flexibleResponse.tasks.flexible_gemini_answer import FlexibleGeminiAnswer
-from src.pipelines.flexibleResponse.tasks.classify_response_type import ClassifyResponseType
-from src.pipelines.flexibleResponse.tasks.evidence_retrieval import EvidenceRetrieval
-from src.pipelines.flexibleResponse.tasks.clip_extraction import ClipExtractor
-from src.pipelines.flexibleResponse.tasks.generate_narration_script import GenerateNarrationScript
-from src.pipelines.flexibleResponse.tasks.generate_video_clip_plan import GenerateVideoClipPlan
+from src.pipelines.v1_legacy.flexibleResponse.tasks.flexible_gemini_answer import FlexibleGeminiAnswer
+from src.pipelines.v1_legacy.flexibleResponse.tasks.classify_response_type import ClassifyResponseType
+from src.pipelines.v1_legacy.flexibleResponse.tasks.evidence_retrieval import EvidenceRetrieval
+from src.pipelines.v1_legacy.flexibleResponse.tasks.clip_extraction import ClipExtractor
+from src.pipelines.v1_legacy.flexibleResponse.tasks.generate_narration_script import GenerateNarrationScript
+from src.pipelines.v1_legacy.flexibleResponse.tasks.generate_video_clip_plan import GenerateVideoClipPlan
 from src.pipelines.common.refine_clip_timestamps import RefineClipTimestamps
 from src.pipelines.common.generate_narration_audio import GenerateNarrationAudio
 from src.pipelines.common.music_selection import MusicSelection
