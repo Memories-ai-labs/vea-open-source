@@ -278,12 +278,14 @@ class ToolExecutor:
             return {"error": f"Invalid EditDecision: {e}"}
 
         # Resolve source_path for clips that only have source_file
+        footage_dir = self.workspace.get_footage_dir()
+        footage_files = self.workspace.scan_footage() if footage_dir.is_dir() else []
         for clip in edit.clips:
             if not clip.source_path and clip.source_file:
-                # Try to find the source file in the workspace footage
-                for video in (self.workspace.session.videos if hasattr(self.workspace, 'session') else []):
-                    if video.video_name == clip.source_file or clip.source_file in video.source_path:
-                        clip.source_path = video.source_path
+                # Match by exact filename or substring
+                for fp in footage_files:
+                    if fp.name == clip.source_file or clip.source_file in fp.name or fp.name in clip.source_file:
+                        clip.source_path = str(fp)
                         break
 
         # Save the EditDecision JSON for dashboard / debugging

@@ -181,9 +181,13 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
         clip_timeline_ranges.append((timeline_frames, timeline_frames + tl_frames))
         timeline_frames += tl_frames
 
-        # Transition after this clip
+        # Transition after this clip — overlap eats into adjacent clips
         if clip.transition_after and i < len(edit.clips) - 1:
+            trans_dur = _fraction_from_seconds(clip.transition_after.duration_seconds, fps_hint=fps)
+            _, trans_frames = _quantize_duration_to_timeline(trans_dur, fps)
             _add_transition(spine, clip.transition_after, fps_frac, fps)
+            # Subtract transition overlap from timeline position
+            timeline_frames -= trans_frames
 
     total_duration = Fraction(timeline_frames, 1) / fps_frac
     sequence_el.set("duration", _format_fraction_seconds(total_duration))
