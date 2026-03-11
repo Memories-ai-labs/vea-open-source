@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from src.config import WORKSPACES_DIR  # noqa: F401 - re-exported for test monkeypatching
-from src.routes import v2_projects, v2_pipelines, v1
+from src.routes import v2_projects, v2_pipelines
 from src.routes.v2_websockets import register_websocket_routes
 
 # Re-export shared state so existing tests can monkeypatch via "src.app.<name>"
@@ -17,10 +17,6 @@ from src.services import (  # noqa: F401
     gemini_manager,
     _planning_sessions,
     _agent_sessions,
-    _memories_pending_callbacks,
-    CAPTION_CALLBACK_URL,
-    register_memories_callback,
-    cleanup_orphaned_callbacks,
 )
 # Re-export generate_fcpxml so tests can patch "src.app.generate_fcpxml"
 from src.pipelines.v2.fcpxml.fcpxml_agent import generate_fcpxml  # noqa: F401
@@ -48,7 +44,6 @@ async def root():
 # --- Include route modules ---
 app.include_router(v2_projects.router)
 app.include_router(v2_pipelines.router)
-app.include_router(v1.router)
 
 # --- Register WebSocket routes (cannot use APIRouter) ---
 register_websocket_routes(app)

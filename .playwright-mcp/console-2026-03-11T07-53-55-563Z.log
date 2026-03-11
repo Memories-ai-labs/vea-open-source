@@ -1,0 +1,1 @@
+[  867642ms] [WARNING] WebSocket connection to 'ws://localhost:8000/video-edit/v2/agent/googleio%20copy/chat' failed: WebSocket is closed before the connection is established. @ http://localhost:3000/src/hooks/useAgentChat.ts?t=1773214820241:202

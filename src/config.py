@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 # --- Static Constants ---
-API_PREFIX = "/video-edit/v1"
 VIDEO_EXTS = [
     ".mp4", ".mov", ".mkv", ".avi", ".webm",
     ".mpg", ".mpeg", ".m4v"
@@ -78,10 +77,6 @@ V2_API_PREFIX = "/video-edit/v2"
 
 # --- Optional Features ---
 _features = _config.get("optional_features", {})
-ENABLE_MUSIC = _features.get("enable_music", True)
-ENABLE_DYNAMIC_CROPPING = _features.get("enable_dynamic_cropping", True)
-ENABLE_SUBTITLES = _features.get("enable_subtitles", True)
-ENABLE_FCPXML_EXPORT = _features.get("enable_fcpxml_export", True)
 
 # --- Video Processing Settings ---
 _video_settings = _config.get("video_processing", {})
@@ -89,15 +84,7 @@ DEFAULT_FPS = _video_settings.get("default_fps", 24)
 SUMMARY_FPS = _video_settings.get("summary_fps", 1)
 SUMMARY_CRF = _video_settings.get("summary_crf", 40)
 
-# --- Legacy Exports (for backward compatibility with existing code) ---
-# These map to the new local storage paths
-BUCKET_NAME = "local"  # Placeholder for storage abstraction
-MOVIE_LIBRARY = str(VIDEOS_DIR)
-LOCAL_STORAGE_BASE = VIDEOS_DIR.parent  # data/
-
 ENV = os.getenv("ENV", "development")
-CREDENTIAL_PATH = LEGACY_CREDENTIAL_PATH
-API_KEYS_PATH = LEGACY_API_KEYS_PATH
 
 
 def is_local_mode() -> bool:
