@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState, useCallback } from 'react';
+import React, { useMemo, useRef, useState, useCallback, useEffect } from 'react';
 import type { EditDecision, EditDecisionClip } from '../hooks/useAgentChat';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -82,8 +82,50 @@ export function NLETimeline({ editDecision }: NLETimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [hoveredClip, setHoveredClip] = useState<number | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
+  const [zoom, setZoom] = useState(1); // 0.25 to 4
+  const isDragging = useRef(false);
+  const dragStartX = useRef(0);
+  const dragScrollLeft = useRef(0);
 
-  // Compute clip layouts
+  // Drag-to-pan handlers
+  const onPointerDown = useCallback((e: React.PointerEvent) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    // Only pan with middle-click or when holding space (we'll use any click on the track bg)
+    isDragging.current = true;
+    dragStartX.current = e.clientX;
+    dragScrollLeft.current = el.scrollLeft;
+    el.style.cursor = 'grabbing';
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  }, []);
+
+  const onPointerMove = useCallback((e: React.PointerEvent) => {
+    if (!isDragging.current || !scrollRef.current) return;
+    const dx = e.clientX - dragStartX.current;
+    scrollRef.current.scrollLeft = dragScrollLeft.current - dx;
+  }, []);
+
+  const onPointerUp = useCallback((e: React.PointerEvent) => {
+    isDragging.current = false;
+    if (scrollRef.current) scrollRef.current.style.cursor = 'grab';
+  }, []);
+
+  // Scroll-wheel zoom (Ctrl/Cmd + wheel)
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? -0.15 : 0.15;
+        setZoom(z => Math.max(0.25, Math.min(4, z + delta * z)));
+      }
+    };
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
+  }, []);
+
+  // Compute clip layouts (zoom-aware)
   const { clips, totalDuration, timelineWidth } = useMemo(() => {
     if (!editDecision || editDecision.clips.length === 0) {
       return { clips: [] as ClipLayout[], totalDuration: 0, timelineWidth: 0 };
@@ -92,7 +134,7 @@ export function NLETimeline({ editDecision }: NLETimelineProps) {
     const totalDur = editDecision.clips.reduce(
       (sum, c) => sum + Math.max(0.5, c.source_end - c.source_start), 0
     );
-    const tlWidth = Math.max(totalDur * PX_PER_SEC, 400);
+    const tlWidth = Math.max(totalDur * PX_PER_SEC * zoom, 400);
 
     let x = 0;
     const layouts: ClipLayout[] = editDecision.clips.map((clip, i) => {
@@ -111,7 +153,7 @@ export function NLETimeline({ editDecision }: NLETimelineProps) {
     });
 
     return { clips: layouts, totalDuration: totalDur, timelineWidth: x };
-  }, [editDecision]);
+  }, [editDecision, zoom]);
 
   // Ruler tick generation
   const rulerTicks = useMemo(() => {
@@ -264,6 +306,49 @@ export function NLETimeline({ editDecision }: NLETimelineProps) {
         }}>
           {fmtShort(totalDuration)}
         </span>
+
+        {/* Zoom slider */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '4px',
+          flexShrink: 0,
+          marginLeft: '4px',
+          borderLeft: '1px solid rgba(255,255,255,0.06)',
+          paddingLeft: '8px',
+        }}>
+          <span style={{ fontSize: '9px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', cursor: 'pointer' }}
+            onClick={() => setZoom(z => Math.max(0.25, z / 1.3))}>-</span>
+          <input
+            type="range"
+            min="0.25"
+            max="4"
+            step="0.05"
+            value={zoom}
+            onChange={(e) => setZoom(parseFloat(e.target.value))}
+            style={{
+              width: '60px',
+              height: '3px',
+              appearance: 'none',
+              WebkitAppearance: 'none',
+              background: `linear-gradient(90deg, var(--accent-blue) ${((zoom - 0.25) / 3.75) * 100}%, rgba(255,255,255,0.1) ${((zoom - 0.25) / 3.75) * 100}%)`,
+              borderRadius: '2px',
+              outline: 'none',
+              cursor: 'pointer',
+            }}
+          />
+          <span style={{ fontSize: '9px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', cursor: 'pointer' }}
+            onClick={() => setZoom(z => Math.min(4, z * 1.3))}>+</span>
+          <span style={{
+            fontSize: '8px',
+            color: 'var(--text-muted)',
+            fontFamily: 'var(--font-mono)',
+            minWidth: '28px',
+            textAlign: 'right',
+          }}>
+            {Math.round(zoom * 100)}%
+          </span>
+        </div>
       </div>
 
       {/* ── Track area: header + scrollable tracks ── */}
@@ -383,14 +468,19 @@ export function NLETimeline({ editDecision }: NLETimelineProps) {
           </div>
         </div>
 
-        {/* Scrollable timeline area */}
+        {/* Scrollable timeline area (drag to pan) */}
         <div
           ref={scrollRef}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
           style={{
             flex: 1,
             overflowX: 'auto',
             overflowY: 'hidden',
             position: 'relative',
+            cursor: 'grab',
           }}
         >
           <div style={{
