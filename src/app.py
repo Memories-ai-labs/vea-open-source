@@ -182,7 +182,7 @@ async def v2_clear_planning(project_name: str):
         if p.exists():
             p.unlink()
 
-    for subdir in ["iterations", "scratchpads"]:
+    for subdir in ["iterations", "scratchpads", "fcpxml"]:
         d = workspace.root / subdir
         if d.exists():
             shutil.rmtree(d)
