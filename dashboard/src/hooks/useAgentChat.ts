@@ -20,10 +20,25 @@ export interface ScratchpadState {
   fcpxml: string;
 }
 
+export interface EditDecisionClip {
+  id: string;
+  source_file: string;
+  source_start: number;
+  source_end: number;
+  label?: string;
+}
+
+export interface EditDecision {
+  timeline?: { name?: string; fps?: number };
+  clips: EditDecisionClip[];
+  fcpxml_path?: string;
+}
+
 interface UseAgentChatResult {
   events: AgentEvent[];
   messages: ChatMessage[];
   scratchpads: ScratchpadState;
+  editDecision: EditDecision | null;
   connected: boolean;
   busy: boolean;
   send: (text: string) => void;
@@ -38,6 +53,7 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     planning: '',
     fcpxml: '',
   });
+  const [editDecision, setEditDecision] = useState<EditDecision | null>(null);
   const [connected, setConnected] = useState(false);
   const [busy, setBusy] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -81,6 +97,9 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
             if (event.data.chat_history) {
               setMessages(event.data.chat_history as ChatMessage[]);
             }
+            if (event.data.edit_decision) {
+              setEditDecision(event.data.edit_decision as EditDecision);
+            }
             return; // skip the append below
 
           case 'agent_message':
@@ -101,6 +120,15 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
                 ...prev,
                 [event.data.name]: event.data.content,
               }));
+            }
+            break;
+
+          case 'timeline_update':
+            if (event.data.edit_decision) {
+              setEditDecision({
+                ...event.data.edit_decision,
+                fcpxml_path: event.data.fcpxml_path,
+              });
             }
             break;
 
@@ -143,6 +171,7 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
       setEvents([]);
       setMessages([]);
       setScratchpads({ comprehension: '', creative_direction: '', planning: '', fcpxml: '' });
+      setEditDecision(null);
       setConnected(false);
       setBusy(false);
       return;
@@ -194,5 +223,5 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     }
   }, []);
 
-  return { events, messages, scratchpads, connected, busy, send };
+  return { events, messages, scratchpads, editDecision, connected, busy, send };
 }

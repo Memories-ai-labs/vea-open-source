@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import type { AgentEvent, ChatMessage, ScratchpadState } from '../hooks/useAgentChat';
+import type { AgentEvent, ChatMessage, ScratchpadState, EditDecision } from '../hooks/useAgentChat';
 import type { ProjectSummary } from '../types';
 import { listProjects, clearGists, clearPlanning, clearMemories, indexProject } from '../api';
 import { useBreakpoint } from '../hooks/useBreakpoint';
@@ -11,6 +11,7 @@ interface AgentChatProps {
   events: AgentEvent[];
   messages: ChatMessage[];
   scratchpads: ScratchpadState;
+  editDecision: EditDecision | null;
   connected: boolean;
   busy: boolean;
   onSend: (text: string) => void;
@@ -97,7 +98,7 @@ function useDragDivider(
 }
 
 export function AgentChat({
-  project: initialProject, events, messages, scratchpads, connected, busy, onSend, onBack,
+  project: initialProject, events, messages, scratchpads, editDecision, connected, busy, onSend, onBack,
 }: AgentChatProps) {
   const [project, setProject] = useState(initialProject);
   const [input, setInput] = useState('');
@@ -499,12 +500,44 @@ export function AgentChat({
           overflow: 'hidden',
         }}
       >
-        <div className="eyebrow" style={{ flexShrink: 0 }}>timeline</div>
-        <div style={{ flex: 1, height: '24px', borderRadius: '4px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <span style={{ color: 'var(--text-muted)', fontSize: '10px', fontFamily: 'var(--font-mono)', letterSpacing: '0.06em' }}>
-            {project.has_fcpxml ? 'FCPXML generated — timeline available' : 'Timeline will appear after FCPXML generation'}
-          </span>
-        </div>
+        <div className="eyebrow" style={{ flexShrink: 0 }}>timeline{editDecision ? ` · ${editDecision.clips.length} clips` : ''}</div>
+        {editDecision ? (
+          <div style={{ flex: 1, display: 'flex', gap: '2px', height: '32px', alignItems: 'stretch', overflow: 'hidden' }}>
+            {editDecision.clips.map((clip, i) => {
+              const dur = clip.source_end - clip.source_start;
+              const totalDur = editDecision.clips.reduce((s, c) => s + (c.source_end - c.source_start), 0) || 1;
+              const pct = (dur / totalDur) * 100;
+              const colors = ['var(--accent-blue)', 'var(--accent-purple)', 'var(--accent-green)', 'var(--accent-orange)', 'var(--accent-yellow)', 'var(--accent-red)'];
+              const color = colors[i % colors.length];
+              return (
+                <div
+                  key={clip.id}
+                  title={`${clip.id}: ${clip.label || clip.source_file} (${dur.toFixed(1)}s)`}
+                  style={{
+                    flex: `0 0 ${pct}%`,
+                    minWidth: '4px',
+                    background: `${color}22`,
+                    border: `1px solid ${color}66`,
+                    borderRadius: '3px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    overflow: 'hidden',
+                    cursor: 'default',
+                  }}
+                >
+                  <span style={{ fontSize: '8px', color, fontWeight: 700, whiteSpace: 'nowrap' }}>{clip.id}</span>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div style={{ flex: 1, height: '24px', borderRadius: '4px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <span style={{ color: 'var(--text-muted)', fontSize: '10px', fontFamily: 'var(--font-mono)', letterSpacing: '0.06em' }}>
+              Timeline will appear after FCPXML generation
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Divider */}

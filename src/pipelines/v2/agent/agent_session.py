@@ -235,6 +235,22 @@ class AgentSession:
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     })
 
+                # Special handling for generate_fcpxml — emit timeline data
+                if tool_name == "generate_fcpxml" and "error" not in result:
+                    import json as _json
+                    edit_json_path = result.get("edit_decision_path")
+                    if edit_json_path:
+                        try:
+                            with open(edit_json_path) as f:
+                                edit_data = _json.load(f)
+                            await self._emit("timeline_update", {
+                                "edit_decision": edit_data,
+                                "fcpxml_path": result.get("fcpxml_path"),
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            })
+                        except Exception:
+                            pass  # non-critical
+
                 # Special handling for scratchpad updates — emit the update
                 if tool_name == "update_scratchpad":
                     await self._emit("scratchpad_update", {

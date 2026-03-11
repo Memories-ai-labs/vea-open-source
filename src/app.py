@@ -663,16 +663,30 @@ async def v2_agent_chat_ws(websocket: WebSocket, project_name: str):
     agent._emit = emit
     print(f"[AGENT WS] Bound emit to current connection for project={project_name}", flush=True)
 
+    # Load edit decision if it exists
+    edit_decision_data = None
+    edit_decision_path = workspace.root / "fcpxml" / "edit_decision.json"
+    if edit_decision_path.exists():
+        try:
+            import json as _json
+            with open(edit_decision_path) as f:
+                edit_decision_data = _json.load(f)
+        except Exception:
+            pass
+
     # Send initial state on connect
     try:
+        init_data: dict = {
+            "scratchpads": agent.get_scratchpad_state(),
+            "chat_history": agent.get_chat_history(),
+            "project_name": project_name,
+            "video_count": len(session_data.videos),
+        }
+        if edit_decision_data:
+            init_data["edit_decision"] = edit_decision_data
         await websocket.send_json({
             "type": "init",
-            "data": {
-                "scratchpads": agent.get_scratchpad_state(),
-                "chat_history": agent.get_chat_history(),
-                "project_name": project_name,
-                "video_count": len(session_data.videos),
-            },
+            "data": init_data,
         })
         print(f"[AGENT WS] Sent init to client for project={project_name}", flush=True)
     except Exception as e:
