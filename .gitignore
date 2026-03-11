@@ -58,6 +58,9 @@ dashboard/node_modules/
 dashboard/dist/
 dashboard/test-results/
 
+# Dev script state
+.dev/
+
 # Playwright MCP logs
 .playwright-mcp/
 

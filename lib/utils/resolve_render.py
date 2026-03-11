@@ -166,17 +166,48 @@ class ResolveRenderer:
             logger.info(f"[RESOLVE] Render job added: {job_id}")
 
             project.StartRendering(job_id)
+            await asyncio.sleep(1)  # let Resolve initialize the render job
 
-            # Poll for completion
+            # Poll for completion with timeout
+            RENDER_TIMEOUT = 300  # 5 minutes max
+            STALL_TIMEOUT = 60   # 60s with no progress change = stalled
+            start_time = time.monotonic()
+            last_pct = -1.0
+            last_progress_time = start_time
+
             while project.IsRenderingInProgress():
+                elapsed = time.monotonic() - start_time
+                if elapsed > RENDER_TIMEOUT:
+                    logger.error(f"[RESOLVE] Render timed out after {RENDER_TIMEOUT}s")
+                    project.StopRendering()
+                    raise RuntimeError(f"Render timed out after {RENDER_TIMEOUT}s")
+
                 try:
                     status = project.GetRenderJobStatus(job_id)
                     if status:
                         pct = float(status.get("CompletionPercentage", 0))
-                        logger.info(f"[RESOLVE] Render progress: {pct:.0f}%")
+                        job_status = status.get("JobStatus", "")
+                        logger.info(f"[RESOLVE] Render progress: {pct:.0f}% (status={job_status}, elapsed={elapsed:.0f}s)")
+
+                        if pct != last_pct:
+                            last_pct = pct
+                            last_progress_time = time.monotonic()
+
                         if progress_callback:
                             await progress_callback(pct)
+
+                        # Check if stalled (0% for too long usually means offline media)
+                        stall_duration = time.monotonic() - last_progress_time
+                        if stall_duration > STALL_TIMEOUT and pct == 0:
+                            logger.error(f"[RESOLVE] Render stalled at 0% for {stall_duration:.0f}s — likely offline media")
+                            project.StopRendering()
+                            raise RuntimeError(
+                                f"Render stalled at 0% for {stall_duration:.0f}s. "
+                                "Check that source media files exist and are accessible."
+                            )
                 except Exception as e:
+                    if "timed out" in str(e) or "stalled" in str(e):
+                        raise
                     logger.debug(f"[RESOLVE] Status poll error (non-fatal): {e}")
                 await asyncio.sleep(2)
 
@@ -194,7 +225,16 @@ class ResolveRenderer:
             ext_map = {"QuickTime": ".mov", "MP4": ".mp4"}
             ext = ext_map.get(preset["format"], ".mp4")
             actual_output = str(Path(output_dir) / f"{output_name}{ext}")
-            logger.info(f"[RESOLVE] Output: {actual_output}")
+
+            # Verify output actually exists
+            out_path = Path(actual_output)
+            if not out_path.exists() or out_path.stat().st_size < 1024:
+                raise RuntimeError(
+                    f"[RESOLVE] Output file missing or empty: {actual_output}. "
+                    "Render may have failed silently."
+                )
+
+            logger.info(f"[RESOLVE] Output: {actual_output} ({out_path.stat().st_size / 1024:.0f} KB)")
             return actual_output
 
         finally:

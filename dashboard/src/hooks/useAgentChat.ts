@@ -160,9 +160,9 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
               const rs = event.data.render_state;
               setRenderState({
                 status: rs.status || 'idle',
-                progress: rs.status === 'complete' ? 100 : 0,
+                progress: rs.progress ?? (rs.status === 'complete' ? 100 : 0),
                 filename: rs.filename || null,
-                error: null,
+                error: rs.error || null,
               });
             }
             // Replay persisted events (tool calls, results, scratchpad updates)

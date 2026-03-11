@@ -5,6 +5,7 @@ import { useBreakpoint } from '../hooks/useBreakpoint';
 
 function statusColor(status: string): string {
   switch (status) {
+    case 'ready': return 'var(--accent-cyan, #60d5c8)';
     case 'planning': return 'var(--accent-yellow)';
     case 'indexed': return 'var(--accent-blue)';
     case 'done': return 'var(--accent-green)';

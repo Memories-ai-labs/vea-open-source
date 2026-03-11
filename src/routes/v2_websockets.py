@@ -176,14 +176,14 @@ def register_websocket_routes(app: FastAPI):
             except Exception:
                 pass
 
-        # Check for existing preview render
-        render_path = workspace.get_render_path("preview")
+        # Get render state from agent (survives reconnects) or fall back to file check
         render_state = None
-        if render_path.exists():
-            render_state = {
-                "status": "complete",
-                "filename": render_path.name,
-            }
+        if agent._render_state.get("status") in ("rendering", "complete", "error"):
+            render_state = agent._render_state
+        else:
+            render_path = workspace.get_render_path("preview")
+            if render_path.exists():
+                render_state = {"status": "complete", "filename": render_path.name}
 
         # Send initial state on connect
         try:

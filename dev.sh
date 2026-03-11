@@ -7,24 +7,26 @@ cd "$ROOT_DIR"
 
 PORT=8000
 COMMAND=""
-WITH_NGROK=false
 FRONTEND_DEV=false
 SKIP_DASHBOARD_BUILD=false
 
 PIDS_DIR="$ROOT_DIR/.dev"
-NGROK_PID_FILE="$PIDS_DIR/ngrok.pid"
 FRONTEND_PID_FILE="$PIDS_DIR/frontend.pid"
 
 BLUE='\033[0;34m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
 NC='\033[0m'
 
 print_header() {
-  echo -e "${BLUE}================================================${NC}"
-  echo -e "${BLUE}  VEA Developer Bootstrap${NC}"
-  echo -e "${BLUE}================================================${NC}"
+  echo
+  echo -e "${CYAN}  ╔═══════════════════════════════════════╗${NC}"
+  echo -e "${CYAN}  ║       VEA Developer Bootstrap         ║${NC}"
+  echo -e "${CYAN}  ╚═══════════════════════════════════════╝${NC}"
+  echo
 }
 
 info() {
@@ -32,11 +34,15 @@ info() {
 }
 
 success() {
-  echo -e "${GREEN}$1${NC}"
+  echo -e "${GREEN}  ✓ $1${NC}"
 }
 
 warn() {
-  echo -e "${YELLOW}$1${NC}"
+  echo -e "${YELLOW}  ! $1${NC}"
+}
+
+fail() {
+  echo -e "${RED}  ✗ $1${NC}"
 }
 
 error() {
@@ -49,23 +55,22 @@ Usage:
   ./dev.sh [setup|up|doctor|down] [options]
 
 Commands:
-  setup               Install repo dependencies, prompt for config, build dashboard
-  up                  Start the backend and optional local helpers
-  doctor              Check local tooling and repo readiness without changing anything
+  setup               Install dependencies, prompt for API keys, build dashboard
+  up                  Start backend (runs setup first if needed)
+  doctor              Check all tooling and config without changing anything
   down                Stop background processes started by this script
 
 Options:
   --port=PORT         Backend port (default: 8000)
-  --with-ngrok        Start ngrok and export MEMORIES_CAPTION_CALLBACK_URL
-  --frontend-dev      Start Vite dev server on port 5173 in the background
+  --frontend-dev      Also start Vite dev server on port 5173 (hot reload)
   --skip-dashboard-build
-                      Skip dashboard production build checks
+                      Skip dashboard production build
   --help, -h          Show this help
 
 Behavior:
-  - With no command, the script runs setup if the repo is uninitialized, otherwise up.
+  - With no command: runs setup if uninitialized, otherwise up.
   - The dashboard is served by FastAPI at /app when dashboard/dist exists.
-  - ngrok is optional and only needed for the webhook-based v1 indexing flow.
+  - DaVinci Resolve Studio is optional but needed for preview rendering.
 EOF
 }
 
@@ -77,8 +82,8 @@ require_command() {
   local cmd="$1"
   local help_text="$2"
   if ! command_exists "$cmd"; then
-    error "Missing required command: $cmd"
-    echo "  $help_text" >&2
+    fail "Missing required command: $cmd"
+    echo "    $help_text" >&2
     exit 1
   fi
 }
@@ -155,45 +160,45 @@ prompt_for_config_key() {
   current_value="$(read_config_value "$key")"
 
   if ! is_placeholder_value "$current_value" "$placeholder"; then
-    success "  $key already configured"
+    success "$key already configured"
     return
   fi
 
   if [[ ! -t 0 ]]; then
     if [[ "$required" == "true" ]]; then
-      error "Missing required config value for $key and no interactive TTY is available."
+      fail "Missing required config value for $key and no interactive TTY is available."
       exit 1
     fi
-    warn "  Skipping optional key $key (no interactive prompt available)"
+    warn "Skipping optional key $key (no interactive prompt available)"
     return
   fi
 
   echo
   if [[ "$required" == "true" ]]; then
-    echo -e "${YELLOW}$prompt_text${NC}"
+    echo -e "  ${YELLOW}[required] $prompt_text${NC}"
   else
-    echo -e "${BLUE}$prompt_text${NC}"
+    echo -e "  ${DIM}[optional] $prompt_text${NC}"
   fi
 
   local value=""
   while true; do
     if [[ "$secret" == "true" ]]; then
-      read -r -s -p "> " value
+      read -r -s -p "  > " value
       echo
     else
-      read -r -p "> " value
+      read -r -p "  > " value
     fi
 
     if [[ -n "$value" ]]; then
       write_config_value "$key" "$value"
-      success "  Saved $key to config.json"
+      success "Saved $key"
       break
     fi
 
     if [[ "$required" == "true" ]]; then
-      warn "  $key is required."
+      warn "$key is required."
     else
-      warn "  Leaving $key unchanged."
+      warn "Leaving $key unchanged."
       break
     fi
   done
@@ -201,55 +206,216 @@ prompt_for_config_key() {
 
 copy_config_if_missing() {
   if [[ -f "$ROOT_DIR/config.json" ]]; then
-    success "  config.json present"
+    success "config.json present"
     return
   fi
 
   if [[ ! -f "$ROOT_DIR/config.example.json" ]]; then
-    error "config.example.json is missing"
+    fail "config.example.json is missing"
     exit 1
   fi
 
   cp "$ROOT_DIR/config.example.json" "$ROOT_DIR/config.json"
-  success "  Created config.json from config.example.json"
+  success "Created config.json from config.example.json"
 }
 
 repo_needs_setup() {
   [[ ! -d "$ROOT_DIR/.venv" || ! -f "$ROOT_DIR/config.json" || ! -d "$ROOT_DIR/dashboard/dist" ]]
 }
 
-check_core_tooling() {
-  info "[doctor] Checking required developer tools..."
-  require_command python3 "Install Python 3.12+ and ensure python3 is on PATH."
-  require_command uv "Install uv: https://docs.astral.sh/uv/getting-started/installation/"
-  require_command ffmpeg "Install ffmpeg (brew install ffmpeg, apt install ffmpeg, etc.)."
-  require_command node "Install Node.js 20+."
-  require_command npm "Install npm with Node.js."
-  require_command gcloud "Install Google Cloud SDK: https://cloud.google.com/sdk/docs/install"
-  success "  Core tooling is available"
-}
+# ── Checks ──────────────────────────────────────────────────────────────
 
-check_optional_tooling() {
-  if [[ "$WITH_NGROK" == "true" ]]; then
-    require_command ngrok "Install ngrok: https://ngrok.com/download"
-    success "  ngrok is available"
+check_python_version() {
+  local version
+  version="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  local major minor
+  major="$(echo "$version" | cut -d. -f1)"
+  minor="$(echo "$version" | cut -d. -f2)"
+  if [[ "$major" -ge 3 && "$minor" -ge 12 ]]; then
+    success "Python $version"
+  else
+    fail "Python $version found, but 3.12+ is required"
+    exit 1
   fi
 }
+
+check_core_tooling() {
+  info "[check] Required tools"
+  require_command python3 "Install Python 3.12+ and ensure python3 is on PATH."
+  check_python_version
+  require_command uv "Install uv: https://docs.astral.sh/uv/getting-started/installation/"
+  success "uv"
+  require_command ffmpeg "Install ffmpeg: brew install ffmpeg"
+  success "ffmpeg"
+  require_command node "Install Node.js 20+: https://nodejs.org"
+  success "node $(node --version 2>/dev/null)"
+  require_command npm "Install npm with Node.js."
+  success "npm"
+  require_command gcloud "Install Google Cloud SDK: https://cloud.google.com/sdk/docs/install"
+  success "gcloud"
+}
+
+check_gcloud_auth() {
+  info "[check] Google Cloud credentials"
+  if gcloud auth application-default print-access-token >/dev/null 2>&1; then
+    success "Application-default credentials active"
+  else
+    warn "Google application-default credentials not found"
+    echo -e "    Run: ${CYAN}gcloud auth application-default login${NC}"
+    if [[ -t 0 ]]; then
+      read -r -p "    Run it now? [Y/n] " response
+      response="${response:-Y}"
+      if [[ "$response" =~ ^[Yy]$ ]]; then
+        gcloud auth application-default login
+      fi
+    fi
+  fi
+}
+
+check_resolve() {
+  info "[check] DaVinci Resolve (optional — needed for preview rendering)"
+
+  # Check if Resolve process is running
+  if pgrep -if "DaVinci Resolve" >/dev/null 2>&1 || pgrep -if "resolve" >/dev/null 2>&1; then
+    success "DaVinci Resolve is running"
+  else
+    warn "DaVinci Resolve is not running"
+    echo -e "    Preview rendering requires Resolve Studio running (GUI or -nogui mode)."
+    echo -e "    Without it, FCPXML files will still be generated but not auto-rendered."
+    return
+  fi
+
+  # Check scripting API paths
+  local api_path="${RESOLVE_SCRIPT_API:-}"
+  if [[ -z "$api_path" ]]; then
+    # Try macOS default
+    local mac_default="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting"
+    if [[ -d "$mac_default" ]]; then
+      success "Resolve scripting API found at default macOS path"
+    else
+      warn "RESOLVE_SCRIPT_API not set and default path not found"
+      echo "    Add to your shell profile:"
+      echo '    export RESOLVE_SCRIPT_API="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting"'
+      echo '    export RESOLVE_SCRIPT_LIB="/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so"'
+      echo '    export PYTHONPATH="$PYTHONPATH:$RESOLVE_SCRIPT_API/Modules/"'
+    fi
+  else
+    if [[ -d "$api_path" ]]; then
+      success "RESOLVE_SCRIPT_API set: $api_path"
+    else
+      warn "RESOLVE_SCRIPT_API set but directory not found: $api_path"
+    fi
+  fi
+
+  # Try to connect via Python
+  local resolve_status
+  resolve_status="$(python3 - <<'PY' 2>/dev/null || echo "error"
+import sys, os
+api = os.environ.get("RESOLVE_SCRIPT_API", "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting")
+modules = os.path.join(api, "Modules")
+if modules not in sys.path:
+    sys.path.insert(0, modules)
+try:
+    import DaVinciResolveScript as dvr
+    r = dvr.scriptapp("Resolve")
+    if r is None:
+        print("no-connection")
+    else:
+        pm = r.GetProjectManager()
+        if pm is None:
+            print("free-edition")
+        else:
+            print("studio-ok")
+except ImportError:
+    print("no-import")
+except Exception as e:
+    print(f"error:{e}")
+PY
+)"
+
+  case "$resolve_status" in
+    studio-ok)
+      success "Resolve Studio scripting API connected"
+      ;;
+    free-edition)
+      warn "Resolve is running but scripting requires Studio edition (not Free)"
+      ;;
+    no-connection)
+      warn "Resolve scripting returned None — try restarting Resolve"
+      ;;
+    no-import)
+      warn "Could not import DaVinciResolveScript — check PYTHONPATH includes Modules/"
+      ;;
+    *)
+      warn "Resolve check returned: $resolve_status"
+      ;;
+  esac
+}
+
+check_config_keys() {
+  info "[check] API keys in config.json"
+  if [[ ! -f "$ROOT_DIR/config.json" ]]; then
+    fail "config.json missing"
+    return
+  fi
+
+  local key val placeholder
+  local -a keys=("MEMORIES_API_KEY" "GOOGLE_CLOUD_PROJECT" "ELEVENLABS_API_KEY" "SOUNDSTRIPE_KEY")
+  local -a placeholders=("your-memories-ai-api-key" "your-gcp-project-id" "your-elevenlabs-api-key" "your-soundstripe-api-key")
+  local -a labels=("Memories.ai (video understanding)" "Google Cloud Project (Gemini)" "ElevenLabs (TTS + STT)" "Soundstripe (music)")
+  local -a required=("true" "true" "true" "false")
+
+  for i in "${!keys[@]}"; do
+    key="${keys[$i]}"
+    val="$(read_config_value "$key")"
+    placeholder="${placeholders[$i]}"
+    if ! is_placeholder_value "$val" "$placeholder"; then
+      success "${labels[$i]}: configured"
+    else
+      if [[ "${required[$i]}" == "true" ]]; then
+        fail "${labels[$i]}: NOT SET"
+      else
+        warn "${labels[$i]}: not set (optional)"
+      fi
+    fi
+  done
+}
+
+check_vinet_model() {
+  info "[check] ViNet saliency model (optional — for dynamic cropping)"
+  if [[ -f "$ROOT_DIR/vinet_v2/final_models/ViNet.pt" || -f "$ROOT_DIR/vinet_v2/final_models/vinet.pt" ]]; then
+    success "ViNet model present"
+    return
+  fi
+
+  warn "ViNet model weights not found"
+  if [[ -t 0 ]]; then
+    read -r -p "    Download/setup ViNet now? [y/N] " response
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+      uv run python -m lib.utils.vinet_setup
+      success "ViNet setup complete"
+    else
+      warn "Skipped ViNet setup (dynamic cropping will be unavailable)"
+    fi
+  fi
+}
+
+# ── Setup ───────────────────────────────────────────────────────────────
 
 ensure_uv_env() {
   info "[setup] Syncing Python environment with uv..."
   uv sync
-  success "  Python dependencies installed"
+  success "Python dependencies installed"
 }
 
 ensure_dashboard_deps() {
   info "[setup] Installing dashboard dependencies..."
   if [[ -f "$ROOT_DIR/dashboard/package-lock.json" ]]; then
-    (cd "$ROOT_DIR/dashboard" && npm ci)
+    (cd "$ROOT_DIR/dashboard" && npm ci --silent)
   else
-    (cd "$ROOT_DIR/dashboard" && npm install)
+    (cd "$ROOT_DIR/dashboard" && npm install --silent)
   fi
-  success "  Dashboard dependencies ready"
+  success "Dashboard dependencies ready"
 }
 
 dashboard_needs_build() {
@@ -274,11 +440,11 @@ dashboard_needs_build() {
 
 build_dashboard_if_needed() {
   if dashboard_needs_build; then
-    info "[setup] Building dashboard bundle..."
-    (cd "$ROOT_DIR/dashboard" && npm run build)
-    success "  Dashboard built for FastAPI at /app"
+    info "[setup] Building dashboard..."
+    (cd "$ROOT_DIR/dashboard" && npm run build 2>&1 | tail -1)
+    success "Dashboard built → served at /app"
   else
-    success "  Dashboard build already up to date"
+    success "Dashboard build up to date"
   fi
 }
 
@@ -292,193 +458,54 @@ ensure_repo_dirs() {
 }
 
 prompt_for_config() {
-  info "[setup] Checking config.json..."
+  info "[setup] API keys"
   copy_config_if_missing
 
   prompt_for_config_key \
     "MEMORIES_API_KEY" \
-    "Enter MEMORIES_API_KEY (required, from https://memories.ai/app/service/key):" \
+    "Memories.ai API key (https://memories.ai/app/service/key):" \
     "your-memories-ai-api-key" \
     "true" \
     "true"
 
   prompt_for_config_key \
     "GOOGLE_CLOUD_PROJECT" \
-    "Enter GOOGLE_CLOUD_PROJECT (required for Gemini / Vertex AI):" \
+    "Google Cloud Project ID (for Gemini / Vertex AI):" \
     "your-gcp-project-id" \
     "true" \
     "false"
 
   prompt_for_config_key \
     "GOOGLE_CLOUD_LOCATION" \
-    "Enter GOOGLE_CLOUD_LOCATION or press Enter to keep the default us-central1:" \
+    "Google Cloud location (press Enter for us-central1):" \
     "us-central1" \
     "false" \
     "false"
 
   prompt_for_config_key \
     "ELEVENLABS_API_KEY" \
-    "Enter ELEVENLABS_API_KEY or press Enter to skip narration setup:" \
+    "ElevenLabs API key (https://elevenlabs.io — needed for TTS + STT):" \
     "your-elevenlabs-api-key" \
-    "false" \
+    "true" \
     "true"
 
   prompt_for_config_key \
     "SOUNDSTRIPE_KEY" \
-    "Enter SOUNDSTRIPE_KEY or press Enter to skip music setup:" \
+    "Soundstripe API key (optional — for background music):" \
     "your-soundstripe-api-key" \
     "false" \
     "true"
 }
 
-check_gcloud_auth() {
-  info "[doctor] Checking Google application-default credentials..."
-  if gcloud auth application-default print-access-token >/dev/null 2>&1; then
-    success "  Google application-default credentials are available"
-  else
-    warn "  Google application-default credentials are not ready."
-    echo "  Run: gcloud auth application-default login"
-  fi
-}
-
-check_vinet_model() {
-  info "[setup] Checking ViNet model..."
-  if [[ -f "$ROOT_DIR/vinet_v2/final_models/ViNet.pt" || -f "$ROOT_DIR/vinet_v2/final_models/vinet.pt" ]]; then
-    success "  ViNet model already present"
-    return
-  fi
-
-  warn "  ViNet model weights not found."
-  if [[ -t 0 ]]; then
-    read -r -p "  Download/setup ViNet now? [Y/n] " response
-    response="${response:-Y}"
-    if [[ "$response" =~ ^[Yy]$ ]]; then
-      uv run python -m lib.utils.vinet_setup
-      success "  ViNet setup complete"
-    else
-      warn "  Skipped ViNet setup"
-    fi
-  else
-    warn "  Skipping ViNet setup (no interactive prompt available)"
-  fi
-}
+# ── Up / Down ───────────────────────────────────────────────────────────
 
 check_port_available() {
   local port="$1"
   if lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
-    error "Port $port is already in use."
-    echo "  Stop the process on that port or run ./dev.sh up --port=<other-port>" >&2
+    fail "Port $port is already in use."
+    echo "    Stop the process on that port or use --port=<other>" >&2
     exit 1
   fi
-}
-
-ensure_ngrok_auth() {
-  local has_auth=false
-  local config_file=""
-  for config_file in \
-    "$HOME/.config/ngrok/ngrok.yml" \
-    "$HOME/Library/Application Support/ngrok/ngrok.yml" \
-    "$HOME/.ngrok2/ngrok.yml" \
-    "$HOME/snap/ngrok/common/ngrok.yml"; do
-    if [[ -f "$config_file" ]] && grep -q "authtoken:" "$config_file" 2>/dev/null; then
-      has_auth=true
-      break
-    fi
-  done
-
-  if [[ "$has_auth" == "true" ]]; then
-    success "  ngrok authenticated"
-    return
-  fi
-
-  if [[ ! -t 0 ]]; then
-    error "ngrok is not authenticated and no interactive TTY is available."
-    exit 1
-  fi
-
-  warn "  ngrok needs an auth token."
-  echo "  Get one from: https://dashboard.ngrok.com/get-started/your-authtoken"
-  read -r -p "> " token
-  if [[ -z "$token" ]]; then
-    error "No ngrok auth token provided."
-    exit 1
-  fi
-  ngrok config add-authtoken "$token" >/dev/null
-  success "  ngrok authenticated"
-}
-
-start_ngrok() {
-  ensure_dev_dir
-  ensure_ngrok_auth
-
-  local existing_url=""
-  existing_url="$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | python3 - <<'PY'
-import json
-import sys
-
-try:
-    payload = json.loads(sys.stdin.read() or "{}")
-except Exception:
-    print("")
-    raise SystemExit(0)
-
-for tunnel in payload.get("tunnels", []):
-    public_url = tunnel.get("public_url", "")
-    if public_url.startswith("https://"):
-        print(public_url)
-        break
-else:
-    print("")
-PY
-)"
-
-  if [[ -n "$existing_url" ]]; then
-    export MEMORIES_CAPTION_CALLBACK_URL="${existing_url}/webhooks/memories/caption"
-    success "  Reusing existing ngrok tunnel at $existing_url"
-    return
-  fi
-
-  info "[up] Starting ngrok on port $PORT..."
-  ngrok http "$PORT" >"$PIDS_DIR/ngrok.log" 2>&1 &
-  local ngrok_pid=$!
-  echo "$ngrok_pid" >"$NGROK_PID_FILE"
-
-  local tunnel_url=""
-  local retries=15
-  while [[ $retries -gt 0 ]]; do
-    sleep 1
-    tunnel_url="$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | python3 - <<'PY'
-import json
-import sys
-
-try:
-    payload = json.loads(sys.stdin.read() or "{}")
-except Exception:
-    print("")
-    raise SystemExit(0)
-
-for tunnel in payload.get("tunnels", []):
-    public_url = tunnel.get("public_url", "")
-    if public_url.startswith("https://"):
-        print(public_url)
-        break
-else:
-    print("")
-PY
-)"
-    if [[ -n "$tunnel_url" ]]; then
-      break
-    fi
-    retries=$((retries - 1))
-  done
-
-  if [[ -z "$tunnel_url" ]]; then
-    error "Could not determine ngrok public URL."
-    exit 1
-  fi
-
-  export MEMORIES_CAPTION_CALLBACK_URL="${tunnel_url}/webhooks/memories/caption"
-  success "  ngrok tunnel active at $tunnel_url"
 }
 
 start_frontend_dev() {
@@ -487,82 +514,19 @@ start_frontend_dev() {
     local existing_pid
     existing_pid="$(cat "$FRONTEND_PID_FILE")"
     if kill -0 "$existing_pid" >/dev/null 2>&1; then
-      warn "  Frontend dev server already running (pid $existing_pid)"
+      warn "Frontend dev server already running (pid $existing_pid)"
       return
     fi
     rm -f "$FRONTEND_PID_FILE"
   fi
 
-  info "[up] Starting dashboard dev server on http://localhost:5173 ..."
+  info "[up] Starting Vite dev server on http://localhost:5173 ..."
   (
     cd "$ROOT_DIR/dashboard"
     npm run dev -- --host 0.0.0.0
   ) >"$PIDS_DIR/frontend.log" 2>&1 &
   echo "$!" >"$FRONTEND_PID_FILE"
-  success "  Dashboard dev server started in background"
-}
-
-print_ready_message() {
-  echo
-  success "Environment is ready."
-  echo "  Backend:   http://localhost:${PORT}"
-  echo "  API docs:  http://localhost:${PORT}/docs"
-  echo "  Dashboard: http://localhost:${PORT}/app"
-  if [[ "$FRONTEND_DEV" == "true" ]]; then
-    echo "  Frontend:  http://localhost:5173"
-  fi
-  if [[ "$WITH_NGROK" == "true" && -n "${MEMORIES_CAPTION_CALLBACK_URL:-}" ]]; then
-    echo "  Callback:  ${MEMORIES_CAPTION_CALLBACK_URL}"
-  fi
-  echo
-  echo "Next steps:"
-  echo "  1. Open the dashboard URL above."
-  echo "  2. Create or open a workspace."
-  echo "  3. Drop footage into data/workspaces/<project>/footage/."
-}
-
-run_setup() {
-  print_header
-  check_core_tooling
-  check_optional_tooling
-  ensure_repo_dirs
-  ensure_uv_env
-  prompt_for_config
-  check_gcloud_auth
-  check_vinet_model
-  ensure_dashboard_deps
-  build_dashboard_if_needed
-  echo
-  success "Setup complete."
-  echo "Run ./dev.sh up to start the backend."
-}
-
-run_doctor() {
-  print_header
-  check_core_tooling
-  check_optional_tooling
-
-  if [[ -d "$ROOT_DIR/.venv" ]]; then
-    success "  .venv exists"
-  else
-    warn "  .venv is missing"
-  fi
-
-  if [[ -f "$ROOT_DIR/config.json" ]]; then
-    success "  config.json exists"
-  else
-    warn "  config.json is missing"
-  fi
-
-  if [[ -d "$ROOT_DIR/dashboard/dist" ]]; then
-    success "  dashboard/dist exists"
-  else
-    warn "  dashboard/dist is missing"
-  fi
-
-  check_gcloud_auth
-  echo
-  echo "Doctor completed."
+  success "Dashboard dev server started (http://localhost:5173)"
 }
 
 stop_pid_file() {
@@ -581,49 +545,134 @@ stop_pid_file() {
   rm -f "$file"
 }
 
+print_ready_message() {
+  echo
+  echo -e "${GREEN}  ┌─────────────────────────────────────┐${NC}"
+  echo -e "${GREEN}  │         Environment is ready         │${NC}"
+  echo -e "${GREEN}  └─────────────────────────────────────┘${NC}"
+  echo
+  echo -e "  Backend:   ${CYAN}http://localhost:${PORT}${NC}"
+  echo -e "  API docs:  ${CYAN}http://localhost:${PORT}/docs${NC}"
+  echo -e "  Dashboard: ${CYAN}http://localhost:${PORT}/app${NC}"
+  if [[ "$FRONTEND_DEV" == "true" ]]; then
+    echo -e "  Vite HMR:  ${CYAN}http://localhost:5173${NC}"
+  fi
+  echo
+  echo -e "  ${DIM}Getting started:${NC}"
+  echo -e "  ${DIM}  1. Open the dashboard${NC}"
+  echo -e "  ${DIM}  2. Create a project${NC}"
+  echo -e "  ${DIM}  3. Drop video files into data/workspaces/<project>/footage/${NC}"
+  echo -e "  ${DIM}  4. Click into the project to index videos and start editing${NC}"
+  echo
+}
+
+# ── Commands ────────────────────────────────────────────────────────────
+
+run_setup() {
+  print_header
+  check_core_tooling
+  echo
+  ensure_repo_dirs
+  ensure_uv_env
+  echo
+  prompt_for_config
+  echo
+  check_gcloud_auth
+  echo
+  check_resolve
+  echo
+  check_vinet_model
+  echo
+  ensure_dashboard_deps
+  build_dashboard_if_needed
+  echo
+  echo -e "${GREEN}  Setup complete. Run ${CYAN}./dev.sh up${GREEN} to start.${NC}"
+  echo
+}
+
+run_doctor() {
+  print_header
+  check_core_tooling
+  echo
+
+  info "[check] Repository state"
+  if [[ -d "$ROOT_DIR/.venv" ]]; then
+    success ".venv exists"
+  else
+    fail ".venv missing — run ./dev.sh setup"
+  fi
+
+  if [[ -d "$ROOT_DIR/dashboard/node_modules" ]]; then
+    success "dashboard/node_modules exists"
+  else
+    fail "dashboard/node_modules missing — run ./dev.sh setup"
+  fi
+
+  if [[ -d "$ROOT_DIR/dashboard/dist" ]]; then
+    success "dashboard/dist exists"
+  else
+    warn "dashboard/dist missing (will be built on ./dev.sh up)"
+  fi
+  echo
+
+  check_config_keys
+  echo
+  check_gcloud_auth
+  echo
+  check_resolve
+  echo
+  check_vinet_model
+  echo
+
+  echo -e "  ${DIM}Doctor complete.${NC}"
+  echo
+}
+
 run_down() {
   print_header
-  stop_pid_file "$NGROK_PID_FILE" "ngrok"
   stop_pid_file "$FRONTEND_PID_FILE" "frontend dev server"
-  echo "Background helper shutdown complete."
+  echo "  Background processes stopped."
 }
 
 run_up() {
   print_header
   check_core_tooling
-  check_optional_tooling
+  echo
 
   if repo_needs_setup; then
-    warn "Repo is not fully initialized. Running setup first..."
+    warn "Repo not fully initialized — running setup first..."
+    echo
     run_setup
     echo
   fi
 
   if [[ ! -f "$ROOT_DIR/config.json" ]]; then
-    error "config.json is missing."
+    fail "config.json is missing."
     exit 1
   fi
 
+  # Validate required keys
   local memories_key
   memories_key="$(read_config_value "MEMORIES_API_KEY")"
   if is_placeholder_value "$memories_key" "your-memories-ai-api-key"; then
-    error "MEMORIES_API_KEY is not configured in config.json"
+    fail "MEMORIES_API_KEY is not configured in config.json"
+    echo "    Run: ./dev.sh setup"
     exit 1
   fi
 
   local gcp_project
   gcp_project="$(read_config_value "GOOGLE_CLOUD_PROJECT")"
   if is_placeholder_value "$gcp_project" "your-gcp-project-id"; then
-    warn "GOOGLE_CLOUD_PROJECT is not configured. Gemini-backed features may fail."
+    warn "GOOGLE_CLOUD_PROJECT not configured — Gemini features may fail"
+  fi
+
+  local el_key
+  el_key="$(read_config_value "ELEVENLABS_API_KEY")"
+  if is_placeholder_value "$el_key" "your-elevenlabs-api-key"; then
+    warn "ELEVENLABS_API_KEY not configured — narration and clip refinement will be limited"
   fi
 
   build_dashboard_if_needed
-
-  if [[ "$WITH_NGROK" == "true" ]]; then
-    start_ngrok
-  else
-    warn "Skipping ngrok. v1 webhook-based indexing will be unavailable."
-  fi
 
   if [[ "$FRONTEND_DEV" == "true" ]]; then
     start_frontend_dev
@@ -631,12 +680,13 @@ run_up() {
 
   check_port_available "$PORT"
   print_ready_message
-  echo
-  success "Starting backend in foreground. Press Ctrl+C to stop."
+  echo -e "  ${GREEN}Starting backend. Press Ctrl+C to stop.${NC}"
   echo
 
   exec uv run python -m src.app
 }
+
+# ── Argument parsing ────────────────────────────────────────────────────
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -646,10 +696,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --port=*)
       PORT="${1#*=}"
-      shift
-      ;;
-    --with-ngrok)
-      WITH_NGROK=true
       shift
       ;;
     --frontend-dev)

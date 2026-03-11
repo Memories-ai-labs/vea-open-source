@@ -104,6 +104,10 @@ class WorkspaceManager:
         summary["footage_files"] = [f.name for f in footage]
         summary["video_count"] = len(footage)
 
+        # Default status based on footage presence
+        if footage:
+            summary["status"] = "ready"
+
         # Session info
         if self.exists():
             try:
@@ -158,7 +162,7 @@ class WorkspaceManager:
                 projects.append(mgr.get_summary())
         # Sort: active first, then by last_updated desc
         def _sort_key(p: Dict[str, Any]):
-            status_order = {"planning": 0, "indexed": 1, "new": 2, "done": 3, "error": 4}
+            status_order = {"planning": 0, "indexed": 1, "ready": 2, "new": 3, "done": 4, "error": 5}
             return (status_order.get(p["status"], 9), -(p["last_updated"] or "").count(""))
         projects.sort(key=_sort_key)
         return projects

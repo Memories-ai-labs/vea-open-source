@@ -85,6 +85,9 @@ class AgentSession:
                 video_lines.append(f"- (unmatched footage file: `{fn}`)")
         self.video_list = "\n".join(video_lines)
 
+        # Render state — persists across WebSocket reconnects
+        self._render_state: Dict = {"status": "idle"}
+
         # Scratchpads
         self.scratchpads = ScratchpadManager(workspace.root)
 
@@ -358,16 +361,24 @@ class AgentSession:
             media_dir = str(self.workspace.get_footage_dir())
             output_path = str(self.workspace.get_render_path("preview"))
 
-            await self._emit("render_start", {
-                "quality": "preview",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
-
-            async def progress_cb(pct: float):
-                await self._emit("render_progress", {
-                    "percent": pct,
+            self._render_state = {"status": "rendering", "progress": 0}
+            try:
+                await self._emit("render_start", {
+                    "quality": "preview",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
+            except Exception:
+                pass  # client may be disconnected
+
+            async def progress_cb(pct: float):
+                self._render_state["progress"] = pct
+                try:
+                    await self._emit("render_progress", {
+                        "percent": pct,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+                except Exception:
+                    pass  # client may be disconnected
 
             renderer = ResolveRenderer()
             rendered = await renderer.render(
@@ -378,19 +389,27 @@ class AgentSession:
                 progress_callback=progress_cb,
             )
 
-            await self._emit("render_complete", {
-                "output_path": rendered,
-                "filename": Path(rendered).name,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+            self._render_state = {"status": "complete", "filename": Path(rendered).name}
+            try:
+                await self._emit("render_complete", {
+                    "output_path": rendered,
+                    "filename": Path(rendered).name,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass  # client may be disconnected
             logger.info(f"[AGENT] Auto-render complete: {rendered}")
 
         except Exception as e:
             logger.warning(f"[AGENT] Auto-render failed (non-fatal): {e}")
-            await self._emit("render_error", {
-                "error": str(e),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            })
+            self._render_state = {"status": "error", "error": str(e)}
+            try:
+                await self._emit("render_error", {
+                    "error": str(e),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass  # client may be disconnected
 
     # ── History management ────────────────────────────────────────────────
 
