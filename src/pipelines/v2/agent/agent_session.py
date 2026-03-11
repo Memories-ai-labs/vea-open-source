@@ -142,7 +142,7 @@ class AgentSession:
             raise
 
     async def _agent_loop(self) -> None:
-        """Run Gemini in a loop until it produces a final text response."""
+        """Run Gemini in a loop until it signals completion."""
         last_message_user_text: str | None = None
         for round_num in range(MAX_TOOL_ROUNDS):
             # Rebuild system prompt with current scratchpads
@@ -193,7 +193,6 @@ class AgentSession:
                 text_parts = [p.text for p in model_content.parts if p.text]
                 full_text = "\n".join(text_parts)
                 if full_text.strip():
-                    # Skip if this is just a repeat of the last message_user text
                     is_duplicate = (
                         last_message_user_text
                         and full_text.strip() == last_message_user_text.strip()
