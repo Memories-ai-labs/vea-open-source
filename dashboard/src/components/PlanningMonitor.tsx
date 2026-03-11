@@ -1,6 +1,7 @@
 import { useEffect, useRef, useMemo } from 'react';
 import type { PlanningEvent, Storyboard, Shot, RetrievedClip } from '../types';
 import { Panel } from './Panel';
+import { ChatLog } from './ChatLog';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -539,19 +540,23 @@ function VideoTrack({ video }: { video: VideoEntry }) {
 interface PlanningMonitorProps {
   events: PlanningEvent[];
   projectName: string;
+  initialPrompt: string;
+  paused: boolean;
+  planningDone: boolean;
   onPause: () => void;
   onResume: () => void;
   onInject: (prompt: string) => void;
-  paused: boolean;
 }
 
 export function PlanningMonitor({
   events,
   projectName: _projectName,
-  onPause: _onPause,
-  onResume: _onResume,
-  onInject: _onInject,
-  paused: _paused,
+  initialPrompt,
+  paused,
+  planningDone,
+  onPause,
+  onResume,
+  onInject,
 }: PlanningMonitorProps) {
   const latestStoryboard = useMemo<Storyboard | null>(() => {
     const sbs = events.filter((e) => e.event_type === 'storyboard_update');
@@ -562,7 +567,7 @@ export function PlanningMonitor({
     <div
       style={{
         display: 'grid',
-        gridTemplateColumns: '1fr 1fr',
+        gridTemplateColumns: '1fr 1fr minmax(280px, 0.55fr)',
         gridTemplateRows: '1fr 1fr',
         gap: '6px',
         flex: 1,
@@ -571,6 +576,17 @@ export function PlanningMonitor({
     >
       <KnowledgePanel events={events} />
       <StoryboardPanel storyboard={latestStoryboard} />
+      <div style={{ gridColumn: '3', gridRow: '1 / -1', minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        <ChatLog
+          initialPrompt={initialPrompt}
+          events={events}
+          paused={paused}
+          planningDone={planningDone}
+          onInject={onInject}
+          onPause={onPause}
+          onResume={onResume}
+        />
+      </div>
       <ToolFeedPanel events={events} />
       <FootageMap events={events} />
     </div>

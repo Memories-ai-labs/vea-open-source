@@ -72,15 +72,27 @@ to retrieve the actual clip once you know how it looks visually.
 # Phase 1: Gist extraction
 # ---------------------------------------------------------------------------
 
-GIST_PROMPT = """Give me a broad overview of this video content. Cover:
-- What the video is about overall (topic, format, purpose)
-- Who the main speakers, subjects, or characters are
-- What major topics, events, or moments are covered
-- The overall tone, pacing, and energy
-- Roughly what happens in different time periods (beginning, middle, end)
-- Any standout or memorable moments
+GIST_PROMPT = """Give me a thorough editorial overview of this video. Structure your response as follows:
 
-Be comprehensive but concise. This overview will be used to plan a video edit."""
+**Format & Purpose**
+What kind of video is this? (talk, event, interview, documentary, tutorial, etc.) What is its goal?
+
+**People & Roles**
+Who are the main speakers, subjects, or characters? Describe their role and approximate screen time.
+
+**Narrative Structure**
+Walk through the video chronologically — what happens in the beginning, middle, and end? What are the major transitions or shifts?
+
+**Key Moments & Topics**
+List the most important, interesting, or emotionally significant moments with rough timestamps if possible. What topics or themes recur?
+
+**Tone & Energy**
+How does the energy level change throughout? Are there high-energy, slow, emotional, or humorous sections? Where are the peaks?
+
+**Raw Material Assessment**
+What makes this footage good to edit with? What are the strongest clips or sections? Are there any weaknesses (poor audio, dead time, repetition)?
+
+Be specific and detailed. This overview will be the foundation for an agentic video editing session."""
 
 # ---------------------------------------------------------------------------
 # Phase 2, Call A: Decide tool calls

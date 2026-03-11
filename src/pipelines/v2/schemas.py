@@ -17,6 +17,7 @@ class VideoEntry:
     video_name: str
     source_path: str
     duration_seconds: Optional[float] = None
+    gist: str = ""  # multi-paragraph editorial overview for this specific video
 
 @dataclass
 class PlanningState:
@@ -41,7 +42,13 @@ class SessionData:
 
     @classmethod
     def from_dict(cls, d: dict) -> "SessionData":
-        videos = [VideoEntry(**v) for v in d.get("videos", [])]
+        videos = [VideoEntry(
+            video_no=v["video_no"],
+            video_name=v["video_name"],
+            source_path=v["source_path"],
+            duration_seconds=v.get("duration_seconds"),
+            gist=v.get("gist", ""),
+        ) for v in d.get("videos", [])]
         planning_raw = d.get("planning", {})
         planning = PlanningState(
             iteration_count=planning_raw.get("iteration_count", 0),
@@ -111,3 +118,85 @@ class Storyboard(BaseModel):
     shots: List[Shot] = []
     open_questions: List[str] = []
     notes: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Edit Decision format — JSON representation of a complete video edit.
+# The LLM produces this; deterministic code compiles it to FCPXML.
+# The dashboard reads this same JSON to render the timeline view.
+# ---------------------------------------------------------------------------
+
+class TimelineSettings(BaseModel):
+    """Timeline-level metadata."""
+    name: str = "VEA Edit"
+    fps: float = 24.0
+    width: int = 1920
+    height: int = 1080
+
+class TransformSettings(BaseModel):
+    """Crop/reframe transform for a clip (FCPXML adjust-transform)."""
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+    position_x: float = 0.0
+    position_y: float = 0.0
+    rotation: float = 0.0
+
+class SpeedChange(BaseModel):
+    """Constant speed change. rate=0.5 → half speed, rate=2.0 → double speed."""
+    rate: float = 1.0
+
+class TransitionSpec(BaseModel):
+    """Transition placed after a clip (between it and the next clip)."""
+    type: Literal["cross-dissolve", "fade-in", "fade-out"] = "cross-dissolve"
+    duration_seconds: float = 0.5
+
+class ClipDecision(BaseModel):
+    """A single clip on the primary storyline (spine). Ordered by list index."""
+    id: str
+    source_file: str            # filename of the source video
+    source_path: str = ""       # full path (resolved at compile time if empty)
+    source_start: float         # in-point in seconds
+    source_end: float           # out-point in seconds
+    label: str = ""             # human-readable description
+    gain_db: Optional[float] = None
+    speed: Optional[SpeedChange] = None
+    transform: Optional[TransformSettings] = None
+    transition_after: Optional[TransitionSpec] = None
+
+class NarrationSegment(BaseModel):
+    """A narration audio segment placed at a specific timeline position."""
+    file: str                   # path to narration audio file
+    timeline_offset: float      # where on the timeline to place it (seconds)
+    start: float = 0.0          # in-point within the narration file
+    duration: float             # duration of this segment
+    gain_db: float = 0.0
+
+class MusicTrack(BaseModel):
+    """Background music spanning the timeline."""
+    file: str
+    start: float = 0.0         # in-point within the music file
+    duration: float = 0.0      # 0 = use full timeline duration
+    gain_db: float = -12.0
+
+class TextOverlay(BaseModel):
+    """A title/text overlay at a specific timeline position."""
+    text: str
+    timeline_offset: float     # seconds into timeline
+    duration: float            # seconds
+    lane: int = 1              # positive = above spine
+    font_size: int = 72
+
+class EditDecision(BaseModel):
+    """
+    Complete edit decision — the contract between the LLM and the FCPXML compiler.
+
+    The LLM fills this out with creative decisions (which clips, what order,
+    transitions, narration, music). Deterministic code compiles it to valid
+    FCPXML 1.10. The dashboard reads the same JSON for the timeline view.
+    """
+    timeline: TimelineSettings = TimelineSettings()
+    clips: List[ClipDecision] = []
+    transitions: List[TransitionSpec] = []  # kept for backward compat; prefer clip.transition_after
+    narration: List[NarrationSegment] = []
+    music: Optional[MusicTrack] = None
+    titles: List[TextOverlay] = []

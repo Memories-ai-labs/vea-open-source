@@ -90,6 +90,9 @@ class WorkspaceManager:
             "clip_count": 0,
             "iteration_count": 0,
             "footage_files": [],
+            "indexed_files": [],   # filenames that have a video_no in session.json
+            "video_gists": {},     # {video_name: gist_text}
+            "gist": "",
             "has_storyboard": False,
             "has_fcpxml": False,
             "has_renders": False,
@@ -109,6 +112,11 @@ class WorkspaceManager:
                 summary["video_count"] = len(session.videos) or len(footage)
                 summary["iteration_count"] = session.planning.iteration_count if session.planning else 0
                 summary["last_updated"] = session.updated_at
+                summary["indexed_files"] = [v.video_name for v in session.videos if v.video_no]
+                summary["gist"] = session.gist or ""
+                summary["video_gists"] = {
+                    v.video_name: v.gist for v in session.videos if v.gist
+                }
             except Exception:
                 pass
 

@@ -70,7 +70,7 @@ class QualityAssessmentResponse(BaseModel):
 
 class V2IndexRequest(BaseModel):
     project_name: str
-    source_dir: str       # e.g. "data/videos/googleio/"
+    source_dir: Optional[str] = None  # if omitted, auto-detects from workspace footage/ dir
     start_fresh: bool = False
 
 class V2IndexResponse(BaseModel):

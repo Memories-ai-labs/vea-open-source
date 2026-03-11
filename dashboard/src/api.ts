@@ -23,6 +23,18 @@ export function listProjects(): Promise<{ projects: ProjectSummary[] }> {
   return req('/projects');
 }
 
+export function clearGists(projectName: string): Promise<{ status: string }> {
+  return req(`/projects/${encodeURIComponent(projectName)}/clear/gists`, 'POST');
+}
+
+export function clearPlanning(projectName: string): Promise<{ status: string }> {
+  return req(`/projects/${encodeURIComponent(projectName)}/clear/planning`, 'POST');
+}
+
+export function clearMemories(projectName: string): Promise<{ status: string; deleted: string[]; errors: string[] }> {
+  return req(`/projects/${encodeURIComponent(projectName)}/clear/memories`, 'POST');
+}
+
 export function createProject(projectName: string): Promise<{ status: string; path: string }> {
   return req(`/projects/create?project_name=${encodeURIComponent(projectName)}`, 'POST');
 }

@@ -1,31 +1,28 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useMemo, useState } from 'react';
 import type { ProjectSummary } from '../types';
 import { listProjects, createProject } from '../api';
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+import { useBreakpoint } from '../hooks/useBreakpoint';
 
 function statusColor(status: string): string {
   switch (status) {
     case 'planning': return 'var(--accent-yellow)';
-    case 'indexed':  return 'var(--accent-blue)';
-    case 'done':     return 'var(--accent-green)';
-    case 'error':    return 'var(--accent-red)';
-    default:         return 'var(--text-muted)';
+    case 'indexed': return 'var(--accent-blue)';
+    case 'done': return 'var(--accent-green)';
+    case 'error': return 'var(--accent-red)';
+    default: return 'var(--text-muted)';
   }
 }
 
 function relativeTime(iso: string | null): string {
-  if (!iso) return '—';
+  if (!iso) return 'awaiting activity';
   const diff = Date.now() - new Date(iso).getTime();
   const mins = Math.floor(diff / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1) return 'updated just now';
+  if (mins < 60) return `updated ${mins}m ago`;
   const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
+  if (hrs < 24) return `updated ${hrs}h ago`;
+  return `updated ${Math.floor(hrs / 24)}d ago`;
 }
-
-// ─── Project Card ─────────────────────────────────────────────────────────────
 
 interface ProjectCardProps {
   project: ProjectSummary;
@@ -33,70 +30,125 @@ interface ProjectCardProps {
 }
 
 function ProjectCard({ project, onSelect }: ProjectCardProps) {
-  const [hovered, setHovered] = useState(false);
+  const accent = statusColor(project.status);
 
   return (
-    <div
+    <button
       onClick={() => onSelect(project.project_name)}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
       style={{
-        background: hovered ? 'var(--bg-hover)' : 'var(--bg-card)',
-        border: `1px solid ${hovered ? 'var(--border-active)' : 'var(--border)'}`,
-        borderRadius: '6px',
-        padding: '14px 16px',
+        textAlign: 'left',
+        background: 'linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius-lg)',
+        padding: '18px',
         cursor: 'pointer',
-        transition: 'background 0.1s, border-color 0.1s',
         display: 'flex',
         flexDirection: 'column',
-        gap: '8px',
+        gap: '16px',
+        boxShadow: 'var(--shadow-md)',
+        transition: 'transform 0.18s ease, border-color 0.18s ease, background 0.18s ease',
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.transform = 'translateY(-3px)';
+        e.currentTarget.style.borderColor = 'var(--border-strong)';
+        e.currentTarget.style.background = 'linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03))';
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.transform = 'translateY(0)';
+        e.currentTarget.style.borderColor = 'var(--border)';
+        e.currentTarget.style.background = 'linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))';
       }}
     >
-      {/* Header row */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
-        <span style={{ color: 'var(--text-primary)', fontWeight: 600, fontSize: '13px' }}>
-          {project.project_name}
-        </span>
-        <span style={{
-          fontSize: '10px',
-          letterSpacing: '0.05em',
-          textTransform: 'uppercase',
-          color: statusColor(project.status),
-          background: `${statusColor(project.status)}18`,
-          border: `1px solid ${statusColor(project.status)}40`,
-          borderRadius: '3px',
-          padding: '1px 6px',
-        }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'flex-start' }}>
+        <div style={{ minWidth: 0 }}>
+          <div className="eyebrow" style={{ marginBottom: '8px' }}>project</div>
+          <div
+            style={{
+              color: 'var(--text-primary)',
+              fontSize: '20px',
+              fontWeight: 800,
+              letterSpacing: '-0.03em',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {project.project_name}
+          </div>
+        </div>
+        <span
+          style={{
+            flexShrink: 0,
+            padding: '7px 10px',
+            borderRadius: '999px',
+            border: `1px solid ${accent}66`,
+            background: `${accent}18`,
+            color: accent,
+            fontFamily: 'var(--font-mono)',
+            fontSize: '10px',
+            fontWeight: 700,
+            letterSpacing: '0.12em',
+            textTransform: 'uppercase',
+          }}
+        >
           {project.status}
         </span>
       </div>
 
-      {/* Stats row */}
-      <div style={{ display: 'flex', gap: '14px', fontSize: '11px', color: 'var(--text-secondary)' }}>
-        <span title="footage files">{project.video_count} video{project.video_count !== 1 ? 's' : ''}</span>
-        {project.clip_count > 0 && <span title="retrieved clips">{project.clip_count} clips</span>}
-        {project.iteration_count > 0 && <span>{project.iteration_count} iter</span>}
-        {project.has_fcpxml && <span style={{ color: 'var(--accent-purple)' }}>FCPXML ✓</span>}
-        {project.has_renders && <span style={{ color: 'var(--accent-green)' }}>Rendered ✓</span>}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '10px' }}>
+        <StatBlock label="videos" value={project.video_count} />
+        <StatBlock label="clips" value={project.clip_count} />
+        <StatBlock label="iterations" value={project.iteration_count} />
+        <StatBlock
+          label="outputs"
+          value={[
+            project.has_storyboard ? 'story' : null,
+            project.has_fcpxml ? 'xml' : null,
+            project.has_renders ? 'render' : null,
+          ].filter(Boolean).length || 'none'}
+        />
       </div>
 
-      {/* Footage list (if any and not indexed yet) */}
-      {project.status === 'new' && project.footage_files.length > 0 && (
-        <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
-          {project.footage_files.slice(0, 3).join(', ')}
-          {project.footage_files.length > 3 && ` +${project.footage_files.length - 3} more`}
+      {project.footage_files.length > 0 && (
+        <div
+          style={{
+            padding: '12px 14px',
+            borderRadius: 'var(--radius-md)',
+            background: 'rgba(255,255,255,0.03)',
+            border: '1px solid rgba(255,255,255,0.06)',
+            color: 'var(--text-secondary)',
+            fontSize: '12px',
+            lineHeight: 1.6,
+          }}
+        >
+          {project.footage_files.slice(0, 2).join(' · ')}
+          {project.footage_files.length > 2 && ` +${project.footage_files.length - 2} more`}
         </div>
       )}
 
-      {/* Footer */}
-      <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
-        {relativeTime(project.last_updated)}
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', color: 'var(--text-muted)', fontSize: '11px' }}>
+        <span>{relativeTime(project.last_updated)}</span>
+        <span style={{ color: accent }}>Open project</span>
       </div>
-    </div>
+    </button>
   );
 }
 
-// ─── Create Project Form ──────────────────────────────────────────────────────
+function StatBlock({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div
+      style={{
+        padding: '10px 12px',
+        borderRadius: 'var(--radius-md)',
+        background: 'rgba(255,255,255,0.03)',
+        border: '1px solid rgba(255,255,255,0.06)',
+      }}
+    >
+      <div style={{ color: 'var(--text-primary)', fontSize: '18px', fontWeight: 800 }}>{value}</div>
+      <div className="eyebrow" style={{ marginTop: '4px' }}>{label}</div>
+    </div>
+  );
+}
 
 interface CreateFormProps {
   onCreated: (name: string) => void;
@@ -127,52 +179,54 @@ function CreateForm({ onCreated, disabled }: CreateFormProps) {
   const valid = /^[a-zA-Z0-9_-]+$/.test(name.trim());
 
   return (
-    <div style={{ display: 'flex', gap: '6px', flexDirection: 'column' }}>
-      <div style={{ display: 'flex', gap: '6px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+      <div>
+        <div className="eyebrow" style={{ marginBottom: '8px' }}>project name</div>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && valid && handleCreate()}
-          placeholder="new-project-name"
+          placeholder="festival-cut"
           disabled={disabled || loading}
           style={{
-            flex: 1,
-            background: 'var(--bg-card)',
+            width: '100%',
+            background: 'rgba(255,255,255,0.04)',
             border: '1px solid var(--border)',
-            borderRadius: '3px',
+            borderRadius: 'var(--radius-md)',
             color: 'var(--text-primary)',
-            fontSize: '12px',
-            padding: '6px 9px',
-            fontFamily: 'inherit',
+            padding: '14px 16px',
+            fontSize: '13px',
           }}
         />
-        <button
-          onClick={handleCreate}
-          disabled={!valid || loading || disabled}
-          style={{
-            background: valid ? 'var(--accent-blue)' : 'var(--bg-hover)',
-            border: 'none',
-            borderRadius: '3px',
-            color: valid ? '#fff' : 'var(--text-muted)',
-            cursor: valid ? 'pointer' : 'not-allowed',
-            fontSize: '12px',
-            fontFamily: 'inherit',
-            padding: '6px 14px',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {loading ? '…' : '+ Create'}
-        </button>
       </div>
-      {err && <div style={{ fontSize: '11px', color: 'var(--accent-red)' }}>{err}</div>}
-      <div style={{ fontSize: '10px', color: 'var(--text-muted)', lineHeight: 1.5 }}>
-        Creates <code style={{ color: 'var(--text-secondary)' }}>data/workspaces/&lt;name&gt;/footage/</code> — drop your video files there, then index.
+
+      <button
+        onClick={handleCreate}
+        disabled={!valid || loading || disabled}
+        style={{
+          padding: '14px 16px',
+          borderRadius: '999px',
+          border: '1px solid var(--accent-blue)',
+          background: valid ? 'linear-gradient(90deg, rgba(96,213,200,0.24), rgba(241,191,99,0.18))' : 'rgba(255,255,255,0.03)',
+          color: valid ? 'var(--text-primary)' : 'var(--text-muted)',
+          cursor: valid ? 'pointer' : 'not-allowed',
+          fontSize: '12px',
+          fontWeight: 700,
+          letterSpacing: '0.1em',
+          textTransform: 'uppercase',
+        }}
+      >
+        {loading ? 'Creating project...' : 'Create workspace'}
+      </button>
+
+      {err && <div style={{ color: 'var(--accent-red)', fontSize: '12px' }}>{err}</div>}
+
+      <div style={{ color: 'var(--text-muted)', fontSize: '12px', lineHeight: 1.7 }}>
+        Creates <code>data/workspaces/&lt;name&gt;/footage/</code> so footage can be dropped in immediately.
       </div>
     </div>
   );
 }
-
-// ─── ProjectBrowser ───────────────────────────────────────────────────────────
 
 interface ProjectBrowserProps {
   onSelectProject: (projectName: string) => void;
@@ -182,6 +236,8 @@ export function ProjectBrowser({ onSelectProject }: ProjectBrowserProps) {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
+  const isTablet = useBreakpoint(1100);
+  const isMobile = useBreakpoint(720);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -196,135 +252,182 @@ export function ProjectBrowser({ onSelectProject }: ProjectBrowserProps) {
     }
   }, []);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
-  // Auto-refresh every 5s while page is visible
   useEffect(() => {
     const id = setInterval(refresh, 5000);
     return () => clearInterval(id);
   }, [refresh]);
 
+  const summary = useMemo(() => {
+    const planning = projects.filter((p) => p.status === 'planning').length;
+    const indexed = projects.filter((p) => p.status !== 'new').length;
+    const rendered = projects.filter((p) => p.has_renders).length;
+    return { total: projects.length, planning, indexed, rendered };
+  }, [projects]);
+
   return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      height: '100%',
-      padding: '24px',
-      gap: '20px',
-      maxWidth: '900px',
-      margin: '0 auto',
-      width: '100%',
-    }}>
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-        <div>
-          <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--text-primary)' }}>
-            VEA Dashboard
-          </div>
-          <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '2px' }}>
-            Video Editing Automation — Playground
-          </div>
-        </div>
-        <button
-          onClick={refresh}
+    <div className="dashboard-shell">
+      <div
+        className="glass-card"
+        style={{
+          maxWidth: '1320px',
+          margin: '0 auto',
+          padding: isMobile ? '18px' : isTablet ? '22px' : '28px',
+          display: 'grid',
+          gap: isMobile ? '20px' : '28px',
+        }}
+      >
+        <div
           style={{
-            background: 'none',
-            border: '1px solid var(--border)',
-            borderRadius: '3px',
-            color: 'var(--text-muted)',
-            cursor: 'pointer',
-            fontSize: '11px',
-            fontFamily: 'inherit',
-            padding: '4px 10px',
+            display: 'grid',
+            gridTemplateColumns: isTablet ? '1fr' : 'minmax(0, 1.5fr) minmax(280px, 0.9fr)',
+            gap: isMobile ? '18px' : '24px',
+            alignItems: 'start',
           }}
         >
-          ↻ Refresh
-        </button>
-      </div>
-
-      {/* Two-column layout: projects + create */}
-      <div style={{ display: 'flex', gap: '20px', flex: 1, minHeight: 0 }}>
-
-        {/* Left: project list */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '10px', minWidth: 0 }}>
-          <div style={{ fontSize: '10px', letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>
-            Projects ({projects.length})
+          <div style={{ display: 'grid', gap: isMobile ? '10px' : '14px' }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: '12px', flexWrap: 'wrap' }}>
+              <div style={{
+                fontSize: 'clamp(24px, 4vw, 38px)',
+                fontWeight: 800,
+                lineHeight: 1,
+                letterSpacing: '-0.04em',
+                fontFamily: 'var(--font-sans)',
+              }}>
+                VEA
+              </div>
+              <span className="eyebrow">video editing automation</span>
+            </div>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '13px', lineHeight: 1.7, maxWidth: '52ch' }}>
+              Create a workspace, drop footage, index, plan, and render — all from here.
+            </div>
+            <div className="metric-strip" style={{ maxWidth: '520px' }}>
+              <div className="metric-card">
+                <span className="metric-value">{summary.total}</span>
+                <span className="metric-label">projects</span>
+              </div>
+              <div className="metric-card">
+                <span className="metric-value">{summary.indexed}</span>
+                <span className="metric-label">indexed</span>
+              </div>
+              <div className="metric-card">
+                <span className="metric-value">{summary.planning}</span>
+                <span className="metric-label">active loops</span>
+              </div>
+              <div className="metric-card">
+                <span className="metric-value">{summary.rendered}</span>
+                <span className="metric-label">renders</span>
+              </div>
+            </div>
           </div>
 
-          {loading && projects.length === 0 && (
-            <div style={{ color: 'var(--text-muted)', fontSize: '12px' }}>Loading…</div>
-          )}
-          {err && (
-            <div style={{ color: 'var(--accent-red)', fontSize: '12px' }}>{err}</div>
-          )}
-          {!loading && projects.length === 0 && !err && (
-            <div style={{
-              color: 'var(--text-muted)',
-              fontSize: '12px',
-              background: 'var(--bg-card)',
-              border: '1px dashed var(--border)',
-              borderRadius: '6px',
-              padding: '20px',
-              textAlign: 'center',
-              lineHeight: 2,
-            }}>
-              No projects yet.<br />
-              Create one on the right →
+          <div style={{ display: 'grid', gap: '16px' }}>
+            <div
+              style={{
+                padding: isMobile ? '18px' : '22px',
+                borderRadius: 'var(--radius-lg)',
+                background: 'linear-gradient(180deg, rgba(96,213,200,0.12), rgba(241,191,99,0.06))',
+                border: '1px solid rgba(96,213,200,0.16)',
+              }}
+            >
+              <div className="eyebrow" style={{ marginBottom: '10px', color: 'var(--accent-blue)' }}>
+                New project
+              </div>
+              <CreateForm
+                onCreated={(name) => {
+                  refresh();
+                  onSelectProject(name);
+                }}
+              />
             </div>
-          )}
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', overflowY: 'auto' }}>
+            <div
+              style={{
+                padding: isMobile ? '18px' : '22px',
+                borderRadius: 'var(--radius-lg)',
+                background: 'rgba(255,255,255,0.03)',
+                border: '1px solid var(--border)',
+                color: 'var(--text-secondary)',
+                fontSize: '13px',
+                lineHeight: 1.8,
+              }}
+            >
+              <div className="eyebrow" style={{ marginBottom: '12px' }}>Workflow</div>
+              <div>1. Create a workspace</div>
+              <div>2. Drop footage into <code>footage/</code></div>
+              <div>3. Index the project</div>
+              <div>4. Start planning with a creative brief</div>
+              <div>5. Generate FCPXML and render</div>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', flexWrap: 'wrap' }}>
+          <div>
+            <div className="eyebrow" style={{ marginBottom: '8px' }}>project library</div>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
+              Pick up a workspace in progress or open a fresh one.
+            </div>
+          </div>
+          <button
+            onClick={refresh}
+            style={{
+              padding: '12px 16px',
+              borderRadius: '999px',
+              border: '1px solid var(--border)',
+              background: 'rgba(255,255,255,0.03)',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer',
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              fontSize: '11px',
+            }}
+          >
+            Refresh library
+          </button>
+        </div>
+
+        {err && <div className="status-message error">{err}</div>}
+
+        {loading && projects.length === 0 && (
+          <div className="status-message info">Loading workspaces...</div>
+        )}
+
+        {!loading && projects.length === 0 && !err ? (
+          <div
+            style={{
+              borderRadius: 'var(--radius-lg)',
+              border: '1px dashed var(--border-strong)',
+              padding: '48px 28px',
+              textAlign: 'center',
+              color: 'var(--text-secondary)',
+              background: 'rgba(255,255,255,0.02)',
+            }}
+          >
+            <div className="eyebrow" style={{ marginBottom: '12px' }}>No projects yet</div>
+            <div style={{ fontSize: '24px', fontWeight: 800, letterSpacing: '-0.03em', marginBottom: '8px' }}>
+              Start with a workspace, not a blank page.
+            </div>
+            <div style={{ color: 'var(--text-muted)', fontSize: '14px' }}>
+              Create a project on the right, then drop footage into its `footage/` folder.
+            </div>
+          </div>
+        ) : (
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fit, minmax(280px, 1fr))',
+              gap: '16px',
+            }}
+          >
             {projects.map((p) => (
               <ProjectCard key={p.project_name} project={p} onSelect={onSelectProject} />
             ))}
           </div>
-        </div>
-
-        {/* Right: create new project */}
-        <div style={{
-          width: '260px',
-          flexShrink: 0,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '10px',
-        }}>
-          <div style={{ fontSize: '10px', letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--text-muted)' }}>
-            New Project
-          </div>
-          <div style={{
-            background: 'var(--bg-panel)',
-            border: '1px solid var(--border)',
-            borderRadius: '6px',
-            padding: '16px',
-          }}>
-            <CreateForm
-              onCreated={(name) => {
-                refresh();
-                onSelectProject(name);
-              }}
-            />
-          </div>
-
-          {/* Quick guide */}
-          <div style={{
-            background: 'var(--bg-panel)',
-            border: '1px solid var(--border)',
-            borderRadius: '6px',
-            padding: '14px',
-            fontSize: '11px',
-            color: 'var(--text-muted)',
-            lineHeight: 1.7,
-          }}>
-            <div style={{ color: 'var(--text-secondary)', marginBottom: '6px', fontWeight: 600 }}>Quick start</div>
-            <ol style={{ paddingLeft: '16px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-              <li>Create a project</li>
-              <li>Drop footage into <code>footage/</code></li>
-              <li>Click the project → Index</li>
-              <li>Set a prompt → Plan</li>
-              <li>Generate FCPXML → Render</li>
-            </ol>
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );

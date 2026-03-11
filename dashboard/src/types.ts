@@ -65,6 +65,9 @@ export interface ProjectSummary {
   clip_count: number;
   iteration_count: number;
   footage_files: string[];
+  indexed_files: string[];
+  video_gists: Record<string, string>;
+  gist: string;
   has_storyboard: boolean;
   has_fcpxml: boolean;
   has_renders: boolean;

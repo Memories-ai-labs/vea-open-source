@@ -13,7 +13,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote
 from lib.utils.metrics_collector import metrics_collector
 
 
@@ -256,16 +255,28 @@ class MemoriesAiManager:
         """
         Check if a video with this name already exists.
 
+        Searches all uploaded videos and does a fuzzy match: the stored name
+        (after URL-decoding) must contain the stem of *video_name* (without
+        extension).  This handles the prefix/suffix/encoding that Memories.ai
+        adds to uploaded filenames.
+
         Args:
-            video_name: Name to search for (exact match).
+            video_name: Local filename to search for (e.g. "My Video.mp4").
 
         Returns:
             VideoStatus if found, None otherwise.
         """
+        from urllib.parse import unquote
+        from pathlib import PurePosixPath
+
+        # Normalise the search term: stem only, lowercased
+        search_stem = PurePosixPath(video_name).stem.lower()
+
+        # List every video on the account
         response = await self._request(
             "POST",
             "/serve/api/v1/list_videos",
-            {"video_name": quote(video_name)},
+            {},
         )
 
         if not response.get("success"):
@@ -275,9 +286,18 @@ class MemoriesAiManager:
         if not videos:
             return None
 
+        # Find candidates whose stored name contains our search stem
+        def _matches(v: dict) -> bool:
+            stored = v.get("video_name", "") or v.get("videoName", "")
+            return search_stem in unquote(stored).lower()
+
+        candidates = [v for v in videos if _matches(v)]
+        if not candidates:
+            print(f"[MEMORIES] No match for '{video_name}' among {len(videos)} videos")
+            return None
+
         # Prefer PARSE over UNPARSE if multiple matches exist
-        video = next((v for v in videos if v.get("status") == "PARSE"), videos[0])
-        # API returns snake_case (video_no) not camelCase (videoNo)
+        video = next((v for v in candidates if v.get("status") == "PARSE"), candidates[0])
         status = VideoStatus(
             video_no=video.get("video_no", "") or video.get("videoNo", ""),
             video_name=video.get("video_name", "") or video.get("videoName", ""),
@@ -408,6 +428,28 @@ class MemoriesAiManager:
 
             await asyncio.sleep(poll_interval)
 
+    async def delete_video(self, video_no: str) -> bool:
+        """
+        Delete a video from Memories.ai cloud storage.
+
+        Args:
+            video_no: The videoNo identifier to delete.
+
+        Returns:
+            True if deleted successfully.
+        """
+        logger.info(f"[MEMORIES] Deleting video: {video_no}")
+        response = await self._request(
+            "POST",
+            "/serve/api/v1/delete_video",
+            {"video_no": video_no},
+        )
+        success = response.get("success", False)
+        if not success:
+            raise RuntimeError(f"[MEMORIES] Delete failed for {video_no}: {response.get('msg')}")
+        logger.info(f"[MEMORIES] Deleted video: {video_no}")
+        return True
+
     # -------------------------------------------------------------------------
     # Search API
     # -------------------------------------------------------------------------
@@ -448,7 +490,12 @@ class MemoriesAiManager:
             raise RuntimeError(f"[MEMORIES] Search failed: {response.get('msg')}")
 
         results = response.get("data", {})
-        result_count = len(results.get("items", []))
+        if isinstance(results, list):
+            result_count = len(results)
+        elif isinstance(results, dict):
+            result_count = len(results.get("items", []))
+        else:
+            result_count = 0
         print(f"[MEMORIES] Search returned {result_count} results")
 
         if self.debug:

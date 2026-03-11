@@ -304,19 +304,33 @@ function ActionBtn({
   accent?: string;
 }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '8px',
+        padding: '16px',
+        minWidth: '200px',
+        borderRadius: 'var(--radius-md)',
+        background: 'rgba(255,255,255,0.03)',
+        border: '1px solid rgba(255,255,255,0.06)',
+      }}
+    >
+      <div className="eyebrow">{label}</div>
       <button
         onClick={onClick}
         disabled={loading}
         style={{
-          padding: '5px 12px',
-          background: loading ? 'var(--bg-hover)' : (accent ? `${accent}22` : 'var(--bg-card)'),
-          border: `1px solid ${accent ?? 'var(--border)'}`,
-          borderRadius: '3px',
-          color: accent ?? 'var(--text-primary)',
+          padding: '12px 14px',
+          background: loading ? 'rgba(255,255,255,0.03)' : (accent ? `${accent}16` : 'rgba(255,255,255,0.03)'),
+          border: `1px solid ${accent ? `${accent}66` : 'var(--border)'}`,
+          borderRadius: '999px',
+          color: loading ? 'var(--text-muted)' : (accent ?? 'var(--text-primary)'),
           fontSize: '12px',
+          fontWeight: 700,
           cursor: loading ? 'wait' : 'pointer',
-          fontFamily: 'inherit',
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
           whiteSpace: 'nowrap',
         }}
       >
@@ -325,9 +339,9 @@ function ActionBtn({
       {result && (
         <div
           style={{
-            fontSize: '10px',
+            fontSize: '11px',
             color: 'var(--text-muted)',
-            maxWidth: '160px',
+            maxWidth: '240px',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
@@ -439,7 +453,7 @@ export function TimelineView({ projectName, storyboard }: TimelineViewProps) {
 
       {/* Controls */}
       <Panel title="Controls">
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'flex-start' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px', alignItems: 'start' }}>
           {/* FCPXML */}
           <ActionBtn
             label="Regen FCPXML"
@@ -477,19 +491,32 @@ export function TimelineView({ projectName, storyboard }: TimelineViewProps) {
           />
 
           {/* Music */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+              padding: '16px',
+              borderRadius: 'var(--radius-md)',
+              background: 'rgba(255,255,255,0.03)',
+              border: '1px solid rgba(255,255,255,0.06)',
+            }}
+          >
+            <div className="eyebrow">Select Music</div>
             <button
               onClick={() => setShowMoodInput((v) => !v)}
               disabled={loading['music']}
               style={{
-                padding: '5px 12px',
-                background: 'var(--accent-orange)22',
+                padding: '12px 14px',
+                background: 'var(--accent-orange)16',
                 border: '1px solid var(--accent-orange)',
-                borderRadius: '3px',
+                borderRadius: '999px',
                 color: 'var(--accent-orange)',
                 fontSize: '12px',
                 cursor: 'pointer',
-                fontFamily: 'inherit',
+                fontWeight: 700,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
               }}
             >
               {loading['music'] ? '…' : 'Select Music'}
@@ -507,26 +534,39 @@ export function TimelineView({ projectName, storyboard }: TimelineViewProps) {
               </div>
             )}
             {musicPath && (
-              <div style={{ fontSize: '10px', color: 'var(--text-muted)', maxWidth: '160px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={musicPath}>
+              <div style={{ fontSize: '11px', color: 'var(--text-muted)', maxWidth: '220px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={musicPath}>
                 {musicPath}
               </div>
             )}
           </div>
 
           {/* Dynamic Crop */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+              padding: '16px',
+              borderRadius: 'var(--radius-md)',
+              background: 'rgba(255,255,255,0.03)',
+              border: '1px solid rgba(255,255,255,0.06)',
+            }}
+          >
+            <div className="eyebrow">Dynamic Crop</div>
             <button
               onClick={() => setShowAspectInput((v) => !v)}
               disabled={loading['crop']}
               style={{
-                padding: '5px 12px',
-                background: 'var(--accent-red)22',
+                padding: '12px 14px',
+                background: 'var(--accent-red)16',
                 border: '1px solid var(--accent-red)',
-                borderRadius: '3px',
+                borderRadius: '999px',
                 color: 'var(--accent-red)',
                 fontSize: '12px',
                 cursor: 'pointer',
-                fontFamily: 'inherit',
+                fontWeight: 700,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
               }}
             >
               {loading['crop'] ? '…' : 'Dynamic Crop'}
@@ -547,7 +587,7 @@ export function TimelineView({ projectName, storyboard }: TimelineViewProps) {
               </div>
             )}
             {cropPath && (
-              <div style={{ fontSize: '10px', color: 'var(--text-muted)', maxWidth: '160px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={cropPath}>
+              <div style={{ fontSize: '11px', color: 'var(--text-muted)', maxWidth: '220px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={cropPath}>
                 {cropPath}
               </div>
             )}
@@ -628,23 +668,24 @@ function OutputRow({ label, value }: { label: string; value: string }) {
 }
 
 const inputStyle: React.CSSProperties = {
-  background: 'var(--bg-base)',
+  background: 'rgba(255,255,255,0.04)',
   border: '1px solid var(--border)',
-  borderRadius: '3px',
+  borderRadius: '999px',
   color: 'var(--text-primary)',
   fontSize: '12px',
-  padding: '4px 7px',
-  fontFamily: 'inherit',
+  padding: '10px 12px',
   width: '140px',
 };
 
 const smBtnStyle: React.CSSProperties = {
-  padding: '4px 8px',
-  background: 'var(--bg-hover)',
+  padding: '10px 12px',
+  background: 'rgba(255,255,255,0.04)',
   border: '1px solid var(--border)',
-  borderRadius: '3px',
+  borderRadius: '999px',
   color: 'var(--text-secondary)',
-  fontSize: '12px',
+  fontSize: '11px',
+  fontWeight: 700,
+  letterSpacing: '0.08em',
+  textTransform: 'uppercase',
   cursor: 'pointer',
-  fontFamily: 'inherit',
 };

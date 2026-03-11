@@ -15,31 +15,33 @@ export function Panel({ title, children, className = '', badge, badgeColor }: Pa
       style={{
         display: 'flex',
         flexDirection: 'column',
-        background: 'var(--bg-panel)',
+        background: 'linear-gradient(180deg, rgba(35, 27, 24, 0.94), rgba(22, 17, 16, 0.94))',
         border: '1px solid var(--border)',
-        borderRadius: '4px',
+        borderRadius: 'var(--radius-lg)',
         overflow: 'hidden',
         minHeight: 0,
+        boxShadow: 'var(--shadow-md)',
+        backdropFilter: 'blur(18px)',
       }}
     >
-      {/* Header */}
       <div
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: '8px',
-          padding: '6px 10px',
-          borderBottom: '1px solid var(--border)',
-          background: 'var(--bg-card)',
+          gap: '10px',
+          padding: '14px 16px',
+          borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
+          background: 'linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01))',
           flexShrink: 0,
         }}
       >
         <span
           style={{
             color: 'var(--text-secondary)',
-            fontSize: '11px',
+            fontFamily: 'var(--font-mono)',
+            fontSize: '10px',
             fontWeight: 600,
-            letterSpacing: '0.06em',
+            letterSpacing: '0.16em',
             textTransform: 'uppercase',
           }}
         >
@@ -49,26 +51,27 @@ export function Panel({ title, children, className = '', badge, badgeColor }: Pa
           <span
             style={{
               marginLeft: 'auto',
-              background: badgeColor ?? 'var(--bg-hover)',
-              color: badgeColor ? '#fff' : 'var(--text-secondary)',
+              background: badgeColor ? `${badgeColor}22` : 'rgba(255, 255, 255, 0.05)',
+              border: `1px solid ${badgeColor ? `${badgeColor}66` : 'rgba(255, 255, 255, 0.08)'}`,
+              color: badgeColor ?? 'var(--text-secondary)',
+              fontFamily: 'var(--font-mono)',
               fontSize: '10px',
               fontWeight: 700,
-              padding: '1px 6px',
-              borderRadius: '10px',
-              letterSpacing: '0.04em',
+              padding: '4px 10px',
+              borderRadius: '999px',
+              letterSpacing: '0.08em',
             }}
           >
             {badge}
           </span>
         )}
       </div>
-      {/* Scrollable body */}
       <div
         style={{
           flex: 1,
           overflowY: 'auto',
           overflowX: 'hidden',
-          padding: '8px 10px',
+          padding: '16px',
           minHeight: 0,
         }}
       >

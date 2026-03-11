@@ -111,26 +111,42 @@ class LightweightComprehension:
         # --- Save initial session (no gist yet) ---
         session = self.workspace.init_session(videos=video_entries)
 
-        # --- Get broad gist via Chat API ---
-        logger.info("[COMPREHENSION] Requesting video gist from Memories.ai Chat API...")
-        video_nos = [v.video_no for v in video_entries]
-        chat_response = await self.memories.chat(video_nos, GIST_PROMPT)
-        gist = chat_response.text
-        # Save session_id for continuity in planning loop
-        memories_session_id = chat_response.session_id
+        # --- Get per-video gist via Chat API (one call per video, in parallel) ---
+        logger.info("[COMPREHENSION] Requesting per-video gist from Memories.ai Chat API...")
 
-        logger.info(f"[COMPREHENSION] Gist received ({len(gist)} chars)")
-        if self.memories.debug:
-            logger.debug(f"[COMPREHENSION] Gist preview: {gist[:500]}")
+        async def _gist_one(entry: VideoEntry) -> str:
+            try:
+                resp = await self.memories.chat([entry.video_no], GIST_PROMPT)
+                return resp.text
+            except Exception as e:
+                logger.warning(f"[COMPREHENSION] Gist failed for {entry.video_name}: {e}")
+                return ""
 
-        # --- Update session with gist ---
-        session.gist = gist
+        gists = await asyncio.gather(*[_gist_one(v) for v in video_entries])
+        for entry, gist_text in zip(video_entries, gists):
+            entry.gist = gist_text
+            logger.info(f"[COMPREHENSION] Gist for {entry.video_name}: {len(gist_text)} chars")
+
+        # Combined gist for the session (used as planning context)
+        if len(video_entries) == 1:
+            combined_gist = video_entries[0].gist
+            memories_session_id = None
+        else:
+            combined_parts = "\n\n---\n\n".join(
+                f"**{v.video_name}**\n\n{v.gist}" for v in video_entries if v.gist
+            )
+            combined_gist = combined_parts
+            memories_session_id = None
+
+        # --- Update session ---
+        session.videos = video_entries
+        session.gist = combined_gist
         session.memories_session_id = memories_session_id
         session.status = "indexed"
         self.workspace.save_session(session)
 
         # Also save gist to context.md as initial context
-        self.workspace.append_context(f"# Video Gist\n\n{gist}\n")
+        self.workspace.append_context(f"# Video Gist\n\n{combined_gist}\n")
 
         logger.info(f"[COMPREHENSION] Session saved: {self.workspace.root / 'session.json'}")
         return session

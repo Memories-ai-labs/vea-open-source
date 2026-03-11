@@ -77,8 +77,22 @@ dependencies = [
     "yarl==1.20.0",
     "psutil>=6.1.0",
     "nvidia-ml-py3>=7.352.0",
+    "opencv-python>=4.9.0",
+    "elevenlabs>=1.0.0",
+    "librosa>=0.10.0",
+    "pyloudnorm>=0.1.1",
+    "torch>=2.0.0",
+    "pydavinci>=0.3.0",
 ]
 
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = [
+    "httpx",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-mock",
+]

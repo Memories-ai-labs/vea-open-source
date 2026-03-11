@@ -45,6 +45,7 @@ from src.pipelines.v2.workspace import WorkspaceManager
 from src.pipelines.v2.comprehension.lightweight_comprehension import LightweightComprehension
 from src.pipelines.v2.planning.iterative_planning_loop import IterativePlanningLoop
 from src.pipelines.v2.fcpxml.fcpxml_agent import generate_fcpxml
+from src.pipelines.v2.agent.agent_session import AgentSession
 
 from src.pipelines.videoComprehension.comprehensionPipeline import ComprehensionPipeline
 from src.pipelines.flexibleResponse.flexibleResponsePipeline import FlexibleResponsePipeline
@@ -96,6 +97,9 @@ except Exception as e:
 # Each entry: {event_queue, pause_event, inject_queue, task}
 _planning_sessions: Dict[str, Dict] = {}
 
+# --- Active agent sessions (project_name → AgentSession) ---
+_agent_sessions: Dict[str, AgentSession] = {}
+
 # Caption API callback URL - loaded from config.json api_keys section
 # Set to your public ngrok/server URL, e.g., "https://xxx.ngrok-free.app/webhooks/memories/caption"
 _callback_url = os.environ.get("MEMORIES_CAPTION_CALLBACK_URL", "")
@@ -145,6 +149,106 @@ async def v2_create_project(project_name: str):
         "path": str(workspace.root),
         "next_step": f"Drop footage into {workspace.get_footage_dir()}, then call /v2/index",
     }
+
+
+@app.post(f"{V2_API_PREFIX}/projects/{{project_name}}/clear/gists")
+async def v2_clear_gists(project_name: str):
+    """Clear per-video gists and session gist. Re-index to regenerate."""
+    workspace = WorkspaceManager(project_name, WORKSPACES_DIR)
+    if not workspace.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
+    session = workspace.load_session()
+    for v in session.videos:
+        v.gist = ""
+    session.gist = ""
+    workspace.save_session(session)
+    # Clear context.md gist section
+    ctx_path = workspace.root / "context.md"
+    if ctx_path.exists():
+        ctx_path.unlink()
+    return {"status": "cleared", "project_name": project_name}
+
+
+@app.post(f"{V2_API_PREFIX}/projects/{{project_name}}/clear/planning")
+async def v2_clear_planning(project_name: str):
+    """Clear planning context: storyboard, clips, iterations, context.md, agent chat, scratchpads."""
+    import shutil
+    workspace = WorkspaceManager(project_name, WORKSPACES_DIR)
+    if not workspace.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
+
+    for fname in ["storyboard.json", "clips.json", "context.md", "chat_history.json"]:
+        p = workspace.root / fname
+        if p.exists():
+            p.unlink()
+
+    for subdir in ["iterations", "scratchpads"]:
+        d = workspace.root / subdir
+        if d.exists():
+            shutil.rmtree(d)
+            d.mkdir()
+
+    # Clear in-memory agent session
+    _agent_sessions.pop(project_name, None)
+
+    session = workspace.load_session()
+    from src.pipelines.v2.schemas import PlanningState
+    session.planning = PlanningState()
+    if session.status == "planning":
+        session.status = "indexed"
+    workspace.save_session(session)
+    return {"status": "cleared", "project_name": project_name}
+
+
+@app.post(f"{V2_API_PREFIX}/projects/{{project_name}}/clear/session")
+async def v2_clear_session(project_name: str):
+    """Full local reset — deletes session.json, keeps footage."""
+    import shutil
+    workspace = WorkspaceManager(project_name, WORKSPACES_DIR)
+    if not workspace.dir_exists():
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
+
+    for fname in ["session.json", "storyboard.json", "clips.json", "context.md"]:
+        p = workspace.root / fname
+        if p.exists():
+            p.unlink()
+
+    for subdir in ["iterations", "narration", "music", "fcpxml", "renders", "logs"]:
+        d = workspace.root / subdir
+        if d.exists():
+            shutil.rmtree(d)
+            d.mkdir()
+
+    return {"status": "reset", "project_name": project_name}
+
+
+@app.post(f"{V2_API_PREFIX}/projects/{{project_name}}/clear/memories")
+async def v2_clear_memories(project_name: str):
+    """Delete uploaded videos from Memories.ai cloud. Irreversible."""
+    if not memories_manager:
+        raise HTTPException(status_code=500, detail="Memories.ai not configured.")
+    workspace = WorkspaceManager(project_name, WORKSPACES_DIR)
+    if not workspace.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
+
+    session = workspace.load_session()
+    deleted = []
+    errors = []
+    for v in session.videos:
+        if v.video_no:
+            try:
+                await memories_manager.delete_video(v.video_no)
+                deleted.append(v.video_name)
+                v.video_no = ""
+            except Exception as e:
+                errors.append(f"{v.video_name}: {e}")
+
+    session.status = "new"
+    session.gist = ""
+    for v in session.videos:
+        v.gist = ""
+    workspace.save_session(session)
+    return {"status": "cleared", "deleted": deleted, "errors": errors, "project_name": project_name}
 
 
 @app.post(f"{V2_API_PREFIX}/index", response_model=V2IndexResponse)
@@ -235,7 +339,8 @@ async def v2_plan(request: V2PlanRequest):
         raise HTTPException(status_code=400, detail="No videos indexed for this project.")
 
     # Set up async coordination primitives
-    event_queue: asyncio.Queue = asyncio.Queue()
+    raw_queue: asyncio.Queue = asyncio.Queue()   # planning loop → broadcaster
+    subscribers: List[asyncio.Queue] = []        # one queue per connected WebSocket client
     pause_event: asyncio.Event = asyncio.Event()
     inject_queue: asyncio.Queue = asyncio.Queue()
 
@@ -251,10 +356,25 @@ async def v2_plan(request: V2PlanRequest):
         video_entries=session.videos,
         max_iterations=request.max_iterations,
         target_duration_seconds=request.target_duration_seconds,
-        event_queue=event_queue,
+        event_queue=raw_queue,
         pause_event=pause_event,
         inject_prompt_queue=inject_queue,
     )
+
+    async def _broadcast():
+        """Fan events from the planning loop out to all connected WebSocket clients."""
+        while True:
+            event = await raw_queue.get()
+            if hasattr(event, "to_dict"):
+                payload = event.to_dict()
+            elif isinstance(event, dict):
+                payload = event
+            else:
+                payload = {"event_type": "unknown", "data": str(event)}
+            for q in list(subscribers):
+                await q.put(payload)
+            if payload.get("event_type") in ("done", "error", "session_ended"):
+                break
 
     async def _run_planning():
         try:
@@ -263,12 +383,14 @@ async def v2_plan(request: V2PlanRequest):
         except Exception as e:
             logger.error(f"[V2 PLAN] Planning loop error for {project_name}: {e}")
             logger.error(traceback.format_exc())
-            await event_queue.put({"event_type": "error", "data": {"message": str(e)}})
+            await raw_queue.put({"event_type": "error", "data": {"message": str(e)}})
 
     task = asyncio.create_task(_run_planning())
+    asyncio.create_task(_broadcast())
+
     _planning_sessions[project_name] = {
         "task": task,
-        "event_queue": event_queue,
+        "subscribers": subscribers,
         "pause_event": pause_event,
         "inject_queue": inject_queue,
     }
@@ -418,48 +540,40 @@ async def v2_session_ws(websocket: WebSocket, project_name: str):
         await websocket.close()
         return
 
-    event_queue: asyncio.Queue = state["event_queue"]
+    # Each client gets its own queue; the broadcaster task fans events out to all of them
+    client_queue: asyncio.Queue = asyncio.Queue()
+    state["subscribers"].append(client_queue)
+    logger.info(f"[WS] Client subscribed to project={project_name} ({len(state['subscribers'])} total)")
 
-    # Drain events and forward to client; also handle incoming control messages
     try:
         while True:
-            # Forward any queued events
-            while not event_queue.empty():
+            # Forward queued events to this client
+            while not client_queue.empty():
                 try:
-                    event = event_queue.get_nowait()
-                    if hasattr(event, "to_dict"):
-                        payload = event.to_dict()
-                    elif isinstance(event, dict):
-                        payload = event
-                    else:
-                        payload = {"event_type": "unknown", "data": str(event)}
+                    payload = client_queue.get_nowait()
                     await websocket.send_json(payload)
-                    if payload.get("event_type") in ("done", "error"):
+                    if payload.get("event_type") in ("done", "error", "session_ended"):
                         await websocket.close()
                         return
                 except asyncio.QueueEmpty:
                     break
 
-            # Check for incoming control messages (non-blocking)
+            # Handle incoming control messages (non-blocking)
             try:
                 msg = await asyncio.wait_for(websocket.receive_json(), timeout=0.1)
                 action = msg.get("action")
                 if action == "pause":
                     state["pause_event"].set()
-                    await websocket.send_json({"event_type": "paused", "data": {}})
                 elif action == "resume":
                     state["pause_event"].clear()
-                    await websocket.send_json({"event_type": "resumed", "data": {}})
                 elif action == "inject":
                     prompt = msg.get("prompt", "")
                     if prompt:
                         await state["inject_queue"].put(prompt)
-                        await websocket.send_json({"event_type": "prompt_injected", "data": {"prompt": prompt}})
             except asyncio.TimeoutError:
-                pass  # No message from client — normal
+                pass
 
-            # If task is done and queue is empty, close
-            if state["task"].done() and event_queue.empty():
+            if state["task"].done() and client_queue.empty():
                 await websocket.send_json({"event_type": "session_ended", "data": {}})
                 break
 
@@ -469,6 +583,168 @@ async def v2_session_ws(websocket: WebSocket, project_name: str):
         logger.info(f"[WS] Client disconnected from project={project_name}")
     except Exception as e:
         logger.error(f"[WS] Error in WebSocket handler: {e}")
+    finally:
+        state["subscribers"].remove(client_queue)
+
+
+# ─── V2: Agent chat ──────────────────────────────────────────────────────────
+
+@app.websocket(f"{V2_API_PREFIX}/agent/{{project_name}}/chat")
+async def v2_agent_chat_ws(websocket: WebSocket, project_name: str):
+    """
+    WebSocket endpoint for the agentic editing chat.
+
+    On connect: sends initial state (scratchpads + chat history).
+    Receives: {"type": "user_message", "text": "..."}
+    Sends: {"type": "<event_type>", "data": {...}}
+      event types: agent_message, tool_call, tool_result, scratchpad_update, error
+    """
+    await websocket.accept()
+    logger.info(f"[AGENT WS] Client connected for project={project_name}")
+
+    # Validate dependencies
+    if not memories_manager:
+        await websocket.send_json({"type": "error", "data": {"message": "Memories.ai not configured."}})
+        await websocket.close()
+        return
+    if not gemini_manager:
+        await websocket.send_json({"type": "error", "data": {"message": "Gemini not configured."}})
+        await websocket.close()
+        return
+
+    # Load workspace
+    workspace = WorkspaceManager(project_name, WORKSPACES_DIR)
+    if not workspace.exists():
+        await websocket.send_json({"type": "error", "data": {"message": f"Project '{project_name}' not found."}})
+        await websocket.close()
+        return
+
+    session_data = workspace.load_session()
+    if not session_data.videos:
+        await websocket.send_json({"type": "error", "data": {"message": "No videos indexed for this project."}})
+        await websocket.close()
+        return
+
+    # Get or create AgentSession
+    agent = _agent_sessions.get(project_name)
+    if agent is None:
+        # Event emitter that sends over this WebSocket
+        # We'll replace this with a subscriber model below
+        pass
+
+    # Subscriber queue for this client
+    client_queue: asyncio.Queue = asyncio.Queue()
+
+    # Build emit function that pushes to the client queue
+    async def emit(event_type: str, data: dict):
+        await client_queue.put({"type": event_type, "data": data})
+
+    # Create or reuse agent session
+    if agent is None:
+        try:
+            agent = AgentSession(
+                project_name=project_name,
+                workspace=workspace,
+                memories_manager=memories_manager,
+                gemini_manager=gemini_manager,
+                video_entries=session_data.videos,
+                emit=emit,
+            )
+            _agent_sessions[project_name] = agent
+            print(f"[AGENT WS] Created new AgentSession for project={project_name}", flush=True)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            print(f"[AGENT WS] Failed to create AgentSession: {e}", flush=True)
+            await websocket.send_json({"type": "error", "data": {"message": f"Failed to initialize: {e}"}})
+            await websocket.close()
+            return
+
+    # Always point the agent's emit at the current connection's queue
+    agent._emit = emit
+    print(f"[AGENT WS] Bound emit to current connection for project={project_name}", flush=True)
+
+    # Send initial state on connect
+    try:
+        await websocket.send_json({
+            "type": "init",
+            "data": {
+                "scratchpads": agent.get_scratchpad_state(),
+                "chat_history": agent.get_chat_history(),
+                "project_name": project_name,
+                "video_count": len(session_data.videos),
+            },
+        })
+        print(f"[AGENT WS] Sent init to client for project={project_name}", flush=True)
+    except Exception as e:
+        print(f"[AGENT WS] Failed to send init: {e}", flush=True)
+        return
+
+    # Track whether an agent loop is running
+    agent_task: Optional[asyncio.Task] = None
+
+    async def _drain_queue():
+        """Send all queued events to the WebSocket client."""
+        while not client_queue.empty():
+            try:
+                payload = client_queue.get_nowait()
+                await websocket.send_json(payload)
+            except asyncio.QueueEmpty:
+                break
+
+    print(f"[AGENT WS] Entering message loop for project={project_name}", flush=True)
+    try:
+        while True:
+            # Drain any pending events from the agent
+            await _drain_queue()
+
+            # Check if agent task finished (send completion marker)
+            if agent_task and agent_task.done():
+                await _drain_queue()  # flush remaining events
+                exc = agent_task.exception() if not agent_task.cancelled() else None
+                if exc:
+                    await websocket.send_json({
+                        "type": "error",
+                        "data": {"message": str(exc)},
+                    })
+                await websocket.send_json({"type": "done", "data": {}})
+                agent_task = None
+
+            # Listen for incoming messages (non-blocking)
+            try:
+                msg = await asyncio.wait_for(websocket.receive_json(), timeout=0.1)
+                msg_type = msg.get("type")
+                print(f"[AGENT WS] Received message type={msg_type}", flush=True)
+
+                if msg_type == "user_message":
+                    text = msg.get("text", "").strip()
+                    if text and agent_task is None:
+                        # Reassign emit in case this is a reconnection
+                        agent._emit = emit
+                        agent_task = asyncio.create_task(
+                            agent.handle_user_message(text)
+                        )
+                    elif text and agent_task is not None:
+                        # Agent is busy — queue the message for later
+                        await websocket.send_json({
+                            "type": "queued",
+                            "data": {"text": text, "message": "Agent is working. Your message will be processed next."},
+                        })
+                        # We'll handle queued messages when the current task finishes
+                        # For now, just notify the user
+
+            except asyncio.TimeoutError:
+                pass
+
+            await asyncio.sleep(0.05)
+
+    except WebSocketDisconnect:
+        logger.info(f"[AGENT WS] Client disconnected from project={project_name}")
+    except Exception as e:
+        logger.error(f"[AGENT WS] Error: {e}", exc_info=True)
+    finally:
+        # Cancel running agent task if client disconnects
+        if agent_task and not agent_task.done():
+            agent_task.cancel()
 
 
 @app.post(f"{V2_API_PREFIX}/narration")
