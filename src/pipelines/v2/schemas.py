@@ -205,7 +205,9 @@ class EditDecision(BaseModel):
 
 class RefinedTimestamps(BaseModel):
     """Gemini's structured output for clip timestamp refinement."""
-    new_start: float          # refined in-point in seconds (absolute in source video)
-    new_end: float            # refined out-point in seconds (absolute in source video)
+    new_start: float          # refined in-point in seconds (offset from start of video excerpt)
+    new_end: float            # refined out-point in seconds (offset from start of video excerpt)
     reasoning: str            # why these timestamps were chosen
     focus_type: str = ""      # "visual" | "dialogue" | "audio" — what drove the decision
+    speech_truncated_start: bool = False  # sentence/word cut off at start of window
+    speech_truncated_end: bool = False    # sentence/word continues past end of window

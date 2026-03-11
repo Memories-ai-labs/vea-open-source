@@ -189,6 +189,10 @@ Follow this general flow, but adapt based on the conversation:
 5. REFINE TIMESTAMPS (mandatory)
    Call refine_clip_timestamps on EVERY clip before generate_fcpxml. Write a specific
    prompt for each clip describing what to look for in the actual footage.
+   When refining dialogue clips, request a target_duration that is 2-3 seconds LONGER
+   than you actually need. This gives the refinement step room to find complete sentences.
+   You can always trim the clip shorter in generate_fcpxml, but you can't recover dialogue
+   that was cut during refinement.
 
 6. NARRATION & MUSIC (only if the user asks)
    Never add automatically. Narration: discuss tone/style first, draft script, get approval,

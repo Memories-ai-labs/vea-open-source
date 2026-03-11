@@ -116,6 +116,9 @@ class ToolExecutor:
         elif isinstance(raw_results, dict):
             items = raw_results.get("items", [])
 
+        # Fetch transcript once so we can snap endpoints to sentence boundaries
+        transcript_segments = await self._get_transcript_segments()
+
         clips = []
         for item in items[:15]:  # cap results
             if not isinstance(item, dict):
@@ -124,9 +127,14 @@ class ToolExecutor:
             start = float(item.get("startTime", 0))
             end_raw = item.get("endTime")
             end = float(end_raw) if end_raw else start + target_duration
-            # Use target_duration if the returned clip is too short
+
+            # If clip is shorter than target, extend to nearest sentence boundary
             if end - start < target_duration:
-                end = start + target_duration
+                desired_end = start + target_duration
+                end = self._snap_to_sentence_boundary(
+                    desired_end, transcript_segments, direction="forward"
+                )
+
             score = float(item.get("score", 0))
 
             clips.append({
@@ -138,6 +146,62 @@ class ToolExecutor:
             })
 
         return {"clips": clips, "count": len(clips), "query": query}
+
+    async def _get_transcript_segments(self) -> List[Dict]:
+        """Fetch and cache the full audio transcript for the first video."""
+        if not hasattr(self, '_cached_transcript'):
+            self._cached_transcript = []
+            try:
+                video_no = self.video_nos[0] if self.video_nos else None
+                if video_no:
+                    all_segs = await self.memories.get_audio_transcription(video_no)
+                    self._cached_transcript = [
+                        {
+                            "text": seg.get("content", "").strip(),
+                            "start": float(seg.get("startTime", 0)),
+                            "end": float(seg.get("endTime", 0)),
+                        }
+                        for seg in all_segs
+                    ]
+            except Exception as e:
+                logger.warning(f"[AGENT] Could not fetch transcript for caching: {e}")
+        return self._cached_transcript
+
+    @staticmethod
+    def _snap_to_sentence_boundary(
+        timestamp: float,
+        transcript_segments: List[Dict],
+        direction: str = "forward",
+        max_drift: float = 3.0,
+    ) -> float:
+        """Snap a timestamp to the nearest sentence boundary.
+
+        direction="forward": find the end of the sentence at or after timestamp
+        direction="backward": find the start of the sentence at or before timestamp
+        """
+        if not transcript_segments:
+            return timestamp
+
+        best = timestamp
+        best_dist = max_drift + 1
+
+        for seg in transcript_segments:
+            if direction == "forward":
+                boundary = seg["end"]
+                if boundary >= timestamp and boundary - timestamp <= max_drift:
+                    dist = boundary - timestamp
+                    if dist < best_dist:
+                        best = boundary + 0.3  # small buffer after sentence
+                        best_dist = dist
+            else:  # backward
+                boundary = seg["start"]
+                if boundary <= timestamp and timestamp - boundary <= max_drift:
+                    dist = timestamp - boundary
+                    if dist < best_dist:
+                        best = max(0, boundary - 0.2)  # small buffer before sentence
+                        best_dist = dist
+
+        return best
 
     def _update_scratchpad(self, args: Dict) -> Dict:
         name = args.get("name", "")
@@ -396,18 +460,27 @@ class ToolExecutor:
         except Exception:
             return None
 
+    # Padding (seconds) added on each side of the search window before refinement.
+    # Gives Gemini room to find complete sentences that overlap the edges.
+    REFINE_PAD_SECONDS = 5.0
+
     async def _refine_clip_timestamps(self, args: Dict) -> Dict:
         """
         Refine clip timestamps by sending both video and transcription to Gemini.
 
         Steps:
         1. Resolve source file path from footage directory
-        2. Extract the video segment using ffmpeg
-        3. Downsample it for Gemini (lower res, reasonable fps)
-        4. Get dialogue transcription from Memories.ai
-        5. Send video + transcription + prompt to Gemini with structured output
-        6. Return refined start/end timestamps
+        2. Add padding buffer around the search window
+        3. Extract the padded video segment using ffmpeg
+        4. Downsample it for Gemini (lower res, reasonable fps)
+        5. Get dialogue transcription from Memories.ai (video-relative timestamps)
+        6. Send video + transcription + prompt to Gemini with structured output
+        7. If Gemini detects truncated speech, auto-retry with a wider window
+        8. Return refined start/end timestamps
         """
+        return await self._refine_clip_timestamps_inner(args, retry=0)
+
+    async def _refine_clip_timestamps_inner(self, args: Dict, retry: int = 0) -> Dict:
         from src.pipelines.v2.schemas import RefinedTimestamps
 
         source_file = args.get("source_file", "")
@@ -433,26 +506,36 @@ class ToolExecutor:
         if not source_path or not source_path.exists():
             return {"error": f"Source file not found in footage: {source_file}"}
 
+        # Add padding buffer so Gemini can see complete sentences at the edges
+        pad = self.REFINE_PAD_SECONDS
+        padded_start = max(0, source_start - pad)
+        padded_end = source_end + pad
+        padded_duration = padded_end - padded_start
+        # Offset from padded_start to the original region of interest
+        roi_offset = source_start - padded_start
+        roi_end_offset = roi_offset + segment_duration
+
         logger.info(
             f"[AGENT] refine_clip_timestamps: {source_file} "
-            f"[{source_start:.1f}–{source_end:.1f}] target={target_duration:.1f}s"
+            f"[{source_start:.1f}–{source_end:.1f}] padded=[{padded_start:.1f}–{padded_end:.1f}] "
+            f"target={target_duration:.1f}s retry={retry}"
         )
 
         # Work in a temp directory
         tmp_dir = Path(tempfile.mkdtemp(prefix="vea_refine_"))
         try:
-            # Step 1: Extract the video segment
+            # Step 1: Extract the padded video segment
             await self._emit("refine_progress", {
                 "step": "extracting",
-                "message": f"Extracting {segment_duration:.1f}s segment...",
+                "message": f"Extracting {padded_duration:.1f}s segment (with {pad:.0f}s padding)...",
                 "source_file": source_file,
             })
             segment_path = tmp_dir / "segment.mp4"
             extract_cmd = [
                 "ffmpeg", "-y", "-loglevel", "error",
-                "-ss", str(source_start),
+                "-ss", str(padded_start),
                 "-i", str(source_path),
-                "-t", str(segment_duration),
+                "-t", str(padded_duration),
                 "-c", "copy", "-avoid_negative_ts", "make_zero",
                 str(segment_path),
             ]
@@ -479,51 +562,51 @@ class ToolExecutor:
                 None, lambda: subprocess.run(downsample_cmd, check=True)
             )
 
-            # Step 3: Fetch audio transcript from Memories.ai for the clip range
+            # Step 3: Fetch audio transcript, filtered to padded range, with video-relative timestamps
             clip_transcript = ""
             transcript_segments = []
             try:
-                # Get full transcript for the video, filter to our time range
-                video_no = self.video_nos[0] if self.video_nos else None
-                if video_no:
-                    all_segments = await self.memories.get_audio_transcription(video_no)
-                    # Filter to segments overlapping our clip range
-                    for seg in all_segments:
-                        seg_start = float(seg.get("startTime", 0))
-                        seg_end = float(seg.get("endTime", 0))
-                        if seg_end >= source_start and seg_start <= source_end:
-                            transcript_segments.append({
-                                "text": seg.get("content", "").strip(),
-                                "start": seg_start,
-                                "end": seg_end,
-                            })
-                    if transcript_segments:
-                        clip_transcript = "\n".join(
-                            f"[{s['start']:.0f}s–{s['end']:.0f}s] {s['text']}"
-                            for s in transcript_segments
-                        )
-                        logger.info(f"[AGENT] Got {len(transcript_segments)} transcript segments for clip")
+                all_transcript = await self._get_transcript_segments()
+                for seg in all_transcript:
+                    if seg["end"] >= padded_start and seg["start"] <= padded_end:
+                        # Convert to video-relative timestamps (offset from padded_start)
+                        rel_start = seg["start"] - padded_start
+                        rel_end = seg["end"] - padded_start
+                        transcript_segments.append({
+                            "text": seg["text"],
+                            "start": seg["start"],  # absolute (for return value)
+                            "end": seg["end"],       # absolute (for return value)
+                            "rel_start": rel_start,  # relative to video excerpt
+                            "rel_end": rel_end,      # relative to video excerpt
+                        })
+                if transcript_segments:
+                    clip_transcript = "\n".join(
+                        f"[{s['rel_start']:.1f}s–{s['rel_end']:.1f}s] {s['text']}"
+                        for s in transcript_segments
+                    )
+                    logger.info(f"[AGENT] Got {len(transcript_segments)} transcript segments for clip")
             except Exception as e:
                 logger.warning(f"[AGENT] Could not fetch transcript: {e}")
 
-            # Step 4: Send to Gemini for analysis (Gemini watches the video + listens to audio directly)
+            # Step 4: Send to Gemini for analysis
             await self._emit("refine_progress", {
                 "step": "analyzing",
                 "message": "Gemini analyzing video + audio...",
                 "source_file": source_file,
             })
 
-            # Build the Gemini refinement prompt
             refinement_prompt = self._build_refinement_prompt(
-                source_start=source_start,
-                source_end=source_end,
+                padded_start=padded_start,
+                padded_duration=padded_duration,
+                roi_offset=roi_offset,
+                roi_end_offset=roi_end_offset,
                 target_duration=target_duration,
                 prompt=prompt,
                 clip_description=clip_description,
                 transcript=clip_transcript,
             )
 
-            # Step 5: Call Gemini with video + prompt, structured output
+            # Step 5: Call Gemini with video + prompt
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.gemini.LLM_request(
@@ -533,7 +616,6 @@ class ToolExecutor:
                 ),
             )
 
-            # Parse result
             if isinstance(result, RefinedTimestamps):
                 refined = result
             elif isinstance(result, dict):
@@ -541,22 +623,36 @@ class ToolExecutor:
             else:
                 return {"error": f"Unexpected Gemini response type: {type(result)}"}
 
-            # Gemini returns offsets relative to the trimmed video (0 to segment_duration).
+            # Gemini returns offsets relative to the padded video (0 to padded_duration).
             # Convert back to absolute source timestamps.
-            new_start = source_start + max(0, min(refined.new_start, segment_duration))
-            new_end = source_start + max(0, min(refined.new_end, segment_duration))
-            # Ensure minimum clip length and correct order
+            new_start = padded_start + max(0, min(refined.new_start, padded_duration))
+            new_end = padded_start + max(0, min(refined.new_end, padded_duration))
             if new_end <= new_start:
-                new_end = min(new_start + target_duration, source_end)
-            new_end = min(new_end, source_end)
+                new_end = min(new_start + target_duration, padded_end)
 
             logger.info(
                 f"[AGENT] Refined: [{source_start:.1f}–{source_end:.1f}] → "
                 f"[{new_start:.1f}–{new_end:.1f}] ({new_end - new_start:.1f}s) "
-                f"focus={refined.focus_type}"
+                f"focus={refined.focus_type} "
+                f"truncated_start={refined.speech_truncated_start} "
+                f"truncated_end={refined.speech_truncated_end}"
             )
 
-            result = {
+            # Step 6: Auto-retry with wider window if speech is truncated (max 1 retry)
+            if retry == 0 and (refined.speech_truncated_start or refined.speech_truncated_end):
+                wider_start = source_start - (pad * 2 if refined.speech_truncated_start else pad)
+                wider_end = source_end + (pad * 2 if refined.speech_truncated_end else pad)
+                wider_start = max(0, wider_start)
+                logger.info(
+                    f"[AGENT] Speech truncated — retrying with wider window "
+                    f"[{wider_start:.1f}–{wider_end:.1f}]"
+                )
+                wider_args = dict(args)
+                wider_args["source_start"] = wider_start
+                wider_args["source_end"] = wider_end
+                return await self._refine_clip_timestamps_inner(wider_args, retry=1)
+
+            result_dict = {
                 "original_start": source_start,
                 "original_end": source_end,
                 "new_start": new_start,
@@ -568,12 +664,14 @@ class ToolExecutor:
 
             # Include transcript if available — helps agent align clips with narration
             if transcript_segments:
-                result["transcript"] = transcript_segments
+                result_dict["transcript"] = [
+                    {"text": s["text"], "start": s["start"], "end": s["end"]}
+                    for s in transcript_segments
+                ]
 
-            return result
+            return result_dict
 
         finally:
-            # Clean up temp files
             import shutil
             try:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -582,29 +680,34 @@ class ToolExecutor:
 
     @staticmethod
     def _build_refinement_prompt(
-        source_start: float,
-        source_end: float,
+        padded_start: float,
+        padded_duration: float,
+        roi_offset: float,
+        roi_end_offset: float,
         target_duration: float,
         prompt: str,
         clip_description: str,
         transcript: str = "",
     ) -> str:
-        """Build the Gemini prompt for timestamp refinement."""
-        segment_duration = source_end - source_start
+        """Build the Gemini prompt for timestamp refinement.
 
+        All timestamps in the prompt are relative to the video excerpt (0 to padded_duration).
+        The "region of interest" (roi_offset to roi_end_offset) is where the search result
+        pointed, but Gemini is free to choose timestamps anywhere in the padded window.
+        """
         transcript_section = ""
         if transcript:
             transcript_section = f"""
-## Audio transcript (from Memories.ai)
+## Audio transcript
 
-The following is the dialogue/speech transcription for this segment. Timestamps are absolute
-(relative to the full source video, not this excerpt). The excerpt starts at {source_start:.1f}s.
+The following is the dialogue/speech transcription for this segment. Timestamps are relative
+to the video you are watching (matching the video timecode).
 
 {transcript}
 
 CRITICAL: Use the transcript to find natural speech boundaries. NEVER cut in the middle of a
 sentence or word. Start just before a sentence begins and end after it completes with a
-natural pause. The transcript timestamps help you align what you hear with precise timing.
+natural pause.
 """
 
         return f"""\
@@ -613,12 +716,15 @@ and must choose the best start and end points for a clip.
 
 ## Context
 
-You are watching a {segment_duration:.1f}-second video excerpt. The video you see starts at 0:00
-and ends at {segment_duration:.1f}s. You need to find the best ~{target_duration:.1f}s window
-within this segment.
+You are watching a {padded_duration:.1f}-second video excerpt. The video starts at 0:00 and ends
+at {padded_duration:.1f}s.
 
-IMPORTANT: Return your timestamps as offsets from the START of this video (0 to {segment_duration:.1f}).
-For example, if the best moment starts 5 seconds into this video, return new_start=5.0.
+The search result pointed to the region from {roi_offset:.1f}s to {roi_end_offset:.1f}s in this
+video. Focus your search around that area, but you CAN choose timestamps outside it if needed
+to capture a complete sentence or natural boundary.
+
+IMPORTANT: Return your timestamps as offsets from the START of this video (0 to {padded_duration:.1f}).
+Your ideal clip duration is ~{target_duration:.1f}s.
 
 ## What this clip is for
 {clip_description or "(No description provided)"}
@@ -630,20 +736,25 @@ For example, if the best moment starts 5 seconds into this video, return new_sta
 
 Watch the video AND listen to the audio carefully. Use both to decide the best cut points.
 
-- **Dialogue-heavy clips**: Listen for complete sentences and natural speech boundaries.
-  Don't cut mid-sentence. Include brief pauses before/after key statements.
+- **Dialogue clips**: Listen for complete sentences and natural speech boundaries. NEVER cut
+  mid-sentence. Include brief pauses before/after key statements. If a sentence starts before
+  or continues after the region of interest, expand to capture the full sentence.
 
 - **Visual clips** (b-roll, reactions, scenery): Prioritize visual composition, movement
-  peaks, and natural motion boundaries. Cut on action — start when movement begins,
-  end when it resolves.
+  peaks, and natural motion boundaries. Cut on action.
 
 - **Audio-driven clips** (music, applause, sound effects): Align cuts with audio beats,
   applause peaks, or natural audio transitions.
 
+## Truncation detection
+
+If you notice that a sentence or word is cut off at the very START of the video (the speaker
+is mid-sentence at 0:00), set `speech_truncated_start` to true.
+
+If you notice that a sentence or word is cut off at the very END of the video (the speaker
+is mid-sentence at {padded_duration:.1f}s), set `speech_truncated_end` to true.
+
 ## Output
 
-Return `new_start` and `new_end` as seconds from the beginning of this video (0 to {segment_duration:.1f}).
-The clip duration should be close to {target_duration:.1f}s but can vary if a natural boundary
-makes it slightly shorter or longer.
-
+Return `new_start` and `new_end` as seconds from the beginning of this video (0 to {padded_duration:.1f}).
 Set `focus_type` to "dialogue", "visual", or "audio" based on what primarily drove your decision."""
