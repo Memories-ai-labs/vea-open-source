@@ -12,18 +12,20 @@ export function SimpleMarkdown({ text }: { text: string }) {
 
 type Block =
   | { type: 'heading'; level: number; text: string }
-  | { type: 'list'; items: string[] }
+  | { type: 'list'; items: string[]; ordered?: boolean }
   | { type: 'paragraph'; text: string };
 
 function parseBlocks(raw: string): Block[] {
   const lines = raw.split('\n');
   const blocks: Block[] = [];
   let listBuf: string[] = [];
+  let listOrdered = false;
 
   function flushList() {
     if (listBuf.length > 0) {
-      blocks.push({ type: 'list', items: [...listBuf] });
+      blocks.push({ type: 'list', items: [...listBuf], ordered: listOrdered });
       listBuf = [];
+      listOrdered = false;
     }
   }
 
@@ -41,7 +43,16 @@ function parseBlocks(raw: string): Block[] {
     // List item (- or * prefixed, or indented sub-items like "  - ")
     const liMatch = trimmed.match(/^[-*]\s+(.+)$/);
     if (liMatch) {
+      if (listBuf.length === 0) listOrdered = false;
       listBuf.push(liMatch[1]);
+      continue;
+    }
+
+    // Ordered list item (1. 2. etc.)
+    const olMatch = trimmed.match(/^\d+[.)]\s+(.+)$/);
+    if (olMatch) {
+      if (listBuf.length === 0) listOrdered = true;
+      listBuf.push(olMatch[1]);
       continue;
     }
 
@@ -66,9 +77,9 @@ function parseBlocks(raw: string): Block[] {
 }
 
 function renderInline(text: string): React.ReactNode[] {
-  // Split on **bold** markers
+  // Split on **bold** and `code` markers
   const parts: React.ReactNode[] = [];
-  const regex = /\*\*(.+?)\*\*/g;
+  const regex = /\*\*(.+?)\*\*|`([^`]+)`/g;
   let lastIndex = 0;
   let match;
 
@@ -76,11 +87,28 @@ function renderInline(text: string): React.ReactNode[] {
     if (match.index > lastIndex) {
       parts.push(text.slice(lastIndex, match.index));
     }
-    parts.push(
-      <strong key={match.index} style={{ color: 'var(--text-primary)', fontWeight: 700 }}>
-        {match[1]}
-      </strong>
-    );
+    if (match[1] !== undefined) {
+      // **bold**
+      parts.push(
+        <strong key={match.index} style={{ color: 'var(--text-primary)', fontWeight: 700 }}>
+          {match[1]}
+        </strong>
+      );
+    } else if (match[2] !== undefined) {
+      // `code`
+      parts.push(
+        <code key={match.index} style={{
+          background: 'rgba(255,255,255,0.06)',
+          padding: '1px 5px',
+          borderRadius: '4px',
+          fontSize: '0.92em',
+          fontFamily: 'var(--font-mono)',
+          color: 'var(--text-primary)',
+        }}>
+          {match[2]}
+        </code>
+      );
+    }
     lastIndex = regex.lastIndex;
   }
   if (lastIndex < text.length) {
@@ -128,7 +156,7 @@ function renderBlock(block: Block, key: number): React.ReactNode {
               lineHeight: 1.7,
               color: 'var(--text-secondary)',
               position: 'relative',
-              paddingLeft: '10px',
+              paddingLeft: block.ordered ? '18px' : '10px',
             }}
           >
             <span
@@ -136,11 +164,13 @@ function renderBlock(block: Block, key: number): React.ReactNode {
                 position: 'absolute',
                 left: 0,
                 color: 'var(--text-muted)',
-                fontSize: '7px',
-                top: '6px',
+                fontSize: block.ordered ? '10px' : '7px',
+                top: block.ordered ? '1px' : '6px',
+                fontWeight: block.ordered ? 600 : undefined,
+                fontFamily: block.ordered ? 'var(--font-mono)' : undefined,
               }}
             >
-              ●
+              {block.ordered ? `${i + 1}.` : '●'}
             </span>
             {renderInline(item)}
           </li>

@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Literal, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
@@ -204,10 +204,32 @@ class EditDecision(BaseModel):
 
 
 class RefinedTimestamps(BaseModel):
-    """Gemini's structured output for clip timestamp refinement."""
-    new_start: float          # refined in-point in seconds (offset from start of video excerpt)
-    new_end: float            # refined out-point in seconds (offset from start of video excerpt)
-    reasoning: str            # why these timestamps were chosen
-    focus_type: str = ""      # "visual" | "dialogue" | "audio" — what drove the decision
-    speech_truncated_start: bool = False  # sentence/word cut off at start of window
-    speech_truncated_end: bool = False    # sentence/word continues past end of window
+    """Gemini's structured output for clip timestamp refinement.
+
+    IMPORTANT: new_start and new_end are OFFSETS in seconds from the beginning
+    of the provided video excerpt (starting at 0), NOT absolute/global timestamps
+    from the original source video.
+    """
+    new_start: float = Field(
+        ge=0,
+        description="Refined in-point as seconds from the START of the provided video excerpt (0-based). Must be >= 0.",
+    )
+    new_end: float = Field(
+        ge=0,
+        description="Refined out-point as seconds from the START of the provided video excerpt (0-based). Must be > new_start.",
+    )
+    reasoning: str = Field(
+        description="Brief explanation of why these specific timestamps were chosen.",
+    )
+    focus_type: str = Field(
+        default="",
+        description="What primarily drove the cut point decision: 'dialogue', 'visual', or 'audio'.",
+    )
+    speech_truncated_start: bool = Field(
+        default=False,
+        description="True if a sentence or word is cut off at the very START of the video excerpt (speaker mid-sentence at 0:00).",
+    )
+    speech_truncated_end: bool = Field(
+        default=False,
+        description="True if a sentence or word is cut off at the very END of the video excerpt (speaker mid-sentence at the last frame).",
+    )

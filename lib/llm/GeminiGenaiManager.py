@@ -11,6 +11,7 @@ from google.genai.types import SafetySetting, HarmCategory, HarmBlockThreshold
 from enum import Enum
 from pathlib import Path
 from pydantic import BaseModel
+import logging
 import mimetypes
 import json
 import os
@@ -18,6 +19,9 @@ import time
 import traceback
 from typing import Any, Dict, Optional, Tuple, Type
 from lib.utils.metrics_collector import metrics_collector
+
+
+logger = logging.getLogger(__name__)
 
 
 class GeminiGenaiManager:
@@ -120,20 +124,48 @@ class GeminiGenaiManager:
             response_mime_type=response_mime_type,
             safety_settings=safety_settings,
         )
+        # Log request summary
+        part_summaries = []
+        for p in parts:
+            if p.text:
+                part_summaries.append(f"text({len(p.text)} chars)")
+            elif p.inline_data:
+                part_summaries.append(f"file({p.inline_data.mime_type}, {len(p.inline_data.data)} bytes)")
+            elif p.file_data:
+                part_summaries.append(f"uri({p.file_data.file_uri})")
+        logger.info(
+            f"[GEMINI] LLM_request: model={self.model} context={context} "
+            f"parts=[{', '.join(part_summaries)}] schema={schema.__name__ if hasattr(schema, '__name__') else schema}"
+        )
+
         for attempt in range(max_retries):
             try:
+                t0 = time.time()
                 response = self.genai_client.models.generate_content(
                     model=self.model,
                     contents=[{"role": "user", "parts": parts}],
                     config=config,
                 )
+                elapsed = time.time() - t0
 
                 if response.text == None:
                     raise ValueError("Response text is None, likely an error occurred.")
 
                 # Log token usage metrics if context provided
-                if context and hasattr(response, 'usage_metadata'):
-                    metrics_collector.log_tokens(context, response.usage_metadata)
+                usage = getattr(response, 'usage_metadata', None)
+                if context and usage:
+                    metrics_collector.log_tokens(context, usage)
+
+                token_info = ""
+                if usage:
+                    token_info = (
+                        f" input_tokens={getattr(usage, 'prompt_token_count', '?')}"
+                        f" output_tokens={getattr(usage, 'candidates_token_count', '?')}"
+                    )
+                logger.info(
+                    f"[GEMINI] Response: context={context} {elapsed:.1f}s{token_info} "
+                    f"response_len={len(response.text or '')} chars"
+                )
 
                 if response_mime_type == "application/json":
                     if response.parsed is None:

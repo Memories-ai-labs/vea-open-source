@@ -28,7 +28,10 @@ TOOL_DECLARATIONS = Tool(
             description=(
                 "Search for specific video clips matching a query. "
                 "Returns clips with video_name, start/end timestamps, "
-                "relevance score, and description."
+                "relevance score, description, and dialogue transcript "
+                "for that time range. Read the transcripts to verify "
+                "whether a clip contains the moment you need before "
+                "committing to refine it."
             ),
             parameters={
                 "type": "object",
@@ -108,11 +111,14 @@ TOOL_DECLARATIONS = Tool(
         FunctionDeclaration(
             name="refine_clip_timestamps",
             description=(
-                "Refine the in/out points of a clip to find the best segment within a larger range. "
-                "Use this after search_footage returns a broad segment — this tool trims the source video, "
-                "transcribes dialogue via Memories.ai, sends both the video and transcript to Gemini, "
-                "and returns optimized start/end timestamps. Works for both dialogue-heavy and visual clips. "
-                "The tool automatically decides whether to focus on visuals, dialogue, or audio cues."
+                "Refine the in/out points of a clip to find precise cut points within a broader search range. "
+                "Extracts and downsamples the video segment, transcribes audio via ElevenLabs STT, "
+                "sends both to Gemini which watches the video and returns optimized start/end timestamps. "
+                "Works for dialogue (finds sentence boundaries), visual b-roll (peak moments), and "
+                "audio-driven clips (beats, applause). IMPORTANT: Only call this on clips you've "
+                "committed to using — do NOT refine immediately after searching. First read the "
+                "search transcripts, select your final clips, update the planning scratchpad, "
+                "then refine the selected clips."
             ),
             parameters={
                 "type": "object",

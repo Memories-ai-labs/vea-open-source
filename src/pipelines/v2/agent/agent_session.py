@@ -185,6 +185,7 @@ class AgentSession:
     async def _agent_loop(self) -> None:
         """Run Gemini in a loop until it signals completion."""
         last_message_user_text: str | None = None
+        message_user_this_round = False  # suppress duplicate follow-up text
         for round_num in range(MAX_TOOL_ROUNDS):
             # Rebuild system prompt with current scratchpads
             system_instruction = build_system_prompt(
@@ -234,15 +235,15 @@ class AgentSession:
                 text_parts = [p.text for p in model_content.parts if p.text]
                 full_text = "\n".join(text_parts)
                 if full_text.strip():
-                    is_duplicate = (
-                        last_message_user_text
-                        and full_text.strip() == last_message_user_text.strip()
-                    )
-                    if not is_duplicate:
+                    # Suppress if message_user was already called this round
+                    # (Gemini tends to rephrase the same plan as follow-up text)
+                    if not message_user_this_round:
                         await self._emit("agent_message", {
                             "text": full_text,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
                         })
+                    else:
+                        logger.debug("[AGENT] Suppressed duplicate follow-up text after message_user")
                     self._chat_log.append(ChatMessage(
                         role="model",
                         text=full_text,
@@ -272,6 +273,7 @@ class AgentSession:
                 # Special handling for message_user — emit the message
                 if tool_name == "message_user":
                     last_message_user_text = tool_args.get("message", "")
+                    message_user_this_round = True
                     await self._emit("agent_message", {
                         "text": last_message_user_text,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -339,6 +341,8 @@ class AgentSession:
             # Add function responses to history
             fn_content = Content(role="tool", parts=function_response_parts)
             self._history.append(fn_content)
+            # Note: message_user_this_round stays True until the next text-only
+            # response is suppressed, then gets cleared on the next tool round
 
         # If we hit the max rounds, notify
         logger.warning(f"[AGENT] Hit max tool rounds ({MAX_TOOL_ROUNDS})")

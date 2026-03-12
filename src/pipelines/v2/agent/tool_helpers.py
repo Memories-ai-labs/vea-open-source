@@ -24,23 +24,38 @@ def tts_sync(text: str, output_path: str, api_key: str) -> None:
 def stt_word_timestamps(audio_path: str, api_key: str) -> List[Dict]:
     """Transcribe audio with word-level timestamps via ElevenLabs Scribe.
 
-    Returns a list of word dicts: [{"text": "Hello", "start": 0.12, "end": 0.45}, ...]
+    Returns a list of word dicts: [{"text": "Hello", "start": 0.12, "end": 0.45, "type": "word"}, ...]
     """
+    from io import BytesIO
     from elevenlabs.client import ElevenLabs
     client = ElevenLabs(api_key=api_key)
     with open(audio_path, "rb") as f:
-        result = client.speech_to_text.convert(
-            file=f,
-            model_id="scribe_v1",
-            timestamps_granularity="word",
-        )
+        audio_data = BytesIO(f.read())
+    result = client.speech_to_text.convert(
+        file=audio_data,
+        model_id="scribe_v1",
+        tag_audio_events=True,
+        diarize=True,
+    )
     words = []
     for w in getattr(result, "words", []) or []:
-        text = getattr(w, "text", "") if not isinstance(w, dict) else w.get("text", "")
-        start = getattr(w, "start", 0) if not isinstance(w, dict) else w.get("start", 0)
-        end = getattr(w, "end", 0) if not isinstance(w, dict) else w.get("end", 0)
+        if isinstance(w, dict):
+            text = w.get("text", "")
+            start = w.get("start", 0)
+            end = w.get("end", 0)
+            wtype = w.get("type", "word")
+        else:
+            text = getattr(w, "text", "")
+            start = getattr(w, "start", 0)
+            end = getattr(w, "end", 0)
+            wtype = getattr(w, "type", "word")
         if text.strip():
-            words.append({"text": text.strip(), "start": float(start), "end": float(end)})
+            words.append({
+                "text": text.strip(),
+                "start": float(start),
+                "end": float(end),
+                "type": str(wtype),
+            })
     return words
 
 

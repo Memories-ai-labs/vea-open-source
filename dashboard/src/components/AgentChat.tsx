@@ -21,6 +21,7 @@ interface AgentChatProps {
   onSend: (text: string) => void;
   onRequestRender: () => void;
   onBack: () => void;
+  onClearState: () => void;
 }
 
 const PAD_LABELS: Record<string, string> = {
@@ -103,7 +104,7 @@ function useDragDivider(
 }
 
 export function AgentChat({
-  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, onSend, onRequestRender, onBack,
+  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, onSend, onRequestRender, onBack, onClearState,
 }: AgentChatProps) {
   const [project, setProject] = useState(initialProject);
   const [input, setInput] = useState('');
@@ -437,7 +438,7 @@ export function AgentChat({
                   <DropdownBtn color="var(--text-secondary)" disabled={manageLoading === 'gists'} onClick={async () => { setManageLoading('gists'); try { await clearGists(project.project_name); setManageMsg('Gists cleared.'); await refresh(); } catch (e: any) { setManageMsg(`Error: ${e.message}`); } finally { setManageLoading(null); } }}>
                     {manageLoading === 'gists' ? 'Clearing...' : 'Clear gists'}
                   </DropdownBtn>
-                  <DropdownBtn color="var(--text-secondary)" disabled={manageLoading === 'planning'} onClick={async () => { setManageLoading('planning'); try { await clearPlanning(project.project_name); setManageMsg('Planning + chat cleared.'); await refresh(); } catch (e: any) { setManageMsg(`Error: ${e.message}`); } finally { setManageLoading(null); } }}>
+                  <DropdownBtn color="var(--text-secondary)" disabled={manageLoading === 'planning'} onClick={async () => { setManageLoading('planning'); onClearState(); try { await clearPlanning(project.project_name); setManageMsg('Planning + chat cleared.'); await refresh(); } catch (e: any) { setManageMsg(`Error: ${e.message}`); } finally { setManageLoading(null); } }}>
                     {manageLoading === 'planning' ? 'Clearing...' : 'Clear planning + chat'}
                   </DropdownBtn>
                   <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
@@ -708,11 +709,10 @@ export function AgentChat({
                       color: 'var(--text-primary)',
                       fontSize: '13px',
                       lineHeight: 1.7,
-                      whiteSpace: 'pre-wrap',
                       wordBreak: 'break-word',
                     }}
                   >
-                    {m.text}
+                    {isUser ? m.text : <SimpleMarkdown text={m.text} />}
                   </div>
                 );
               }

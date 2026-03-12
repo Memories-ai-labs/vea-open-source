@@ -1,9 +1,11 @@
 """Tool executor for the agentic editing session."""
 
 import asyncio
+import json
 import logging
 import subprocess
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +19,19 @@ from src.pipelines.v2.agent.tool_helpers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _refine_debug_log(workspace, entry: dict):
+    """Append a JSON line to the workspace's refine debug log."""
+    try:
+        log_dir = workspace.root / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "refine_debug.jsonl"
+        entry["timestamp"] = datetime.now(timezone.utc).isoformat()
+        with open(log_path, "a") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+    except Exception as e:
+        logger.warning(f"[AGENT] Failed to write refine debug log: {e}")
 
 
 # ── Tool executor ─────────────────────────────────────────────────────────────
@@ -118,6 +133,7 @@ class ToolExecutor:
             items = raw_results.get("items", [])
 
         # Fetch transcript once so we can snap endpoints to sentence boundaries
+        # and include dialogue context in results
         transcript_segments = await self._get_transcript_segments()
 
         clips = []
@@ -138,13 +154,38 @@ class ToolExecutor:
 
             score = float(item.get("score", 0))
 
-            clips.append({
+            # Slice transcript to this clip's time range so the agent can see
+            # what dialogue exists before deciding to refine.
+            # Use generous overlap: include any sentence that overlaps the clip
+            # window at all, even if it starts well before or ends well after.
+            # This catches sentences that straddle the clip boundary.
+            clip_transcript = []
+            for seg in transcript_segments:
+                seg_text = seg.get("text", "").strip()
+                # Skip empty or metadata-only segments
+                if not seg_text or len(seg_text) < 3:
+                    continue
+                if seg_text.lower().startswith("transcription by"):
+                    continue
+                # Include if any part of the sentence overlaps the clip range
+                # (sentence ends after clip starts AND sentence starts before clip ends)
+                if seg["end"] > start and seg["start"] < end:
+                    clip_transcript.append({
+                        "text": seg_text,
+                        "start": round(seg["start"], 1),
+                        "end": round(seg["end"], 1),
+                    })
+
+            clip_data = {
                 "video_no": video_no,
                 "video_name": item.get("videoName", video_no),
                 "start_seconds": start,
                 "end_seconds": end,
                 "score": score,
-            })
+            }
+            if clip_transcript:
+                clip_data["transcript"] = clip_transcript
+            clips.append(clip_data)
 
         return {"clips": clips, "count": len(clips), "query": query}
 
@@ -556,12 +597,22 @@ class ToolExecutor:
                 "-i", str(segment_path),
                 "-vf", "fps=2,scale=-2:480",
                 "-c:v", "libx264", "-crf", "30", "-preset", "ultrafast",
-                "-c:a", "aac", "-b:a", "64k",
+                "-c:a", "aac", "-b:a", "128k",
                 str(downsampled_path),
             ]
             await asyncio.get_event_loop().run_in_executor(
                 None, lambda: subprocess.run(downsample_cmd, check=True)
             )
+
+            # Save segment to workspace logs for manual inspection
+            try:
+                debug_dir = self.workspace.root / "logs" / "refine_clips"
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                clip_label = f"{source_start:.0f}_{source_end:.0f}"
+                import shutil as _shutil
+                _shutil.copy2(str(segment_path), str(debug_dir / f"segment_{clip_label}.mp4"))
+            except Exception:
+                pass
 
             # Step 3: Transcribe segment audio with ElevenLabs STT (word-level timestamps)
             clip_transcript = ""
@@ -570,12 +621,12 @@ class ToolExecutor:
                 import os as _os
                 el_key = _os.environ.get("ELEVENLABS_API_KEY", "")
                 if el_key:
-                    # Extract audio from the segment for STT
-                    audio_path = tmp_dir / "audio.mp3"
+                    # Extract audio from the segment for STT (128k AAC for quality)
+                    audio_path = tmp_dir / "audio.m4a"
                     audio_cmd = [
                         "ffmpeg", "-y", "-loglevel", "error",
                         "-i", str(segment_path),
-                        "-vn", "-c:a", "libmp3lame", "-b:a", "64k",
+                        "-vn", "-c:a", "aac", "-b:a", "128k",
                         str(audio_path),
                     ]
                     await asyncio.get_event_loop().run_in_executor(
@@ -626,13 +677,64 @@ class ToolExecutor:
                 transcript=clip_transcript,
             )
 
-            # Step 5: Call Gemini with video + prompt
-            result = await asyncio.get_event_loop().run_in_executor(
+            # Debug: log the full request before sending to Gemini
+            video_file_size = downsampled_path.stat().st_size if downsampled_path.exists() else 0
+            _refine_debug_log(self.workspace, {
+                "event": "gemini_request",
+                "source_file": source_file,
+                "retry": retry,
+                "source_start": source_start,
+                "source_end": source_end,
+                "padded_start": padded_start,
+                "padded_end": padded_end,
+                "padded_duration": padded_duration,
+                "roi_offset": roi_offset,
+                "roi_end_offset": roi_end_offset,
+                "target_duration": target_duration,
+                "clip_description": clip_description,
+                "agent_prompt": prompt,
+                "video_file_size_bytes": video_file_size,
+                "transcript_word_count": len(transcript_segments),
+                "transcript_text": clip_transcript,
+                "full_gemini_prompt": refinement_prompt,
+            })
+
+            # Step 5a: Gemini reasoning pass — free-text analysis with video
+            reasoning_text = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: self.gemini.LLM_request(
                     prompt_contents=[downsampled_path, refinement_prompt],
+                    schema=None,  # free-text reasoning
+                    context="refine_clip_timestamps_reasoning",
+                ),
+            )
+
+            _refine_debug_log(self.workspace, {
+                "event": "gemini_reasoning",
+                "source_file": source_file,
+                "retry": retry,
+                "reasoning_text": reasoning_text,
+            })
+
+            # Step 5b: Structured output pass — use reasoning to produce timestamps
+            structured_prompt = (
+                f"{reasoning_text}\n\n"
+                "Based on your analysis above, you have identified the best cut points for this clip.\n\n"
+                "Now convert your reasoning into structured JSON output. Return:\n"
+                "- `new_start` and `new_end` as seconds from the beginning of the video "
+                f"(0 to {padded_duration:.1f})\n"
+                "- `reasoning`: a brief summary of why you chose these timestamps\n"
+                "- `focus_type`: \"dialogue\", \"visual\", or \"audio\"\n"
+                "- `speech_truncated_start`: true if speech is cut off at the start of the video\n"
+                "- `speech_truncated_end`: true if speech is cut off at the end of the video\n"
+            )
+
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.gemini.LLM_request(
+                    prompt_contents=[structured_prompt],
                     schema=RefinedTimestamps,
-                    context="refine_clip_timestamps",
+                    context="refine_clip_timestamps_structured",
                 ),
             )
 
@@ -641,7 +743,29 @@ class ToolExecutor:
             elif isinstance(result, dict):
                 refined = RefinedTimestamps(**result)
             else:
+                _refine_debug_log(self.workspace, {
+                    "event": "gemini_error",
+                    "source_file": source_file,
+                    "error": f"Unexpected response type: {type(result)}",
+                    "raw_result": str(result)[:2000],
+                })
                 return {"error": f"Unexpected Gemini response type: {type(result)}"}
+
+            # Debug: log Gemini's raw response (before timestamp conversion)
+            _refine_debug_log(self.workspace, {
+                "event": "gemini_response",
+                "source_file": source_file,
+                "retry": retry,
+                "gemini_new_start_offset": refined.new_start,
+                "gemini_new_end_offset": refined.new_end,
+                "gemini_duration": refined.new_end - refined.new_start,
+                "reasoning": refined.reasoning,
+                "focus_type": refined.focus_type,
+                "speech_truncated_start": refined.speech_truncated_start,
+                "speech_truncated_end": refined.speech_truncated_end,
+                "note": f"These are offsets from 0 in the {padded_duration:.1f}s padded video. "
+                        f"Add padded_start={padded_start:.1f} to get absolute timestamps.",
+            })
 
             # Gemini returns offsets relative to the padded video (0 to padded_duration).
             # Convert back to absolute source timestamps.
@@ -649,6 +773,20 @@ class ToolExecutor:
             new_end = padded_start + max(0, min(refined.new_end, padded_duration))
             if new_end <= new_start:
                 new_end = min(new_start + target_duration, padded_end)
+
+            # Debug: log the final converted timestamps
+            _refine_debug_log(self.workspace, {
+                "event": "timestamp_conversion",
+                "source_file": source_file,
+                "retry": retry,
+                "input_range": f"[{source_start:.1f}–{source_end:.1f}]",
+                "padded_range": f"[{padded_start:.1f}–{padded_end:.1f}]",
+                "gemini_offsets": f"[{refined.new_start:.2f}–{refined.new_end:.2f}]",
+                "absolute_output": f"[{new_start:.2f}–{new_end:.2f}]",
+                "output_duration": round(new_end - new_start, 2),
+                "target_duration": target_duration,
+                "duration_delta": round((new_end - new_start) - target_duration, 2),
+            })
 
             logger.info(
                 f"[AGENT] Refined: [{source_start:.1f}–{source_end:.1f}] → "
@@ -663,6 +801,14 @@ class ToolExecutor:
                 wider_start = source_start - (pad * 2 if refined.speech_truncated_start else pad)
                 wider_end = source_end + (pad * 2 if refined.speech_truncated_end else pad)
                 wider_start = max(0, wider_start)
+                _refine_debug_log(self.workspace, {
+                    "event": "truncation_retry",
+                    "source_file": source_file,
+                    "truncated_start": refined.speech_truncated_start,
+                    "truncated_end": refined.speech_truncated_end,
+                    "original_window": f"[{source_start:.1f}–{source_end:.1f}]",
+                    "wider_window": f"[{wider_start:.1f}–{wider_end:.1f}]",
+                })
                 logger.info(
                     f"[AGENT] Speech truncated — retrying with wider window "
                     f"[{wider_start:.1f}–{wider_end:.1f}]"

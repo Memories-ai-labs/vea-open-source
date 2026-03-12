@@ -87,6 +87,7 @@ interface UseAgentChatResult {
   connected: boolean;
   busy: boolean;
   send: (text: string) => void;
+  clearAndReconnect: () => void;
 }
 
 export function useAgentChat(projectName: string | null): UseAgentChatResult {
@@ -339,5 +340,30 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     }
   }, []);
 
-  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, send, requestRender };
+  const clearAndReconnect = useCallback(() => {
+    // Immediately wipe all local state
+    setEvents([]);
+    setMessages([]);
+    setScratchpads({ comprehension: '', creative_direction: '', planning: '', fcpxml: '' });
+    setScratchpadTimestamps({ comprehension: null, creative_direction: null, planning: null, fcpxml: null });
+    setEditDecision(null);
+    setRenderState({ status: 'idle', progress: 0, filename: null, error: null });
+    setBusy(false);
+    // Close and reconnect WebSocket so backend sends fresh init
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    if (wsRef.current) {
+      wsRef.current.onclose = null;
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setConnected(false);
+    backoffRef.current = 500;
+    // Small delay so the backend clear endpoint finishes before reconnect
+    setTimeout(() => { if (mountedRef.current) connect(); }, 300);
+  }, [connect]);
+
+  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, send, requestRender, clearAndReconnect };
 }

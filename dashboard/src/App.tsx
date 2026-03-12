@@ -78,6 +78,7 @@ export default function App() {
       onSend={agent.send}
       onRequestRender={agent.requestRender}
       onBack={handleBack}
+      onClearState={agent.clearAndReconnect}
     />
   );
 }
