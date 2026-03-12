@@ -463,6 +463,35 @@ async def v2_serve_render(project_name: str, filename: str):
     return FileResponse(str(render_path), media_type="video/mp4")
 
 
+@router.get(f"{_config.V2_API_PREFIX}/projects/{{project_name}}/footage/{{filename}}/thumbnail")
+async def v2_serve_footage_thumbnail(project_name: str, filename: str):
+    """Generate and serve a JPEG thumbnail for a footage file."""
+    from fastapi.responses import FileResponse
+    workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    if not workspace.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
+    video_path = workspace.root / "footage" / filename
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail=f"Footage '{filename}' not found.")
+    thumb_dir = workspace.root / "thumbnails"
+    thumb_dir.mkdir(parents=True, exist_ok=True)
+    thumb_path = thumb_dir / f"{filename}.jpg"
+    if not thumb_path.exists():
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", str(video_path),
+            "-vf", "thumbnail,scale=160:-1",
+            "-frames:v", "1",
+            str(thumb_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"ffmpeg thumbnail failed: {stderr.decode()}")
+    return FileResponse(str(thumb_path), media_type="image/jpeg")
+
+
 @router.get(f"{_config.V2_API_PREFIX}/resolve/status", response_model=V2ResolveStatusResponse)
 async def v2_resolve_status():
     """

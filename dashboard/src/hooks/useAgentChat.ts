@@ -37,6 +37,7 @@ export interface EditDecisionClip {
   gain_db?: number | null;
   speed?: { rate: number } | null;
   transition_after?: { type: string; duration_seconds: number } | null;
+  track?: number;
 }
 
 export interface NarrationSegment {
@@ -88,6 +89,7 @@ interface UseAgentChatResult {
   busy: boolean;
   send: (text: string) => void;
   clearAndReconnect: () => void;
+  updateEditDecision: (updated: EditDecision) => void;
 }
 
 export function useAgentChat(projectName: string | null): UseAgentChatResult {
@@ -340,6 +342,13 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     }
   }, []);
 
+  const updateEditDecision = useCallback((updated: EditDecision) => {
+    setEditDecision(updated);
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'edit_decision_update', edit_decision: updated }));
+    }
+  }, []);
+
   const clearAndReconnect = useCallback(() => {
     // Immediately wipe all local state
     setEvents([]);
@@ -365,5 +374,5 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     setTimeout(() => { if (mountedRef.current) connect(); }, 300);
   }, [connect]);
 
-  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, send, requestRender, clearAndReconnect };
+  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, send, requestRender, clearAndReconnect, updateEditDecision };
 }

@@ -187,11 +187,23 @@ class AgentSession:
         last_message_user_text: str | None = None
         message_user_this_round = False  # suppress duplicate follow-up text
         for round_num in range(MAX_TOOL_ROUNDS):
-            # Rebuild system prompt with current scratchpads
+            # Load current edit decision from disk (may have been modified by user in UI)
+            current_edit_json = ""
+            edit_decision_path = self.workspace.root / "fcpxml" / "edit_decision.json"
+            if edit_decision_path.exists():
+                try:
+                    import json as _json
+                    with open(edit_decision_path) as f:
+                        current_edit_json = _json.dumps(_json.load(f), indent=2)
+                except Exception:
+                    pass
+
+            # Rebuild system prompt with current scratchpads + edit decision
             system_instruction = build_system_prompt(
                 project_name=self.project_name,
                 video_list=self.video_list,
                 scratchpads_text=self.scratchpads.render_all(),
+                current_edit_decision=current_edit_json,
             )
 
             config = GenerateContentConfig(

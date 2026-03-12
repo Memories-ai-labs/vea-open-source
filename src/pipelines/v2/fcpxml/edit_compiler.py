@@ -120,11 +120,22 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
     )
     spine = SubElement(sequence_el, "spine")
 
-    # --- Build spine clips + transitions ---
-    timeline_frames = 0
-    clip_timeline_ranges: List[Tuple[int, int]] = []  # (start_frame, end_frame) per clip
+    # --- Separate clips by track ---
+    track1_clips: List[Tuple[int, ClipDecision]] = []
+    upper_track_clips: Dict[int, List[Tuple[int, ClipDecision]]] = {}  # track_num → [(orig_idx, clip)]
 
     for i, clip in enumerate(edit.clips):
+        track_num = clip.track if clip.track >= 1 else 1
+        if track_num == 1:
+            track1_clips.append((i, clip))
+        else:
+            upper_track_clips.setdefault(track_num, []).append((i, clip))
+
+    # --- Build spine clips from track 1 + transitions ---
+    timeline_frames = 0
+    clip_timeline_ranges: List[Tuple[int, int]] = []  # (start_frame, end_frame) per spine clip
+
+    for i, clip in track1_clips:
         key = clip.source_path or clip.source_file
         asset_id = source_asset_map.get(key)
         if not asset_id:
@@ -189,6 +200,84 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
         #     _, trans_frames = _quantize_duration_to_timeline(trans_dur, fps)
         #     _add_transition(spine, clip.transition_after, fps_frac, fps)
         #     timeline_frames -= trans_frames
+
+    # --- Place track 2+ clips as connected clips on spine ---
+    # Each upper-track clip is sequenced within its track group and attached
+    # to the appropriate spine clip using a positive lane number.
+    spine_clips_for_parent = [el for el in spine if el.tag == "asset-clip"]
+    for track_num in sorted(upper_track_clips.keys()):
+        lane_num = track_num  # lane 2 for V2, lane 3 for V3, etc.
+        group = upper_track_clips[track_num]
+        track_offset_frames = 0
+
+        for _, clip in group:
+            key = clip.source_path or clip.source_file
+            asset_id = source_asset_map.get(key)
+            if not asset_id:
+                logger.warning(f"[COMPILER] No asset for track {track_num} clip {clip.id} source={key}")
+                continue
+
+            src_dur_sec = clip.source_end - clip.source_start
+            if src_dur_sec <= 0:
+                continue
+
+            speed_rate = clip.speed.rate if clip.speed else 1.0
+            if speed_rate <= 0:
+                speed_rate = 1.0
+            tl_dur_sec = src_dur_sec / speed_rate
+
+            src_dur_frac = _fraction_from_seconds(tl_dur_sec, fps_hint=fps)
+            tl_dur, tl_frames = _quantize_duration_to_timeline(src_dur_frac, fps)
+            if tl_frames <= 0:
+                continue
+
+            # Compute absolute timeline position for this clip
+            abs_offset_sec = float(Fraction(track_offset_frames, 1) / fps_frac)
+
+            # Find which spine clip to attach to
+            parent_clip, parent_idx = _find_parent_clip(
+                spine_clips_for_parent, clip_timeline_ranges, abs_offset_sec, fps_frac
+            )
+            if parent_clip is None:
+                logger.warning(f"[COMPILER] No parent spine clip for track {track_num} clip {clip.id} at {abs_offset_sec}s")
+                track_offset_frames += tl_frames
+                continue
+
+            # Relative offset within the parent clip
+            parent_start_sec = float(Fraction(clip_timeline_ranges[parent_idx][0], 1) / fps_frac)
+            rel_offset = abs_offset_sec - parent_start_sec
+            rel_offset_frac = _fraction_from_seconds(rel_offset, fps_hint=fps)
+
+            start = _fraction_from_seconds(clip.source_start, fps_hint=fps)
+
+            conn_el = SubElement(
+                parent_clip, "asset-clip",
+                name=clip.label or clip.id,
+                ref=asset_id,
+                lane=str(lane_num),
+                offset=_format_fraction_seconds(rel_offset_frac),
+                start=_format_fraction_seconds(start),
+                duration=_format_fraction_seconds(tl_dur),
+                format=fmt_id,
+                enabled="1",
+            )
+
+            if clip.speed and clip.speed.rate != 1.0:
+                _add_speed_remap(conn_el, src_dur_sec, tl_dur, fps_frac, clip.speed.rate)
+
+            if clip.transform:
+                t = clip.transform
+                SubElement(
+                    conn_el, "adjust-transform",
+                    position=f"{t.position_x:.1f} {t.position_y:.1f}",
+                    scale=f"{t.scale_x:.4f} {t.scale_y:.4f}",
+                    rotation=f"{t.rotation:.1f}",
+                )
+
+            if clip.gain_db is not None:
+                SubElement(conn_el, "adjust-volume", amount=f"{clip.gain_db:.1f}dB")
+
+            track_offset_frames += tl_frames
 
     spine_total_duration = Fraction(timeline_frames, 1) / fps_frac
     total_duration = spine_total_duration

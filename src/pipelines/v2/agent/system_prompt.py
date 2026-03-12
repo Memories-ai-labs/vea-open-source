@@ -342,6 +342,8 @@ Videos (video_name → filename mapping for source_file):
 When search_footage returns a `video_name`, use the filename shown above as `source_file`
 in refine_clip_timestamps and generate_fcpxml. If no filename mapping is shown, use the
 video_name as source_file and the system will attempt to resolve it.
+
+{current_edit_decision}
 """
 
 
@@ -349,9 +351,20 @@ def build_system_prompt(
     project_name: str,
     video_list: str,
     scratchpads_text: str,
+    current_edit_decision: str = "",
 ) -> str:
+    edit_block = ""
+    if current_edit_decision:
+        edit_block = (
+            "## Current edit decision (may have been adjusted by the user in the timeline UI)\n\n"
+            "The user can drag clip edges to retrim or reorder clips in the dashboard timeline.\n"
+            "The JSON below reflects the LATEST state. Use these values as the source of truth\n"
+            "for clip timestamps and ordering — they may differ from what you originally generated.\n\n"
+            f"```json\n{current_edit_decision}\n```"
+        )
     return SYSTEM_PROMPT_TEMPLATE.format(
         project_name=project_name,
         video_list=video_list,
         scratchpads=scratchpads_text,
+        current_edit_decision=edit_block,
     )

@@ -7,6 +7,7 @@ import { useBreakpoint } from '../hooks/useBreakpoint';
 import { SimpleMarkdown } from './SimpleMarkdown';
 import { NLETimeline } from './NLETimeline';
 import { VideoPreview } from './VideoPreview';
+import type { VideoPreviewHandle } from './VideoPreview';
 
 interface AgentChatProps {
   project: ProjectSummary;
@@ -22,6 +23,7 @@ interface AgentChatProps {
   onRequestRender: () => void;
   onBack: () => void;
   onClearState: () => void;
+  onEditDecisionChange: (updated: EditDecision) => void;
 }
 
 const PAD_LABELS: Record<string, string> = {
@@ -104,7 +106,7 @@ function useDragDivider(
 }
 
 export function AgentChat({
-  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, onSend, onRequestRender, onBack, onClearState,
+  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, onSend, onRequestRender, onBack, onClearState, onEditDecisionChange,
 }: AgentChatProps) {
   const [project, setProject] = useState(initialProject);
   const [input, setInput] = useState('');
@@ -114,6 +116,8 @@ export function AgentChat({
   const [manageMsg, setManageMsg] = useState('');
   const [indexing, setIndexing] = useState(false);
   const [expandedFile, setExpandedFile] = useState<string | null>(null);
+  const [playheadTime, setPlayheadTime] = useState(0);
+  const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const manageRef = useRef<HTMLDivElement>(null);
   const manageBtnRef = useRef<HTMLButtonElement>(null);
@@ -123,7 +127,7 @@ export function AgentChat({
 
   // Row heights: [top, middle, bottom]. Bottom uses flex to fill remaining space.
   // We store top and middle as fixed px, bottom is flex: 1.
-  const [rowHeights, setRowHeights] = useState<number[]>([120, 140, 500]);
+  const [rowHeights, setRowHeights] = useState<number[]>([120, 240, 500]);
   // Column split for middle row: percentage of width for the timeline (0-100)
   const [timelinePct, setTimelinePct] = useState(70);
 
@@ -163,6 +167,30 @@ export function AgentChat({
     document.addEventListener('mouseup', onUp);
   }, []);
 
+  // Auto-size preview to fill row height when render completes
+  useEffect(() => {
+    if (renderState.status !== 'complete' || !colContainerRef.current || isTablet) return;
+    const container = colContainerRef.current;
+    const containerW = container.getBoundingClientRect().width;
+    const rowH = rowHeights[1];
+    if (containerW <= 0 || rowH <= 0) return;
+
+    // Use the edit decision's aspect ratio, default to 16:9
+    const edW = editDecision?.timeline?.width ?? 1920;
+    const edH = editDecision?.timeline?.height ?? 1080;
+    const aspectRatio = edW / edH;
+
+    // The ideal preview width is the row height * aspect ratio
+    // Account for header bar (~30px) and some padding
+    const videoHeight = rowH - 34;
+    const idealPreviewW = videoHeight * aspectRatio;
+    // Add a small margin (8px)
+    const previewW = idealPreviewW + 8;
+    // Convert to percentage and set timeline to fill the rest
+    const newTimelinePct = Math.max(30, Math.min(85, ((containerW - previewW - 6) / containerW) * 100));
+    setTimelinePct(newTimelinePct);
+  }, [renderState.status, rowHeights, editDecision, isTablet]);
+
   const refresh = useCallback(async () => {
     try {
       const { projects } = await listProjects();
@@ -185,6 +213,19 @@ export function AgentChat({
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [manageOpen]);
+
+  // Space bar to play/pause when not typing
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return;
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'TEXTAREA' || tag === 'INPUT' || (e.target as HTMLElement).isContentEditable) return;
+      e.preventDefault();
+      videoPreviewRef.current?.togglePlayback();
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, []);
 
   // Auto-scroll on new messages
   useEffect(() => {
@@ -295,6 +336,11 @@ export function AgentChat({
       handleSubmit(e);
     }
   }
+
+  const handleTimelineSeek = useCallback((time: number) => {
+    setPlayheadTime(time);
+    videoPreviewRef.current?.seekTo(time);
+  }, []);
 
   async function handleIndex() {
     setIndexing(true);
@@ -475,14 +521,15 @@ export function AgentChat({
             {project.footage_files.map((f) => {
               const indexed = project.indexed_files?.includes(f);
               const fileGist = project.video_gists?.[f] ?? '';
+              const thumbUrl = `/video-edit/v2/projects/${encodeURIComponent(project.project_name)}/footage/${encodeURIComponent(f)}/thumbnail`;
               return (
                 <button
                   key={f}
                   onClick={() => fileGist && setExpandedFile(expandedFile === f ? null : f)}
                   style={{
                     flexShrink: 0,
-                    padding: '5px 10px',
-                    borderRadius: '999px',
+                    padding: '3px 10px 3px 3px',
+                    borderRadius: '8px',
                     border: `1px solid ${indexed ? 'rgba(138,210,126,0.22)' : 'rgba(255,255,255,0.06)'}`,
                     background: indexed ? 'rgba(138,210,126,0.06)' : 'rgba(255,255,255,0.03)',
                     color: 'var(--text-secondary)',
@@ -491,14 +538,27 @@ export function AgentChat({
                     cursor: fileGist ? 'pointer' : 'default',
                     display: 'flex',
                     alignItems: 'center',
-                    gap: '6px',
-                    maxWidth: '280px',
+                    gap: '8px',
+                    maxWidth: '300px',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                     whiteSpace: 'nowrap',
                   }}
                 >
-                  <span style={{ fontSize: '10px', color: indexed ? 'var(--accent-green)' : 'var(--text-muted)' }}>
+                  <img
+                    src={thumbUrl}
+                    alt=""
+                    style={{
+                      width: '36px',
+                      height: '24px',
+                      objectFit: 'cover',
+                      borderRadius: '4px',
+                      background: 'rgba(0,0,0,0.3)',
+                      flexShrink: 0,
+                    }}
+                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                  />
+                  <span style={{ fontSize: '10px', color: indexed ? 'var(--accent-green)' : 'var(--text-muted)', flexShrink: 0 }}>
                     {indexed ? '✓' : '○'}
                   </span>
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{f}</span>
@@ -585,7 +645,7 @@ export function AgentChat({
       >
         {/* Timeline */}
         <div style={{ width: isTablet ? '100%' : `${timelinePct}%`, minWidth: 0, overflow: 'hidden' }}>
-          <NLETimeline editDecision={editDecision} />
+          <NLETimeline editDecision={editDecision} playheadTime={playheadTime} onSeek={handleTimelineSeek} onEditDecisionChange={onEditDecisionChange} />
         </div>
 
         {/* Column divider */}
@@ -627,10 +687,12 @@ export function AgentChat({
         {!isTablet && (
           <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
             <VideoPreview
+              ref={videoPreviewRef}
               projectName={project.project_name}
               renderState={renderState}
               hasEditDecision={editDecision !== null && editDecision.clips.length > 0}
               onRequestRender={onRequestRender}
+              onTimeUpdate={setPlayheadTime}
             />
           </div>
         )}

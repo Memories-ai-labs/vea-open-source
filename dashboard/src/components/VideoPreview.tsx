@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useCallback, useImperativeHandle, forwardRef } from 'react';
 import type { RenderState } from '../hooks/useAgentChat';
 
 interface VideoPreviewProps {
@@ -6,10 +6,39 @@ interface VideoPreviewProps {
   renderState: RenderState;
   hasEditDecision: boolean;
   onRequestRender?: () => void;
+  onTimeUpdate?: (time: number) => void;
 }
 
-export function VideoPreview({ projectName, renderState, hasEditDecision, onRequestRender }: VideoPreviewProps) {
+export interface VideoPreviewHandle {
+  seekTo: (time: number) => void;
+  togglePlayback: () => void;
+}
+
+export const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function VideoPreview(
+  { projectName, renderState, hasEditDecision, onRequestRender, onTimeUpdate },
+  ref,
+) {
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  useImperativeHandle(ref, () => ({
+    seekTo(time: number) {
+      if (videoRef.current) {
+        videoRef.current.currentTime = time;
+      }
+    },
+    togglePlayback() {
+      if (videoRef.current) {
+        if (videoRef.current.paused) videoRef.current.play();
+        else videoRef.current.pause();
+      }
+    },
+  }), []);
+
+  const handleTimeUpdate = useCallback(() => {
+    if (videoRef.current && onTimeUpdate) {
+      onTimeUpdate(videoRef.current.currentTime);
+    }
+  }, [onTimeUpdate]);
 
   // Auto-play when render completes
   useEffect(() => {
@@ -108,6 +137,7 @@ export function VideoPreview({ projectName, renderState, hasEditDecision, onRequ
           <video
             ref={videoRef}
             controls
+            onTimeUpdate={handleTimeUpdate}
             style={{
               maxWidth: '100%',
               maxHeight: '100%',
@@ -178,7 +208,7 @@ export function VideoPreview({ projectName, renderState, hasEditDecision, onRequ
       </div>
     </div>
   );
-}
+});
 
 const containerStyle: React.CSSProperties = {
   width: '100%',

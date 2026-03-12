@@ -273,6 +273,19 @@ def register_websocket_routes(app: FastAPI):
                                 "data": {"error": "No FCPXML found. Generate one first."},
                             })
 
+                    elif msg_type == "edit_decision_update":
+                        # Persist edit decision from client and broadcast update
+                        import json as _json
+                        ed = msg.get("edit_decision")
+                        if ed:
+                            ed_dir = workspace.root / "fcpxml"
+                            ed_dir.mkdir(parents=True, exist_ok=True)
+                            ed_path = ed_dir / "edit_decision.json"
+                            with open(ed_path, "w") as f:
+                                _json.dump(ed, f, indent=2)
+                            logger.info(f"[AGENT WS] Persisted edit_decision for project={project_name}")
+                            await emit("timeline_update", {"edit_decision": ed})
+
                 except asyncio.TimeoutError:
                     pass
 

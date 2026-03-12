@@ -79,6 +79,7 @@ export default function App() {
       onRequestRender={agent.requestRender}
       onBack={handleBack}
       onClearState={agent.clearAndReconnect}
+      onEditDecisionChange={agent.updateEditDecision}
     />
   );
 }
