@@ -77,6 +77,8 @@ class ToolExecutor:
                 return await self._generate_narration(args)
             elif tool_name == "select_music":
                 return await self._select_music(args)
+            elif tool_name == "verify_preview":
+                return await self._verify_preview(args)
             elif tool_name == "message_user":
                 return self._message_user(args)
             else:
@@ -309,6 +311,137 @@ class ToolExecutor:
             "has_music": edit.music is not None,
             "title_count": len(edit.titles),
         }
+
+    async def _verify_preview(self, args: Dict) -> Dict:
+        """Watch the rendered preview and return a professional video critique."""
+        import shutil
+
+        focus = args.get("focus", "")
+
+        # Find latest render
+        render_dir = self.workspace.root / "renders"
+        render_path = render_dir / "preview.mp4"
+        if not render_path.exists():
+            # Try any mp4 in renders
+            mp4s = sorted(render_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True) if render_dir.exists() else []
+            if mp4s:
+                render_path = mp4s[0]
+            else:
+                return {"error": "No rendered preview found. Generate FCPXML and render first."}
+
+        logger.info(f"[AGENT] verify_preview: analyzing {render_path} (focus: {focus or 'general'})")
+        await self._emit("tool_progress", {
+            "tool": "verify_preview",
+            "step": "preparing",
+            "message": "Preparing preview for analysis...",
+        })
+
+        # Downsample for cost efficiency (2fps, 480p, CRF 30)
+        tmp_dir = Path(tempfile.mkdtemp(prefix="vea_verify_"))
+        downsampled = tmp_dir / "verify_preview.mp4"
+
+        try:
+            ds_cmd = [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-i", str(render_path),
+                "-vf", "fps=2,scale=-2:480",
+                "-c:v", "libx264", "-crf", "30", "-preset", "ultrafast",
+                "-c:a", "aac", "-b:a", "64k",
+                str(downsampled),
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *ds_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                logger.warning(f"[AGENT] verify_preview downsample failed: {stderr.decode()}")
+                # Fall back to original file
+                downsampled = render_path
+
+            await self._emit("tool_progress", {
+                "tool": "verify_preview",
+                "step": "analyzing",
+                "message": "Gemini is watching the preview...",
+            })
+
+            # Load current edit decision for context
+            edit_context = ""
+            ed_path = self.workspace.root / "fcpxml" / "edit_decision.json"
+            if ed_path.exists():
+                try:
+                    with open(ed_path) as f:
+                        ed_data = json.load(f)
+                    clip_summary = []
+                    for i, c in enumerate(ed_data.get("clips", [])):
+                        dur = c.get("source_end", 0) - c.get("source_start", 0)
+                        clip_summary.append(
+                            f"  {i+1}. {c.get('label', c.get('id', '?'))} "
+                            f"({dur:.1f}s) — {c.get('description', 'no description')}"
+                        )
+                    edit_context = (
+                        f"\n## Current edit structure ({len(clip_summary)} clips)\n"
+                        + "\n".join(clip_summary)
+                    )
+                except Exception:
+                    pass
+
+            focus_section = ""
+            if focus:
+                focus_section = f"\n## Specific focus requested\n{focus}\n"
+
+            verification_prompt = f"""\
+You are a professional video editor reviewing a rendered edit. Watch the attached video \
+carefully — both visuals AND audio — and provide a detailed critique.
+
+## Evaluation dimensions
+- **Pacing & rhythm**: Does the edit flow naturally? Are clips too long/short?
+- **Transitions**: Are cuts smooth? Do they feel motivated or jarring?
+- **Visual coherence**: Do shots work together? Any awkward juxtapositions?
+- **Audio mix**: Is dialogue/narration clear? Music balanced? Any level issues?
+- **Narrative flow**: Does it tell a coherent story? Are there dead spots?
+- **Technical quality**: Artifacts, color shifts, audio glitches, sync issues?
+{focus_section}{edit_context}
+
+## Response format
+
+Structure your critique as:
+
+**STRENGTHS** — What's working well (be specific with timestamps)
+
+**ISSUES** — Problems ranked by severity. For each:
+- Timestamp or clip number
+- What's wrong
+- Suggested fix (e.g. "shorten clip 3 by 2s", "add dissolve between clips 2-3")
+
+**PRIORITY FIXES** — Top 3 changes that would most improve the edit
+
+Be concise but specific. Reference timestamps (MM:SS) when possible."""
+
+            loop = asyncio.get_event_loop()
+            critique = await loop.run_in_executor(
+                None,
+                lambda: self.gemini.LLM_request(
+                    prompt_contents=[Path(str(downsampled)), verification_prompt],
+                    schema=None,
+                    context="verify_preview",
+                ),
+            )
+
+            logger.info(f"[AGENT] verify_preview complete: {len(str(critique))} chars")
+
+            return {
+                "status": "reviewed",
+                "render_file": render_path.name,
+                "critique": str(critique),
+            }
+
+        finally:
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
 
     def _message_user(self, args: Dict) -> Dict:
         message = args.get("message", "")

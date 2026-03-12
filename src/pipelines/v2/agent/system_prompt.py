@@ -260,7 +260,13 @@ Follow this general flow, but adapt based on the conversation:
    Update the fcpxml scratchpad with the result.
    If clips need replacing, go back to step 4.
 
-7. ITERATE
+7. VERIFY PREVIEW (optional but recommended)
+   After the render completes, call verify_preview to have a vision model watch the
+   rendered video and critique it. This catches pacing issues, jarring transitions,
+   audio mix problems, and narrative gaps you can't see from the edit decision alone.
+   Use the critique to refine clips, reorder shots, or adjust timing before delivering.
+
+8. ITERATE
    The user may steer you at any point. When they give feedback:
    - Update creative_direction immediately
    - Adjust the plan accordingly

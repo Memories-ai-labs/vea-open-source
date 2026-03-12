@@ -204,6 +204,30 @@ TOOL_DECLARATIONS = Tool(
             },
         ),
         FunctionDeclaration(
+            name="verify_preview",
+            description=(
+                "Watch the latest rendered preview video and provide a professional critique. "
+                "Sends the render to a vision model that analyzes pacing, transitions, audio mix, "
+                "visual composition, and overall flow. Returns detailed feedback with specific "
+                "timestamps and actionable suggestions. Use this after rendering to quality-check "
+                "the edit before delivering to the user, or when the user asks you to review."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "focus": {
+                        "type": "string",
+                        "description": (
+                            "What to focus the review on — e.g. 'pacing and transitions', "
+                            "'does the narration sync with visuals', 'overall quality check', "
+                            "'are the clip selections compelling'. Leave empty for a general review."
+                        ),
+                    },
+                },
+                "required": [],
+            },
+        ),
+        FunctionDeclaration(
             name="message_user",
             description=(
                 "Send a visible message to the user in the chat interface. "
