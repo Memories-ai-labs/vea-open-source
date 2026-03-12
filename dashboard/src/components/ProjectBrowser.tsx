@@ -345,24 +345,6 @@ export function ProjectBrowser({ onSelectProject }: ProjectBrowserProps) {
               />
             </div>
 
-            <div
-              style={{
-                padding: isMobile ? '18px' : '22px',
-                borderRadius: 'var(--radius-lg)',
-                background: 'rgba(255,255,255,0.03)',
-                border: '1px solid var(--border)',
-                color: 'var(--text-secondary)',
-                fontSize: '13px',
-                lineHeight: 1.8,
-              }}
-            >
-              <div className="eyebrow" style={{ marginBottom: '12px' }}>Workflow</div>
-              <div>1. Create a workspace</div>
-              <div>2. Drop footage into <code>footage/</code></div>
-              <div>3. Index the project</div>
-              <div>4. Start planning with a creative brief</div>
-              <div>5. Generate FCPXML and render</div>
-            </div>
           </div>
         </div>
 
