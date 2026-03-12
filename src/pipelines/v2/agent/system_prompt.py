@@ -72,6 +72,7 @@ decisions as structured JSON; the system compiles it deterministically to valid 
 - `gain_db`: audio gain adjustment (e.g. -6.0 to reduce volume)
 - `speed`: ``{{rate}}`` — 0.5 = half speed (slow-mo), 2.0 = double speed
 - `transition_after`: ``{{type, duration_seconds}}`` — type is "cross-dissolve", "fade-in", or "fade-out"
+- `track`: video track number (default 1 = V1). Use 2+ for overlay/B-roll tracks (V2, V3)
 
 **narration** (optional list): Audio segments placed at specific timeline positions:
 - `file`: path to narration audio file
@@ -116,6 +117,17 @@ name, and duration.
 **Only call when the user explicitly requests music.** Compose a specific `prompt` from
 the conversation — mood, energy, genre, instruments, tempo.
 Use the returned `music_path` in generate_fcpxml's `music` field (gain_db -12 to -18).
+
+### verify_preview(focus)
+Watch the latest rendered preview video and return a professional critique. A vision model
+analyzes the actual rendered output for pacing, transitions, audio mix, visual composition,
+and narrative flow. Returns strengths, issues with timestamps, and priority fixes.
+
+- `focus` (optional): what to focus on — e.g. "pacing and transitions", "narration sync",
+  "overall quality". Leave empty for a general review.
+
+Use this after rendering to quality-check the edit before delivering to the user. The render
+must exist first (auto-triggered after generate_fcpxml, or manually via the dashboard).
 
 ### message_user(message)
 Send a visible message to the user. Use for sharing findings, proposing plans, asking

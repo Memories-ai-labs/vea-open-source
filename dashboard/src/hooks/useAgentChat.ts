@@ -38,6 +38,7 @@ export interface EditDecisionClip {
   speed?: { rate: number } | null;
   transition_after?: { type: string; duration_seconds: number } | null;
   track?: number;
+  timeline_offset?: number;
 }
 
 export interface NarrationSegment {

@@ -41,23 +41,24 @@ interface Track {
 }
 
 // Drag modes
-type DragMode = 'reorder' | 'retrim-left' | 'retrim-right' | null;
+type DragMode = 'move' | 'retrim-left' | 'retrim-right' | null;
 
 interface DragState {
   mode: DragMode;
-  trackId: string;
+  sourceTrackNum: number;   // track the clip started on
   itemId: string;
-  clipIndex: number;
+  clipIndex: number;        // index in editDecision.clips
   startX: number;
   startY: number;
-  // For reorder
-  originalOrder: number;  // index in clips array
-  ghostOffset: number;    // px offset from clip left edge to pointer
-  dropIndex: number;      // where to insert
-  draggedDown: boolean;   // dragged below track → new track
+  ghostOffset: number;      // px offset from clip left edge to pointer
+  // For move — updated during drag
+  targetTrackNum: number;   // track the clip is hovering over
+  ghostLeft: number;        // px position of ghost in timeline
+  timelineOffset: number;   // absolute time position where clip would land
   // For retrim
   originalStart: number;
   originalEnd: number;
+  originalTimelineOffset: number | undefined;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -140,6 +141,18 @@ function hashStr(s: string): number {
   return Math.abs(h);
 }
 
+function clipTooltip(c: EditDecisionClip): string[] {
+  return [
+    c.label || c.id,
+    c.description || '',
+    `Source: ${baseName(c.source_file)}`,
+    `In: ${fmtShort(c.source_start)} → Out: ${fmtShort(c.source_end)}`,
+    c.gain_db != null ? `Gain: ${c.gain_db}dB` : '',
+    c.speed && c.speed.rate !== 1 ? `Speed: ${c.speed.rate}×` : '',
+    (c.track ?? 1) > 1 && c.timeline_offset != null ? `Offset: ${fmtShort(c.timeline_offset)}` : '',
+  ].filter(Boolean);
+}
+
 // ─── Track builder ──────────────────────────────────────────────────────────
 
 function buildTracks(ed: EditDecision): { tracks: Track[]; totalDuration: number } {
@@ -148,7 +161,6 @@ function buildTracks(ed: EditDecision): { tracks: Track[]; totalDuration: number
 
   // Video tracks — group clips by track number (V1, V2, etc.)
   if (ed.clips.length > 0) {
-    // Group clips by track number, preserving original index
     const trackGroups = new Map<number, { clip: EditDecisionClip; origIndex: number }[]>();
     ed.clips.forEach((c, i) => {
       const trackNum = c.track ?? 1;
@@ -156,39 +168,44 @@ function buildTracks(ed: EditDecision): { tracks: Track[]; totalDuration: number
       trackGroups.get(trackNum)!.push({ clip: c, origIndex: i });
     });
 
-    // Sort track numbers so V1 comes first
     const sortedTrackNums = [...trackGroups.keys()].sort((a, b) => a - b);
 
     for (const trackNum of sortedTrackNums) {
       const group = trackGroups.get(trackNum)!;
-      let offset = 0;
-      const items: TrackItem[] = group.map(({ clip: c, origIndex }) => {
-        const dur = Math.max(0.5, (c.source_end - c.source_start) / (c.speed?.rate ?? 1));
-        const start = offset;
-        offset += dur;
-        const pal = CLIP_PALETTE[origIndex % CLIP_PALETTE.length];
-        return {
-          id: c.id,
-          clipIndex: origIndex,
-          tlStart: start,
-          tlEnd: offset,
-          label: c.label || c.id,
-          sublabel: baseName(c.source_file),
-          color: pal.color,
-          borderColor: pal.border,
-          gainDb: c.gain_db,
-          tooltip: [
-            c.label || c.id,
-            c.description || '',
-            `Source: ${baseName(c.source_file)}`,
-            `In: ${fmtShort(c.source_start)} → Out: ${fmtShort(c.source_end)}`,
-            c.gain_db != null ? `Gain: ${c.gain_db}dB` : '',
-            c.speed && c.speed.rate !== 1 ? `Speed: ${c.speed.rate}×` : '',
-          ].filter(Boolean),
-          type: 'video',
-        };
-      });
-      totalDur = Math.max(totalDur, offset);
+      const items: TrackItem[] = [];
+
+      if (trackNum === 1) {
+        // V1 = primary spine: clips are sequential by array order
+        let offset = 0;
+        for (const { clip: c, origIndex } of group) {
+          const dur = Math.max(0.5, (c.source_end - c.source_start) / (c.speed?.rate ?? 1));
+          const start = offset;
+          offset += dur;
+          const pal = CLIP_PALETTE[origIndex % CLIP_PALETTE.length];
+          items.push({
+            id: c.id, clipIndex: origIndex, tlStart: start, tlEnd: offset,
+            label: c.label || c.id, sublabel: baseName(c.source_file),
+            color: pal.color, borderColor: pal.border, gainDb: c.gain_db,
+            tooltip: clipTooltip(c), type: 'video',
+          });
+        }
+        totalDur = Math.max(totalDur, offset);
+      } else {
+        // V2+ = free placement: use timeline_offset for absolute positioning
+        for (const { clip: c, origIndex } of group) {
+          const dur = Math.max(0.5, (c.source_end - c.source_start) / (c.speed?.rate ?? 1));
+          const start = c.timeline_offset ?? 0;
+          const pal = CLIP_PALETTE[origIndex % CLIP_PALETTE.length];
+          items.push({
+            id: c.id, clipIndex: origIndex, tlStart: start, tlEnd: start + dur,
+            label: c.label || c.id, sublabel: baseName(c.source_file),
+            color: pal.color, borderColor: pal.border, gainDb: c.gain_db,
+            tooltip: clipTooltip(c), type: 'video',
+          });
+          totalDur = Math.max(totalDur, start + dur);
+        }
+      }
+
       const trackId = `V${trackNum}`;
       tracks.push({ id: trackId, name: trackId, type: 'video', height: VIDEO_TRACK_H, color: V1.color, items });
     }
@@ -493,8 +510,8 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
     mode: DragMode;
     itemId: string;
     ghostLeft: number;
-    dropIndex: number;
-    draggedDown: boolean;
+    targetTrackNum: number;
+    sourceTrackNum: number;
   } | null>(null);
 
   // Drag-to-pan (only when not dragging a clip)
@@ -618,13 +635,14 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
 
     const clip = editDecision.clips[item.clipIndex];
     if (!clip) return;
+    const trackNum = clip.track ?? 1;
 
-    const mode: DragMode = edge === 'body' ? 'reorder' : edge === 'left' ? 'retrim-left' : 'retrim-right';
+    const mode: DragMode = edge === 'body' ? 'move' : edge === 'left' ? 'retrim-left' : 'retrim-right';
 
-    // Calculate ghost offset for reorder
+    // Calculate ghost offset for move
     const el = scrollRef.current;
     let ghostOffset = 0;
-    if (el && mode === 'reorder') {
+    if (el && mode === 'move') {
       const rect = el.getBoundingClientRect();
       const scrollX = el.scrollLeft;
       ghostOffset = (e.clientX - rect.left + scrollX) - item.tlStart * pxPerSec;
@@ -632,31 +650,56 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
 
     dragRef.current = {
       mode,
-      trackId: 'V1',
+      sourceTrackNum: trackNum,
       itemId: item.id,
       clipIndex: item.clipIndex,
       startX: e.clientX,
       startY: e.clientY,
-      originalOrder: item.clipIndex,
       ghostOffset,
-      dropIndex: item.clipIndex,
-      draggedDown: false,
+      targetTrackNum: trackNum,
+      ghostLeft: item.tlStart * pxPerSec,
+      timelineOffset: item.tlStart,
       originalStart: clip.source_start,
       originalEnd: clip.source_end,
+      originalTimelineOffset: clip.timeline_offset,
     };
 
-    // Capture pointer on the scroll container for global tracking
     const target = scrollRef.current || (e.target as HTMLElement);
     target.setPointerCapture(e.pointerId);
-
     setHoveredItem(null);
   }, [editDecision, onEditDecisionChange, pxPerSec]);
+
+  // Resolve pointer Y to a track number
+  const resolveTrackAtY = useCallback((clientY: number): number => {
+    const el = scrollRef.current;
+    if (!el) return 1;
+    // Find which video track the pointer is over
+    const videoTracks = tracks.filter(t => t.type === 'video');
+    for (const vt of videoTracks) {
+      const trackEl = el.querySelector(`[data-track-id="${vt.id}"]`);
+      if (trackEl) {
+        const rect = trackEl.getBoundingClientRect();
+        if (clientY >= rect.top && clientY <= rect.bottom) {
+          return parseInt(vt.id.replace('V', ''), 10) || 1;
+        }
+      }
+    }
+    // If below all video tracks, return max+1 (new track)
+    if (videoTracks.length > 0) {
+      const lastTrackEl = el.querySelector(`[data-track-id="${videoTracks[videoTracks.length - 1].id}"]`);
+      if (lastTrackEl && clientY > lastTrackEl.getBoundingClientRect().bottom) {
+        const maxNum = Math.max(...videoTracks.map(t => parseInt(t.id.replace('V', ''), 10) || 1));
+        return maxNum + 1;
+      }
+    }
+    // If above all video tracks, return 1
+    return 1;
+  }, [tracks]);
 
   // Global pointer move for drag operations
   const handleDragPointerMove = useCallback((e: React.PointerEvent) => {
     const drag = dragRef.current;
     if (!drag || !editDecision) {
-      // Fall through to pan
       onPanPointerMove(e);
       return;
     }
@@ -667,57 +710,43 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
     // Deadzone
     if (Math.abs(dx) < DRAG_DEADZONE && Math.abs(dy) < DRAG_DEADZONE) return;
 
-    if (drag.mode === 'reorder') {
+    if (drag.mode === 'move') {
       const el = scrollRef.current;
       if (!el) return;
       const rect = el.getBoundingClientRect();
       const scrollX = el.scrollLeft;
       const pointerXInTimeline = e.clientX - rect.left + scrollX;
-      const ghostLeft = pointerXInTimeline - drag.ghostOffset;
+      const ghostLeft = Math.max(0, pointerXInTimeline - drag.ghostOffset);
+      const timelineOffset = Math.max(0, ghostLeft / pxPerSec);
 
-      // Find V1 track to determine drop position
-      const v1Track = tracks.find(t => t.id === 'V1');
-      if (!v1Track) return;
+      // Determine which track the pointer is over
+      const targetTrackNum = resolveTrackAtY(e.clientY);
 
-      // Determine drop index based on ghost center position
-      const ghostCenter = ghostLeft + ((v1Track.items[drag.clipIndex]?.tlEnd ?? 0) - (v1Track.items[drag.clipIndex]?.tlStart ?? 0)) * pxPerSec / 2;
-      let dropIdx = 0;
-      for (let i = 0; i < v1Track.items.length; i++) {
-        const itemCenter = ((v1Track.items[i].tlStart + v1Track.items[i].tlEnd) / 2) * pxPerSec;
-        if (ghostCenter > itemCenter) dropIdx = i + 1;
-      }
-
-      // Check if dragged below the V1 track
-      const v1TrackEl = el.querySelector('[data-track-id="V1"]');
-      const draggedDown = v1TrackEl
-        ? e.clientY > (v1TrackEl.getBoundingClientRect().bottom + DRAG_DOWN_THRESHOLD)
-        : false;
-
-      drag.dropIndex = dropIdx;
-      drag.draggedDown = draggedDown;
+      drag.targetTrackNum = targetTrackNum;
+      drag.ghostLeft = ghostLeft;
+      drag.timelineOffset = timelineOffset;
 
       setDragVisual({
-        mode: 'reorder',
+        mode: 'move',
         itemId: drag.itemId,
         ghostLeft,
-        dropIndex: dropIdx,
-        draggedDown,
+        targetTrackNum,
+        sourceTrackNum: drag.sourceTrackNum,
       });
     } else if (drag.mode === 'retrim-left' || drag.mode === 'retrim-right') {
       const deltaSec = dx / pxPerSec;
       const clip = editDecision.clips[drag.clipIndex];
       if (!clip) return;
 
-      // Preview retrim visually — we'll commit on pointer up
       setDragVisual({
         mode: drag.mode,
         itemId: drag.itemId,
         ghostLeft: 0,
-        dropIndex: 0,
-        draggedDown: false,
+        targetTrackNum: drag.sourceTrackNum,
+        sourceTrackNum: drag.sourceTrackNum,
       });
 
-      // Live retrim preview: update edit decision in real-time
+      // Live retrim preview
       const newClips = [...editDecision.clips];
       const c = { ...newClips[drag.clipIndex] };
       if (drag.mode === 'retrim-left') {
@@ -728,7 +757,7 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
       newClips[drag.clipIndex] = c;
       onEditDecisionChange?.({ ...editDecision, clips: newClips });
     }
-  }, [editDecision, onEditDecisionChange, tracks, pxPerSec, onPanPointerMove]);
+  }, [editDecision, onEditDecisionChange, tracks, pxPerSec, onPanPointerMove, resolveTrackAtY]);
 
   // Global pointer up — commit drag
   const handleDragPointerUp = useCallback((e: React.PointerEvent) => {
@@ -740,27 +769,72 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
       return;
     }
 
-    if (drag.mode === 'reorder') {
-      const fromIdx = drag.originalOrder;
-      let toIdx = drag.dropIndex;
+    if (drag.mode === 'move') {
+      const clipIdx = drag.clipIndex;
+      const clip = editDecision.clips[clipIdx];
+      if (!clip) { dragRef.current = null; setDragVisual(null); return; }
 
-      if (drag.draggedDown) {
-        // Move clip to the next available video track
-        const newClips = [...editDecision.clips];
-        const clip = newClips[fromIdx];
-        const currentTrack = clip.track ?? 1;
-        // Find the highest track number currently in use
-        const maxTrack = newClips.reduce((max, c) => Math.max(max, c.track ?? 1), 1);
-        const nextTrack = currentTrack >= maxTrack ? maxTrack + 1 : currentTrack + 1;
-        newClips[fromIdx] = { ...clip, track: nextTrack };
+      const fromTrack = drag.sourceTrackNum;
+      const toTrack = drag.targetTrackNum;
+      const timelineOffset = drag.timelineOffset;
+      const newClips = [...editDecision.clips];
+
+      if (fromTrack === toTrack && toTrack === 1) {
+        // Reorder within V1 (sequential spine) — find insert position by time
+        const v1Clips = newClips
+          .map((c, i) => ({ c, i }))
+          .filter(({ c }) => (c.track ?? 1) === 1);
+        // Compute timeline positions for V1 clips to find insertion point
+        let offset = 0;
+        let insertBefore = v1Clips.length;
+        for (let j = 0; j < v1Clips.length; j++) {
+          const vc = v1Clips[j].c;
+          if (v1Clips[j].i === clipIdx) { offset += Math.max(0.5, (vc.source_end - vc.source_start) / (vc.speed?.rate ?? 1)); continue; }
+          const dur = Math.max(0.5, (vc.source_end - vc.source_start) / (vc.speed?.rate ?? 1));
+          const mid = offset + dur / 2;
+          if (timelineOffset < mid && insertBefore === v1Clips.length) {
+            insertBefore = j;
+          }
+          offset += dur;
+        }
+        // Move clip in array
+        const [moved] = newClips.splice(clipIdx, 1);
+        // Recalculate insert position in the full array among V1 clips
+        const v1After = newClips.filter(c => (c.track ?? 1) === 1);
+        let targetArrayIdx = newClips.length; // default: end
+        const actualInsert = Math.min(insertBefore, v1After.length);
+        if (actualInsert < v1After.length) {
+          targetArrayIdx = newClips.indexOf(v1After[actualInsert]);
+        }
+        newClips.splice(targetArrayIdx, 0, { ...moved, track: 1, timeline_offset: undefined });
         onEditDecisionChange({ ...editDecision, clips: newClips });
-      } else if (fromIdx !== toIdx) {
-        // Reorder clips array
-        const newClips = [...editDecision.clips];
-        const [moved] = newClips.splice(fromIdx, 1);
-        // Adjust toIdx if moving forward (since we removed an item before it)
-        if (toIdx > fromIdx) toIdx--;
-        newClips.splice(toIdx, 0, moved);
+
+      } else if (toTrack === 1) {
+        // Moving FROM V2+ TO V1 — insert into sequential spine
+        const [moved] = newClips.splice(clipIdx, 1);
+        // Find insertion position based on timelineOffset
+        const v1Clips = newClips.filter(c => (c.track ?? 1) === 1);
+        let offset = 0;
+        let insertAt = v1Clips.length;
+        for (let j = 0; j < v1Clips.length; j++) {
+          const vc = v1Clips[j];
+          const dur = Math.max(0.5, (vc.source_end - vc.source_start) / (vc.speed?.rate ?? 1));
+          const mid = offset + dur / 2;
+          if (timelineOffset < mid) { insertAt = j; break; }
+          offset += dur;
+        }
+        let targetArrayIdx = newClips.length;
+        if (insertAt < v1Clips.length) {
+          targetArrayIdx = newClips.indexOf(v1Clips[insertAt]);
+        }
+        newClips.splice(targetArrayIdx, 0, { ...moved, track: 1, timeline_offset: undefined });
+        onEditDecisionChange({ ...editDecision, clips: newClips });
+
+      } else {
+        // Moving to V2+ (free placement) — set timeline_offset and track
+        // If coming from V1, compute the absolute position the clip was at
+        let tlOffset = timelineOffset;
+        newClips[clipIdx] = { ...clip, track: toTrack, timeline_offset: tlOffset };
         onEditDecisionChange({ ...editDecision, clips: newClips });
       }
     }
@@ -1101,7 +1175,7 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
                     const width = Math.max(MIN_CLIP_W, (item.tlEnd - item.tlStart) * pxPerSec);
                     const isHovered =
                       hoveredItem?.trackIdx === trackIdx && hoveredItem?.itemIdx === itemIdx;
-                    const isBeingDragged = dragVisual?.mode === 'reorder' && dragVisual.itemId === item.id;
+                    const isBeingDragged = dragVisual?.mode === 'move' && dragVisual.itemId === item.id;
 
                     return (
                       <ClipItem
@@ -1125,16 +1199,12 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
                     );
                   })}
 
-                  {/* Drop indicator for reorder */}
-                  {dragVisual?.mode === 'reorder' && isVideoTrack && !dragVisual.draggedDown && (() => {
-                    const dropIdx = dragVisual.dropIndex;
-                    const items = track.items;
-                    let indicatorX = 0;
-                    if (dropIdx >= items.length) {
-                      indicatorX = (items[items.length - 1]?.tlEnd ?? 0) * pxPerSec;
-                    } else {
-                      indicatorX = (items[dropIdx]?.tlStart ?? 0) * pxPerSec;
-                    }
+                  {/* Drop indicator — highlight target track */}
+                  {dragVisual?.mode === 'move' && isVideoTrack && (() => {
+                    const trackNum = parseInt(track.id.replace('V', ''), 10) || 1;
+                    if (trackNum !== dragVisual.targetTrackNum) return null;
+                    // Show a vertical line at drop position
+                    const indicatorX = dragVisual.ghostLeft;
                     return (
                       <div
                         style={{
@@ -1182,13 +1252,52 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
               );
             })}
 
-            {/* Ghost clip for reorder drag */}
-            {dragVisual?.mode === 'reorder' && (() => {
-              const v1Track = tracks.find(t => t.id === 'V1');
-              const dragItem = v1Track?.items.find(it => it.id === dragVisual.itemId);
-              if (!v1Track || !dragItem) return null;
+            {/* Ghost clip for move drag */}
+            {dragVisual?.mode === 'move' && (() => {
+              // Find the dragged item across all tracks
+              let dragItem: TrackItem | undefined;
+              for (const t of tracks) {
+                dragItem = t.items.find(it => it.id === dragVisual.itemId);
+                if (dragItem) break;
+              }
+              if (!dragItem) return null;
               const ghostWidth = Math.max(MIN_CLIP_W, (dragItem.tlEnd - dragItem.tlStart) * pxPerSec);
-              const ghostTop = RULER_H + (dragVisual.draggedDown ? v1Track.height + 8 : 2);
+
+              // Position ghost on the target track
+              const targetTrackId = `V${dragVisual.targetTrackNum}`;
+              const targetTrack = tracks.find(t => t.id === targetTrackId);
+              let ghostTop = RULER_H + 2; // default
+              if (targetTrack) {
+                // Calculate cumulative Y offset to this track
+                let yOffset = RULER_H;
+                for (const t of tracks) {
+                  if (t.id === targetTrackId) break;
+                  yOffset += t.height + TRACK_BORDER;
+                }
+                ghostTop = yOffset + 2;
+              } else {
+                // New track — position below the last video track
+                let yOffset = RULER_H;
+                for (const t of tracks) {
+                  if (t.type === 'video') yOffset = RULER_H;
+                  yOffset += t.height + TRACK_BORDER;
+                  if (t.type === 'video') {
+                    // Track the end of the last video track
+                  }
+                }
+                // Find end of all video tracks
+                let lastVideoEnd = RULER_H;
+                for (const t of tracks) {
+                  if (t.type === 'video') {
+                    lastVideoEnd += t.height + TRACK_BORDER;
+                  } else break; // video tracks come first
+                }
+                ghostTop = lastVideoEnd + 4;
+              }
+
+              const isNewTrack = !targetTrack;
+              const isChangingTrack = dragVisual.targetTrackNum !== dragVisual.sourceTrackNum;
+
               return (
                 <div
                   style={{
@@ -1196,10 +1305,10 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
                     left: dragVisual.ghostLeft,
                     top: ghostTop,
                     width: ghostWidth,
-                    height: v1Track.height - 4,
+                    height: VIDEO_TRACK_H - 4,
                     borderRadius: '3px',
                     background: `${dragItem.color}55`,
-                    border: `2px solid ${dragItem.color}99`,
+                    border: `2px solid ${isChangingTrack ? 'var(--accent-blue)' : dragItem.color}99`,
                     zIndex: 30,
                     pointerEvents: 'none',
                     boxShadow: `0 4px 12px rgba(0,0,0,0.4), 0 0 8px ${dragItem.color}33`,
@@ -1212,11 +1321,11 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
                     fontSize: '8px',
                     fontFamily: 'var(--font-mono)',
                     fontWeight: 600,
-                    color: dragItem.color,
+                    color: isNewTrack ? 'var(--accent-blue)' : dragItem.color,
                     opacity: 0.9,
                     pointerEvents: 'none',
                   }}>
-                    {dragVisual.draggedDown ? '+ New Track' : dragItem.label}
+                    {isNewTrack ? `+ V${dragVisual.targetTrackNum}` : dragItem.label}
                   </span>
                 </div>
               );

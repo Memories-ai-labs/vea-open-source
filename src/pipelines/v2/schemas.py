@@ -164,6 +164,7 @@ class ClipDecision(BaseModel):
     transform: Optional[TransformSettings] = None
     transition_after: Optional[TransitionSpec] = None
     track: int = Field(default=1, description="Video track number (1=V1, 2=V2, etc.)")
+    timeline_offset: Optional[float] = Field(default=None, description="Absolute timeline position in seconds (track 2+ free placement; track 1 uses sequential array order)")
 
 class NarrationSegment(BaseModel):
     """A narration audio segment placed at a specific timeline position."""
