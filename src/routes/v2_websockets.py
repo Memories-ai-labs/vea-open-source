@@ -274,7 +274,7 @@ def register_websocket_routes(app: FastAPI):
                             })
 
                     elif msg_type == "edit_decision_update":
-                        # Persist edit decision from client and broadcast update
+                        # Persist edit decision from client, recompile FCPXML, and broadcast
                         import json as _json
                         ed = msg.get("edit_decision")
                         if ed:
@@ -284,6 +284,25 @@ def register_websocket_routes(app: FastAPI):
                             with open(ed_path, "w") as f:
                                 _json.dump(ed, f, indent=2)
                             logger.info(f"[AGENT WS] Persisted edit_decision for project={project_name}")
+
+                            # Recompile FCPXML so next render uses updated edit
+                            try:
+                                from src.pipelines.v2.schemas import EditDecision as ED
+                                from src.pipelines.v2.fcpxml.edit_compiler import compile_edit_decision
+                                edit_obj = ED.model_validate(ed)
+                                # Resolve source paths for clips
+                                footage_dir = workspace.root / "footage"
+                                for clip in edit_obj.clips:
+                                    if not clip.source_path:
+                                        resolved = footage_dir / clip.source_file
+                                        if resolved.exists():
+                                            clip.source_path = str(resolved)
+                                fcpxml_out = str(workspace.get_fcpxml_path(version=1))
+                                compile_edit_decision(edit_obj, fcpxml_out)
+                                logger.info(f"[AGENT WS] Recompiled FCPXML from UI edit: {fcpxml_out}")
+                            except Exception as e:
+                                logger.warning(f"[AGENT WS] FCPXML recompile failed (non-fatal): {e}")
+
                             await emit("timeline_update", {"edit_decision": ed})
 
                 except asyncio.TimeoutError:
