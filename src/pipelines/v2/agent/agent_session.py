@@ -185,8 +185,8 @@ class AgentSession:
     async def _agent_loop(self) -> None:
         """Run Gemini in a loop until it signals completion."""
         last_message_user_text: str | None = None
-        message_user_this_round = False  # suppress duplicate follow-up text
         for round_num in range(MAX_TOOL_ROUNDS):
+            message_user_this_round = False  # reset each round
             # Load current edit decision from disk (may have been modified by user in UI)
             current_edit_json = ""
             edit_decision_path = self.workspace.root / "fcpxml" / "edit_decision.json"

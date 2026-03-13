@@ -243,10 +243,12 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
                 track_offset_frames += tl_frames
                 continue
 
-            # Relative offset within the parent clip
-            parent_start_sec = float(Fraction(clip_timeline_ranges[parent_idx][0], 1) / fps_frac)
-            rel_offset = abs_offset_sec - parent_start_sec
-            rel_offset_frac = _fraction_from_seconds(rel_offset, fps_hint=fps)
+            # Connected clip offset is in the parent's SOURCE media timeline.
+            # We need: parent_source_start + relative_timeline_offset
+            parent_tl_start_sec = float(Fraction(clip_timeline_ranges[parent_idx][0], 1) / fps_frac)
+            rel_offset = abs_offset_sec - parent_tl_start_sec
+            parent_source_start = _get_clip_source_start(spine_clips_for_parent[parent_idx])
+            rel_offset_frac = parent_source_start + _fraction_from_seconds(rel_offset, fps_hint=fps)
 
             start = _fraction_from_seconds(clip.source_start, fps_hint=fps)
 
@@ -302,8 +304,8 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
         if parent_clip is None:
             continue
 
-        parent_start_sec = float(Fraction(clip_timeline_ranges[parent_idx][0], 1) / fps_frac)
-        rel_offset = seg.timeline_offset - parent_start_sec
+        parent_tl_start_sec = float(Fraction(clip_timeline_ranges[parent_idx][0], 1) / fps_frac)
+        rel_offset = seg.timeline_offset - parent_tl_start_sec
 
         # Clamp duration so narration doesn't extend past the spine
         effective_duration = min(seg.duration, spine_end_sec - seg.timeline_offset)
@@ -311,7 +313,9 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
         nar_dur = _fraction_from_seconds(effective_duration, fps_hint=fps)
         nar_tl_dur, _ = _quantize_duration_to_timeline(nar_dur, fps)
         nar_start = _fraction_from_seconds(seg.start, fps_hint=fps)
-        nar_offset = _fraction_from_seconds(rel_offset, fps_hint=fps)
+        # Connected clip offset is in parent's SOURCE media timeline
+        parent_source_start = _get_clip_source_start(parent_clip)
+        nar_offset = parent_source_start + _fraction_from_seconds(rel_offset, fps_hint=fps)
 
         nar_el = SubElement(
             parent_clip, "asset-clip",
@@ -337,12 +341,14 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
         mus_tl_dur, _ = _quantize_duration_to_timeline(mus_dur, fps)
         mus_start = _fraction_from_seconds(mus.start, fps_hint=fps)
 
+        # Connected clip offset is in parent's SOURCE media timeline
+        mus_parent_source_start = _get_clip_source_start(spine_clips[0])
         mus_el = SubElement(
             spine_clips[0], "asset-clip",
             name=Path(mus.file).stem,
             ref=music_aid,
             lane="-2",
-            offset="0s",
+            offset=_format_fraction_seconds(mus_parent_source_start),
             start=_format_fraction_seconds(mus_start),
             duration=_format_fraction_seconds(mus_tl_dur),
             role="music",
@@ -360,12 +366,14 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
         if parent_clip is None:
             continue
 
-        parent_start_sec = float(Fraction(clip_timeline_ranges[parent_idx][0], 1) / fps_frac)
-        rel_offset = title.timeline_offset - parent_start_sec
+        parent_tl_start_sec = float(Fraction(clip_timeline_ranges[parent_idx][0], 1) / fps_frac)
+        rel_offset = title.timeline_offset - parent_tl_start_sec
 
         t_dur = _fraction_from_seconds(title.duration, fps_hint=fps)
         t_tl_dur, _ = _quantize_duration_to_timeline(t_dur, fps)
-        t_offset = _fraction_from_seconds(rel_offset, fps_hint=fps)
+        # Connected clip offset is in parent's SOURCE media timeline
+        title_parent_source_start = _get_clip_source_start(parent_clip)
+        t_offset = title_parent_source_start + _fraction_from_seconds(rel_offset, fps_hint=fps)
 
         title_el = SubElement(
             parent_clip, "title",
@@ -499,6 +507,17 @@ def _add_speed_remap(
         value=_format_fraction_seconds(src_end),
         interp="smooth2",
     )
+
+
+def _get_clip_source_start(clip_el: Element) -> Fraction:
+    """Extract the source start time (Fraction) from a spine clip's 'start' attribute."""
+    start_str = clip_el.get("start", "0s")
+    # Parse FCPXML fraction format like "79053/50s" or "0s"
+    s = start_str.rstrip("s")
+    if "/" in s:
+        num, den = s.split("/")
+        return Fraction(int(num), int(den))
+    return Fraction(int(s) if s else 0)
 
 
 def _find_parent_clip(
