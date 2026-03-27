@@ -256,6 +256,7 @@ class ToolExecutor:
 
     async def _generate_fcpxml(self, args: Dict) -> Dict:
         import json
+        from pathlib import Path
         from src.pipelines.v2.schemas import EditDecision
         from src.pipelines.v2.fcpxml.edit_compiler import compile_edit_decision
 
@@ -285,6 +286,24 @@ class ToolExecutor:
                         clip.source_path = str(fp)
                         break
 
+        # Snap clips to music beats if music is present
+        beat_metadata = None
+        if edit.music and edit.music.file:
+            music_file = Path(edit.music.file)
+            if not music_file.exists() and not music_file.is_absolute():
+                music_file = self.workspace.root / edit.music.file
+            if music_file.exists():
+                try:
+                    from src.pipelines.v2.music.beat_sync import snap_to_beats
+                    clip_dicts = [c.model_dump() for c in edit.clips]
+                    _, beat_metadata = snap_to_beats(clip_dicts, str(music_file))
+                    # Apply snapped durations back to edit
+                    for cd, clip in zip(clip_dicts, edit.clips):
+                        clip.source_end = cd["source_end"]
+                    logger.info(f"[AGENT] Beat sync: {beat_metadata.get('snapped', 0)}/{len(edit.clips)} clips snapped")
+                except Exception as e:
+                    logger.warning(f"[AGENT] Beat sync failed (non-fatal): {e}")
+
         # Save the EditDecision JSON for dashboard / debugging
         json_path = self.workspace.root / "fcpxml" / "edit_decision.json"
         json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -302,7 +321,7 @@ class ToolExecutor:
                 "edit_decision_saved": str(json_path),
             }
 
-        return {
+        result = {
             "status": "compiled",
             "fcpxml_path": output,
             "edit_decision_path": str(json_path),
@@ -311,6 +330,13 @@ class ToolExecutor:
             "has_music": edit.music is not None,
             "title_count": len(edit.titles),
         }
+        if beat_metadata:
+            result["beat_sync"] = {
+                "tempo_bpm": beat_metadata.get("tempo_bpm", 0),
+                "clips_snapped": beat_metadata.get("snapped", 0),
+                "total_beats": beat_metadata.get("beats_detected", 0),
+            }
+        return result
 
     async def _verify_preview(self, args: Dict) -> Dict:
         """Watch the rendered preview and return a professional video critique."""
@@ -699,42 +725,44 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
         # Work in a temp directory
         tmp_dir = Path(tempfile.mkdtemp(prefix="vea_refine_"))
         try:
-            # Step 1: Extract the padded video segment
+            # Step 1: Extract + downsample in one pass (re-encode for frame-accurate cuts)
+            # Using -c copy would cut on keyframes, causing a timing offset between
+            # the requested padded_start and the actual file start. Re-encoding ensures
+            # the output starts exactly at padded_start so Gemini/STT offsets map correctly.
             await self._emit("refine_progress", {
                 "step": "extracting",
                 "message": f"Extracting {padded_duration:.1f}s segment (with {pad:.0f}s padding)...",
                 "source_file": source_file,
             })
             segment_path = tmp_dir / "segment.mp4"
-            extract_cmd = [
+            downsampled_path = tmp_dir / "downsampled.mp4"
+            extract_downsample_cmd = [
                 "ffmpeg", "-y", "-loglevel", "error",
                 "-ss", str(padded_start),
                 "-i", str(source_path),
                 "-t", str(padded_duration),
-                "-c", "copy", "-avoid_negative_ts", "make_zero",
-                str(segment_path),
-            ]
-            await asyncio.get_event_loop().run_in_executor(
-                None, lambda: subprocess.run(extract_cmd, check=True)
-            )
-
-            # Step 2: Downsample for Gemini (480p, 2fps — enough for visual analysis)
-            await self._emit("refine_progress", {
-                "step": "downsampling",
-                "message": "Downsampling for analysis...",
-                "source_file": source_file,
-            })
-            downsampled_path = tmp_dir / "downsampled.mp4"
-            downsample_cmd = [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-i", str(segment_path),
                 "-vf", "fps=2,scale=-2:480",
                 "-c:v", "libx264", "-crf", "30", "-preset", "ultrafast",
                 "-c:a", "aac", "-b:a", "128k",
                 str(downsampled_path),
             ]
             await asyncio.get_event_loop().run_in_executor(
-                None, lambda: subprocess.run(downsample_cmd, check=True)
+                None, lambda: subprocess.run(extract_downsample_cmd, check=True)
+            )
+            # Also extract a frame-accurate audio-only file for STT
+            # (re-encode ensures exact start; audio-only is fast)
+            segment_path = downsampled_path  # reuse for debug logging
+            audio_segment_path = tmp_dir / "segment_audio.m4a"
+            audio_extract_cmd = [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-ss", str(padded_start),
+                "-i", str(source_path),
+                "-t", str(padded_duration),
+                "-vn", "-c:a", "aac", "-b:a", "128k",
+                str(audio_segment_path),
+            ]
+            await asyncio.get_event_loop().run_in_executor(
+                None, lambda: subprocess.run(audio_extract_cmd, check=True)
             )
 
             # Save segment to workspace logs for manual inspection
@@ -754,20 +782,9 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
                 import os as _os
                 el_key = _os.environ.get("ELEVENLABS_API_KEY", "")
                 if el_key:
-                    # Extract audio from the segment for STT (128k AAC for quality)
-                    audio_path = tmp_dir / "audio.m4a"
-                    audio_cmd = [
-                        "ffmpeg", "-y", "-loglevel", "error",
-                        "-i", str(segment_path),
-                        "-vn", "-c:a", "aac", "-b:a", "128k",
-                        str(audio_path),
-                    ]
-                    await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: subprocess.run(audio_cmd, check=True)
-                    )
-
+                    # Use the frame-accurate audio segment extracted earlier
                     words = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: stt_word_timestamps(str(audio_path), el_key)
+                        None, lambda: stt_word_timestamps(str(audio_segment_path), el_key)
                     )
                     logger.info(f"[AGENT] ElevenLabs STT: {len(words)} words transcribed")
 

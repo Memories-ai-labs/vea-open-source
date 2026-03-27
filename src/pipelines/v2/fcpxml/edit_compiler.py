@@ -157,40 +157,86 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
         if tl_frames <= 0:
             continue
 
-        offset = Fraction(timeline_frames, 1) / fps_frac
-        start = _fraction_from_seconds(clip.source_start, fps_hint=fps)
+        # Check for multi-shot transforms (per-shot crop positions)
+        if clip.shot_transforms and len(clip.shot_transforms) > 1:
+            # Emit N consecutive asset-clips, one per shot, each with its own transform
+            for si, shot in enumerate(clip.shot_transforms):
+                shot_src_dur = shot.source_end - shot.source_start
+                if shot_src_dur <= 0:
+                    continue
+                shot_tl_dur_sec = shot_src_dur / speed_rate
+                shot_dur_frac = _fraction_from_seconds(shot_tl_dur_sec, fps_hint=fps)
+                shot_tl_dur, shot_tl_frames = _quantize_duration_to_timeline(shot_dur_frac, fps)
+                if shot_tl_frames <= 0:
+                    continue
 
-        clip_el = SubElement(
-            spine, "asset-clip",
-            name=clip.label or clip.id,
-            ref=asset_id,
-            offset=_format_fraction_seconds(offset),
-            start=_format_fraction_seconds(start),
-            duration=_format_fraction_seconds(tl_dur),
-            format=fmt_id,
-            enabled="1",
-        )
+                shot_offset = Fraction(timeline_frames, 1) / fps_frac
+                shot_start = _fraction_from_seconds(shot.source_start, fps_hint=fps)
 
-        # Speed remap via timeMap
-        if clip.speed and clip.speed.rate != 1.0:
-            _add_speed_remap(clip_el, src_dur_sec, tl_dur, fps_frac, clip.speed.rate)
+                shot_el = SubElement(
+                    spine, "asset-clip",
+                    name=f"{clip.label or clip.id}",
+                    ref=asset_id,
+                    offset=_format_fraction_seconds(shot_offset),
+                    start=_format_fraction_seconds(shot_start),
+                    duration=_format_fraction_seconds(shot_tl_dur),
+                    format=fmt_id,
+                    enabled="1",
+                )
 
-        # Transform (crop/reframe)
-        if clip.transform:
-            t = clip.transform
-            SubElement(
-                clip_el, "adjust-transform",
-                position=f"{t.position_x:.1f} {t.position_y:.1f}",
-                scale=f"{t.scale_x:.4f} {t.scale_y:.4f}",
-                rotation=f"{t.rotation:.1f}",
+                if clip.speed and clip.speed.rate != 1.0:
+                    _add_speed_remap(shot_el, shot_src_dur, shot_tl_dur, fps_frac, clip.speed.rate)
+
+                t = shot.transform
+                SubElement(
+                    shot_el, "adjust-transform",
+                    position=f"{t.position_x:.1f} {t.position_y:.1f}",
+                    scale=f"{t.scale_x:.4f} {t.scale_y:.4f}",
+                    rotation=f"{t.rotation:.1f}",
+                )
+
+                if clip.gain_db is not None:
+                    SubElement(shot_el, "adjust-volume", amount=f"{clip.gain_db:.1f}dB")
+
+                timeline_frames += shot_tl_frames
+
+            clip_timeline_ranges.append((timeline_frames - tl_frames, timeline_frames))
+        else:
+            # Single shot — emit one asset-clip (original behavior)
+            offset = Fraction(timeline_frames, 1) / fps_frac
+            start = _fraction_from_seconds(clip.source_start, fps_hint=fps)
+
+            clip_el = SubElement(
+                spine, "asset-clip",
+                name=clip.label or clip.id,
+                ref=asset_id,
+                offset=_format_fraction_seconds(offset),
+                start=_format_fraction_seconds(start),
+                duration=_format_fraction_seconds(tl_dur),
+                format=fmt_id,
+                enabled="1",
             )
 
-        # Per-clip gain
-        if clip.gain_db is not None:
-            SubElement(clip_el, "adjust-volume", amount=f"{clip.gain_db:.1f}dB")
+            # Speed remap via timeMap
+            if clip.speed and clip.speed.rate != 1.0:
+                _add_speed_remap(clip_el, src_dur_sec, tl_dur, fps_frac, clip.speed.rate)
 
-        clip_timeline_ranges.append((timeline_frames, timeline_frames + tl_frames))
-        timeline_frames += tl_frames
+            # Transform (crop/reframe)
+            if clip.transform:
+                t = clip.transform
+                SubElement(
+                    clip_el, "adjust-transform",
+                    position=f"{t.position_x:.1f} {t.position_y:.1f}",
+                    scale=f"{t.scale_x:.4f} {t.scale_y:.4f}",
+                    rotation=f"{t.rotation:.1f}",
+                )
+
+            # Per-clip gain
+            if clip.gain_db is not None:
+                SubElement(clip_el, "adjust-volume", amount=f"{clip.gain_db:.1f}dB")
+
+            clip_timeline_ranges.append((timeline_frames, timeline_frames + tl_frames))
+            timeline_frames += tl_frames
 
         # NOTE: Transitions disabled for now — hard cuts only.
         # Cross-dissolve transitions cause audio overlap between adjacent clips.

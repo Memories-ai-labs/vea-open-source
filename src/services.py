@@ -37,14 +37,27 @@ try:
 except Exception as e:
     logger.warning(f"Failed to initialize Memories.ai client: {e}")
 
-# --- Initialize Gemini client ---
-gemini_manager: Optional[GeminiGenaiManager] = None
-try:
-    gemini_manager = GeminiGenaiManager()
-    logger.info("Gemini client initialized")
-except Exception as e:
-    gemini_manager = None
-    logger.warning(f"Failed to initialize Gemini client: {e}")
+# --- Initialize LLM client (OpenRouter or Vertex AI Gemini) ---
+gemini_manager = None  # type: ignore[assignment]
+_llm_provider = os.environ.get("LLM_PROVIDER", "").lower()
+_openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
+
+if _openrouter_key and _llm_provider != "vertex":
+    try:
+        from lib.llm.OpenRouterManager import OpenRouterManager
+        _or_model = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.5-flash")
+        gemini_manager = OpenRouterManager(model=_or_model, api_key=_openrouter_key)  # type: ignore[assignment]
+        logger.info(f"OpenRouter client initialized (model={_or_model})")
+    except Exception as e:
+        logger.warning(f"Failed to initialize OpenRouter client: {e}")
+
+if gemini_manager is None:
+    try:
+        gemini_manager = GeminiGenaiManager()
+        logger.info("Gemini Vertex AI client initialized")
+    except Exception as e:
+        gemini_manager = None
+        logger.warning(f"Failed to initialize Gemini client: {e}")
 
 # --- Active planning sessions (project_name -> asyncio state) ---
 # Each entry: {event_queue, pause_event, inject_queue, task}

@@ -13,8 +13,11 @@ import type {
 interface NLETimelineProps {
   editDecision: EditDecision | null;
   playheadTime?: number;
+  selectedClipId?: string | null;
+  cropStatuses?: Record<string, { status: string; step?: string }>;
   onSeek?: (time: number) => void;
   onEditDecisionChange?: (updated: EditDecision) => void;
+  onClipSelect?: (clipId: string | null) => void;
 }
 
 interface TrackItem {
@@ -284,6 +287,8 @@ interface ClipItemProps {
   width: number;
   pxPerSec: number;
   isHovered: boolean;
+  isSelected: boolean;
+  isCropping: boolean;
   isDragging: boolean;
   isDropTarget: boolean;
   isVideoTrack: boolean;
@@ -291,12 +296,13 @@ interface ClipItemProps {
   onMove: (e: React.MouseEvent) => void;
   onLeave: () => void;
   onDragStart: (e: React.PointerEvent, item: TrackItem, edge: 'left' | 'right' | 'body') => void;
+  onSelect?: (clipId: string) => void;
 }
 
 function ClipItem({
   item, track, trackIdx, itemIdx, left, width, pxPerSec,
-  isHovered, isDragging, isDropTarget, isVideoTrack,
-  onHover, onMove, onLeave, onDragStart,
+  isHovered, isSelected, isCropping, isDragging, isDropTarget, isVideoTrack,
+  onHover, onMove, onLeave, onDragStart, onSelect,
 }: ClipItemProps) {
   const isAudioTrack = track.type === 'audio';
   const isTitleTrack = track.type === 'title';
@@ -330,12 +336,21 @@ function ClipItem({
     }
   }, [canDrag, onMove]);
 
+  const handleClick = useCallback((e: React.MouseEvent) => {
+    if (onSelect && isVideoTrack && item.clipIndex >= 0) {
+      e.stopPropagation();
+      onSelect(item.id);
+    }
+  }, [onSelect, isVideoTrack, item.clipIndex, item.id]);
+
   return (
     <div
+      title={item.label + (item.sublabel ? ` — ${item.sublabel}` : '')}
       onMouseEnter={(e) => onHover(trackIdx, itemIdx, e)}
       onMouseMove={handleMouseMove}
       onMouseLeave={() => { onLeave(); setCursor('default'); }}
       onPointerDown={handlePointerDown}
+      onClick={handleClick}
       style={{
         position: 'absolute',
         left,
@@ -348,11 +363,15 @@ function ClipItem({
         background: isTitleTrack
           ? `linear-gradient(180deg, ${item.color}44, ${item.color}22)`
           : `linear-gradient(180deg, ${item.color}38, ${item.color}18, ${item.color}08)`,
-        border: `1px solid ${isHovered ? `${item.borderColor}88` : `${item.color}44`}`,
-        transition: isDragging ? 'none' : 'border-color 0.12s',
-        boxShadow: isHovered
-          ? `inset 0 1px 0 ${item.color}55, 0 0 8px ${item.color}18`
-          : `inset 0 1px 0 ${item.color}33`,
+        border: isSelected
+          ? `1px solid ${item.borderColor}cc`
+          : `1px solid ${isHovered ? `${item.borderColor}88` : `${item.color}44`}`,
+        transition: isDragging ? 'none' : 'border-color 0.12s, box-shadow 0.12s',
+        boxShadow: isSelected
+          ? `inset 0 1px 0 ${item.color}55, 0 0 12px ${item.color}44, 0 0 4px ${item.color}22`
+          : isHovered
+            ? `inset 0 1px 0 ${item.color}55, 0 0 8px ${item.color}18`
+            : `inset 0 1px 0 ${item.color}33`,
         opacity: isDragging ? 0.4 : 1,
         userSelect: 'none',
         touchAction: 'none',
@@ -489,13 +508,31 @@ function ClipItem({
           {item.gainDb}dB
         </div>
       )}
+
+      {/* Crop progress shimmer */}
+      {isCropping && (
+        <div
+          style={{
+            position: 'absolute',
+            left: 0,
+            bottom: 0,
+            width: '100%',
+            height: '3px',
+            background: `linear-gradient(90deg, transparent, ${item.color}88, transparent)`,
+            backgroundSize: '200% 100%',
+            animation: 'shimmer 1.5s infinite linear',
+            zIndex: 5,
+            pointerEvents: 'none',
+          }}
+        />
+      )}
     </div>
   );
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDecisionChange }: NLETimelineProps) {
+export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cropStatuses, onSeek, onEditDecisionChange, onClipSelect }: NLETimelineProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [hoveredItem, setHoveredItem] = useState<{ trackIdx: number; itemIdx: number } | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
@@ -769,6 +806,18 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
       return;
     }
 
+    // If pointer didn't move beyond deadzone, treat as a click (select clip)
+    const dx = Math.abs(e.clientX - drag.startX);
+    const dy = Math.abs(e.clientY - drag.startY);
+    if (dx < DRAG_DEADZONE && dy < DRAG_DEADZONE) {
+      dragRef.current = null;
+      setDragVisual(null);
+      if (onClipSelect) {
+        onClipSelect(drag.itemId);
+      }
+      return;
+    }
+
     if (drag.mode === 'move') {
       const clipIdx = drag.clipIndex;
       const clip = editDecision.clips[clipIdx];
@@ -842,7 +891,7 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
 
     dragRef.current = null;
     setDragVisual(null);
-  }, [editDecision, onEditDecisionChange, onPanPointerUp]);
+  }, [editDecision, onEditDecisionChange, onPanPointerUp, onClipSelect]);
 
   // ─── Empty state ────────────────────────────────────────────────────────
 
@@ -1163,6 +1212,9 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
                 <div
                   key={track.id}
                   data-track-id={track.id}
+                  onClick={(e) => {
+                    if (e.target === e.currentTarget && onClipSelect) onClipSelect(null);
+                  }}
                   style={{
                     height: track.height,
                     borderBottom: `${TRACK_BORDER}px solid rgba(0,0,0,0.5)`,
@@ -1188,6 +1240,8 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
                         width={width}
                         pxPerSec={pxPerSec}
                         isHovered={isHovered}
+                        isSelected={selectedClipId === item.id}
+                        isCropping={cropStatuses?.[item.id]?.status === 'running'}
                         isDragging={isBeingDragged}
                         isDropTarget={false}
                         isVideoTrack={isVideoTrack}
@@ -1195,6 +1249,7 @@ export function NLETimeline({ editDecision, playheadTime = 0, onSeek, onEditDeci
                         onMove={handleMove}
                         onLeave={handleLeave}
                         onDragStart={handleClipDragStart}
+                        onSelect={onClipSelect ? (id) => onClipSelect(id) : undefined}
                       />
                     );
                   })}

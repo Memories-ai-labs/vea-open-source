@@ -141,6 +141,17 @@ class TransformSettings(BaseModel):
     position_y: float = 0.0
     rotation: float = 0.0
 
+class ShotCropResult(BaseModel):
+    """Per-shot crop result within a clip."""
+    source_start: float
+    source_end: float
+    transform: TransformSettings
+
+class MultiShotCropResult(BaseModel):
+    """Result of multi-shot crop analysis on a clip."""
+    shots: List[ShotCropResult]
+    content_bounds: Optional[dict] = None
+
 class SpeedChange(BaseModel):
     """Constant speed change. rate=0.5 → half speed, rate=2.0 → double speed."""
     rate: float = 1.0
@@ -162,6 +173,15 @@ class ClipDecision(BaseModel):
     gain_db: Optional[float] = None
     speed: Optional[SpeedChange] = None
     transform: Optional[TransformSettings] = None
+    transform_mode: Literal["fit", "custom", "saliency"] = "fit"
+    shot_transforms: Optional[List[ShotCropResult]] = Field(
+        default=None,
+        description="Per-shot transforms for multi-shot clips. When present, the FCPXML compiler "
+                    "emits one asset-clip per shot with different adjust-transform values. "
+                    "The top-level 'transform' field is used as fallback / single-shot value.",
+    )
+    source_width: int = 1920
+    source_height: int = 1080
     transition_after: Optional[TransitionSpec] = None
     track: int = Field(default=1, description="Video track number (1=V1, 2=V2, etc.)")
     timeline_offset: Optional[float] = Field(default=None, description="Absolute timeline position in seconds (track 2+ free placement; track 1 uses sequential array order)")

@@ -27,6 +27,14 @@ export interface ScratchpadTimestamps {
   fcpxml: string | null;
 }
 
+export interface TransformSettings {
+  scale_x: number;
+  scale_y: number;
+  position_x: number;
+  position_y: number;
+  rotation: number;
+}
+
 export interface EditDecisionClip {
   id: string;
   source_file: string;
@@ -36,6 +44,10 @@ export interface EditDecisionClip {
   description?: string;
   gain_db?: number | null;
   speed?: { rate: number } | null;
+  transform?: TransformSettings | null;
+  transform_mode?: 'fit' | 'custom' | 'saliency';
+  source_width?: number;
+  source_height?: number;
   transition_after?: { type: string; duration_seconds: number } | null;
   track?: number;
   timeline_offset?: number;
@@ -79,6 +91,13 @@ export interface RenderState {
   error: string | null;
 }
 
+export interface CropStatus {
+  clip_id: string;
+  status: 'idle' | 'running' | 'complete' | 'error';
+  step?: string;
+  error?: string;
+}
+
 interface UseAgentChatResult {
   events: AgentEvent[];
   messages: ChatMessage[];
@@ -86,11 +105,15 @@ interface UseAgentChatResult {
   scratchpadTimestamps: ScratchpadTimestamps;
   editDecision: EditDecision | null;
   renderState: RenderState;
+  cropStatuses: Record<string, CropStatus>;
+  footageFiles: string[];
+  indexedFiles: string[];
   connected: boolean;
   busy: boolean;
   send: (text: string) => void;
   clearAndReconnect: () => void;
   updateEditDecision: (updated: EditDecision) => void;
+  requestCropClip: (clipId: string) => void;
 }
 
 export function useAgentChat(projectName: string | null): UseAgentChatResult {
@@ -112,6 +135,9 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
   const [renderState, setRenderState] = useState<RenderState>({
     status: 'idle', progress: 0, filename: null, error: null,
   });
+  const [cropStatuses, setCropStatuses] = useState<Record<string, CropStatus>>({});
+  const [footageFiles, setFootageFiles] = useState<string[]>([]);
+  const [indexedFiles, setIndexedFiles] = useState<string[]>([]);
   const [connected, setConnected] = useState(false);
   const [busy, setBusy] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -148,6 +174,8 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
           case 'init': {
             // New connection — hydrate from persisted state
             setBusy(false);
+            if (event.data.footage_files) setFootageFiles(event.data.footage_files as string[]);
+            if (event.data.indexed_files) setIndexedFiles(event.data.indexed_files as string[]);
             if (event.data.scratchpads) {
               setScratchpads(event.data.scratchpads as ScratchpadState);
             }
@@ -240,6 +268,42 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
               ...prev,
               status: 'error',
               error: event.data.error || 'Render failed',
+            }));
+            break;
+
+          case 'crop_progress':
+            setCropStatuses(prev => ({
+              ...prev,
+              [event.data.clip_id]: {
+                clip_id: event.data.clip_id,
+                status: 'running',
+                step: event.data.step,
+              },
+            }));
+            break;
+
+          case 'crop_complete':
+            setCropStatuses(prev => ({
+              ...prev,
+              [event.data.clip_id]: {
+                clip_id: event.data.clip_id,
+                status: 'complete',
+              },
+            }));
+            // Update clip transform in edit decision
+            if (event.data.transform && event.data.edit_decision) {
+              setEditDecision(event.data.edit_decision as EditDecision);
+            }
+            break;
+
+          case 'crop_error':
+            setCropStatuses(prev => ({
+              ...prev,
+              [event.data.clip_id]: {
+                clip_id: event.data.clip_id,
+                status: 'error',
+                error: event.data.error,
+              },
             }));
             break;
 
@@ -350,6 +414,16 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     }
   }, []);
 
+  const requestCropClip = useCallback((clipId: string) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      setCropStatuses(prev => ({
+        ...prev,
+        [clipId]: { clip_id: clipId, status: 'running', step: 'starting' },
+      }));
+      wsRef.current.send(JSON.stringify({ type: 'crop_clip', clip_id: clipId }));
+    }
+  }, []);
+
   const clearAndReconnect = useCallback(() => {
     // Immediately wipe all local state
     setEvents([]);
@@ -358,6 +432,7 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     setScratchpadTimestamps({ comprehension: null, creative_direction: null, planning: null, fcpxml: null });
     setEditDecision(null);
     setRenderState({ status: 'idle', progress: 0, filename: null, error: null });
+    setCropStatuses({});
     setBusy(false);
     // Close and reconnect WebSocket so backend sends fresh init
     if (reconnectTimerRef.current) {
@@ -375,5 +450,5 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     setTimeout(() => { if (mountedRef.current) connect(); }, 300);
   }, [connect]);
 
-  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, send, requestRender, clearAndReconnect, updateEditDecision };
+  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, cropStatuses, footageFiles, indexedFiles, connected, busy, send, requestRender, clearAndReconnect, updateEditDecision, requestCropClip };
 }

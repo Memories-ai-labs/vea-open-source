@@ -151,8 +151,11 @@ export const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(fu
     );
   }
 
-  // ── Error state ──
-  if (renderState.status === 'error') {
+  // ── Error state (treat Resolve-not-running as idle, not error) ──
+  const isResolveError = renderState.status === 'error' &&
+    renderState.error?.toLowerCase().includes('resolve');
+
+  if (renderState.status === 'error' && !isResolveError) {
     return (
       <div style={containerStyle}>
         <div style={centerColumnStyle}>
@@ -178,7 +181,7 @@ export const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(fu
     );
   }
 
-  // ── Idle / empty state ──
+  // ── Idle / empty state (including Resolve-not-available) ──
   return (
     <div style={containerStyle}>
       <div style={centerColumnStyle}>
@@ -187,12 +190,11 @@ export const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(fu
           <rect x="2" y="3" width="20" height="14" rx="2" stroke="currentColor" strokeWidth="1.5" />
           <line x1="8" y1="21" x2="16" y2="21" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
           <line x1="12" y1="17" x2="12" y2="21" stroke="currentColor" strokeWidth="1.5" />
-          {/* Play triangle */}
           <path d="M10 7.5L15 10.5L10 13.5V7.5Z" fill="currentColor" opacity="0.4" />
         </svg>
         <span style={labelStyle}>
           {hasEditDecision
-            ? 'Waiting for Resolve render...'
+            ? 'FCPXML ready — import into your NLE to preview'
             : 'Preview will appear after edit generation'}
         </span>
         {hasEditDecision && onRequestRender && (
@@ -202,7 +204,7 @@ export const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(fu
         )}
         {hasEditDecision && (
           <span style={{ ...labelStyle, fontSize: '8px', color: 'var(--text-muted)' }}>
-            Ensure DaVinci Resolve Studio is running
+            Rendering requires DaVinci Resolve Studio
           </span>
         )}
       </div>

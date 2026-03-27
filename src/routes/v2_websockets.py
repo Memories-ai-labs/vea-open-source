@@ -177,9 +177,15 @@ def register_websocket_routes(app: FastAPI):
                 pass
 
         # Get render state from agent (survives reconnects) or fall back to file check
+        # Suppress Resolve-not-available errors — they're not actionable and confuse the UI
         render_state = None
-        if agent._render_state.get("status") in ("rendering", "complete", "error"):
-            render_state = agent._render_state
+        agent_rs = agent._render_state
+        is_resolve_error = (
+            agent_rs.get("status") == "error" and
+            "resolve" in str(agent_rs.get("error", "")).lower()
+        )
+        if agent_rs.get("status") in ("rendering", "complete", "error") and not is_resolve_error:
+            render_state = agent_rs
         else:
             render_path = workspace.get_render_path("preview")
             if render_path.exists():
@@ -187,13 +193,19 @@ def register_websocket_routes(app: FastAPI):
 
         # Send initial state on connect
         try:
+            # Scan footage directory for actual files
+            footage_files = [f.name for f in workspace.scan_footage()] if workspace.get_footage_dir().is_dir() else []
+            indexed_files = [v.video_name for v in session_data.videos if v.video_no]
+
             init_data: dict = {
                 "scratchpads": agent.get_scratchpad_state(),
                 "scratchpad_timestamps": agent.get_scratchpad_timestamps(),
                 "chat_history": agent.get_chat_history(),
                 "event_log": agent.get_event_log(),
                 "project_name": project_name,
-                "video_count": len(session_data.videos),
+                "video_count": len(footage_files),
+                "footage_files": footage_files,
+                "indexed_files": indexed_files,
             }
             if edit_decision_data:
                 init_data["edit_decision"] = edit_decision_data
@@ -273,6 +285,13 @@ def register_websocket_routes(app: FastAPI):
                                 "data": {"error": "No FCPXML found. Generate one first."},
                             })
 
+                    elif msg_type == "crop_clip":
+                        clip_id = msg.get("clip_id", "")
+                        if clip_id:
+                            asyncio.create_task(
+                                _handle_crop_clip(workspace, agent, emit, clip_id)
+                            )
+
                     elif msg_type == "edit_decision_update":
                         # Persist edit decision from client, recompile FCPXML, and broadcast
                         import json as _json
@@ -318,3 +337,111 @@ def register_websocket_routes(app: FastAPI):
             # Cancel running agent task if client disconnects
             if agent_task and not agent_task.done():
                 agent_task.cancel()
+
+    async def _handle_crop_clip(
+        workspace: WorkspaceManager,
+        agent,
+        emit,
+        clip_id: str,
+    ):
+        """Run saliency-based crop on a single clip and update the edit decision."""
+        import json as _json
+        try:
+            # Load current edit decision
+            ed_path = workspace.root / "fcpxml" / "edit_decision.json"
+            if not ed_path.exists():
+                await emit("crop_error", {"clip_id": clip_id, "error": "No edit decision found."})
+                return
+
+            with open(ed_path) as f:
+                ed_data = _json.load(f)
+
+            # Find the clip
+            clip_data = None
+            for c in ed_data.get("clips", []):
+                if c.get("id") == clip_id:
+                    clip_data = c
+                    break
+
+            if not clip_data:
+                await emit("crop_error", {"clip_id": clip_id, "error": f"Clip '{clip_id}' not found."})
+                return
+
+            await emit("crop_progress", {"clip_id": clip_id, "status": "running", "step": "extracting"})
+
+            # Resolve source path
+            source_file = clip_data.get("source_file", "")
+            source_path = clip_data.get("source_path", "")
+            if not source_path:
+                resolved = workspace.root / "footage" / source_file
+                if resolved.exists():
+                    source_path = str(resolved)
+                else:
+                    await emit("crop_error", {"clip_id": clip_id, "error": f"Source file '{source_file}' not found."})
+                    return
+
+            # Get timeline dimensions
+            tl = ed_data.get("timeline", {})
+            tl_w = tl.get("width", 1920)
+            tl_h = tl.get("height", 1080)
+            src_w = clip_data.get("source_width", 1920)
+            src_h = clip_data.get("source_height", 1080)
+
+            await emit("crop_progress", {"clip_id": clip_id, "status": "running", "step": "running_saliency"})
+
+            # Run saliency crop (returns MultiShotCropResult)
+            from src.pipelines.v2.cropping.crop_pipeline import crop_single_clip
+            crop_result = await crop_single_clip(
+                source_path=source_path,
+                start_sec=clip_data.get("source_start", 0),
+                end_sec=clip_data.get("source_end", 0),
+                tl_w=tl_w,
+                tl_h=tl_h,
+                src_w=src_w,
+                src_h=src_h,
+            )
+
+            # Use first shot's transform as the clip-level transform
+            transform_dict = crop_result.shots[0].transform.model_dump()
+            clip_data["transform"] = transform_dict
+            clip_data["transform_mode"] = "saliency"
+
+            if len(crop_result.shots) > 1:
+                # Multi-shot — store per-shot transforms on the clip
+                # (FCPXML compiler will emit N asset-clips at compile time)
+                clip_data["shot_transforms"] = [s.model_dump() for s in crop_result.shots]
+                logger.info(f"[CROP] {clip_id}: {len(crop_result.shots)} shots with different transforms")
+            else:
+                clip_data["shot_transforms"] = None
+
+            # Save updated edit decision
+            with open(ed_path, "w") as f:
+                _json.dump(ed_data, f, indent=2)
+
+            # Recompile FCPXML
+            try:
+                from src.pipelines.v2.schemas import EditDecision as ED
+                from src.pipelines.v2.fcpxml.edit_compiler import compile_edit_decision
+                edit_obj = ED.model_validate(ed_data)
+                footage_dir = workspace.root / "footage"
+                for clip in edit_obj.clips:
+                    if not clip.source_path:
+                        resolved = footage_dir / clip.source_file
+                        if resolved.exists():
+                            clip.source_path = str(resolved)
+                fcpxml_out = str(workspace.get_fcpxml_path(version=1))
+                compile_edit_decision(edit_obj, fcpxml_out)
+            except Exception as e:
+                logger.warning(f"[CROP] FCPXML recompile failed (non-fatal): {e}")
+
+            await emit("crop_complete", {
+                "clip_id": clip_id,
+                "transform": transform_dict,
+                "edit_decision": ed_data,
+            })
+            # Also send timeline_update so dashboard refreshes the full edit state
+            await emit("timeline_update", {"edit_decision": ed_data})
+
+        except Exception as e:
+            logger.error(f"[CROP] Error cropping clip {clip_id}: {e}", exc_info=True)
+            await emit("crop_error", {"clip_id": clip_id, "error": str(e)})

@@ -26,6 +26,19 @@ export default function App() {
 
   const agent = useAgentChat(agentProjectName);
 
+  // Update project metadata when agent connects and sends init data
+  useEffect(() => {
+    if (selectedProject && (agent.footageFiles.length > 0 || agent.indexedFiles.length > 0)) {
+      setSelectedProject(prev => prev ? {
+        ...prev,
+        video_count: agent.footageFiles.length,
+        footage_files: agent.footageFiles,
+        indexed_files: agent.indexedFiles,
+        status: agent.indexedFiles.length > 0 ? 'indexed' : prev.status,
+      } : prev);
+    }
+  }, [agent.footageFiles, agent.indexedFiles, selectedProject?.project_name]);
+
   // Sync hash → state on popstate (browser back/forward)
   useEffect(() => {
     function onHashChange() {
@@ -73,6 +86,7 @@ export default function App() {
       scratchpadTimestamps={agent.scratchpadTimestamps}
       editDecision={agent.editDecision}
       renderState={agent.renderState}
+      cropStatuses={agent.cropStatuses}
       connected={agent.connected}
       busy={agent.busy}
       onSend={agent.send}
@@ -80,6 +94,7 @@ export default function App() {
       onBack={handleBack}
       onClearState={agent.clearAndReconnect}
       onEditDecisionChange={agent.updateEditDecision}
+      onRequestCropClip={agent.requestCropClip}
     />
   );
 }

@@ -463,6 +463,23 @@ async def v2_serve_render(project_name: str, filename: str):
     return FileResponse(str(render_path), media_type="video/mp4")
 
 
+@router.get(f"{_config.V2_API_PREFIX}/projects/{{project_name}}/footage/{{filename}}")
+async def v2_serve_footage(project_name: str, filename: str):
+    """Serve a source footage file from the workspace (supports range requests for <video> seeking)."""
+    from fastapi.responses import FileResponse
+    workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    if not workspace.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
+    video_path = workspace.root / "footage" / filename
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail=f"Footage '{filename}' not found.")
+    # Determine media type from extension
+    ext = video_path.suffix.lower()
+    media_types = {".mp4": "video/mp4", ".mov": "video/quicktime", ".avi": "video/x-msvideo", ".mkv": "video/x-matroska", ".m4v": "video/mp4"}
+    media_type = media_types.get(ext, "video/mp4")
+    return FileResponse(str(video_path), media_type=media_type)
+
+
 @router.get(f"{_config.V2_API_PREFIX}/projects/{{project_name}}/footage/{{filename}}/thumbnail")
 async def v2_serve_footage_thumbnail(project_name: str, filename: str):
     """Generate and serve a JPEG thumbnail for a footage file."""

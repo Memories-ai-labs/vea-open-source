@@ -153,5 +153,44 @@ def main(argv: Optional[list[str]] = None) -> None:
         print(f"[INFO] Removed archive {archive_path}")
 
 
+_cached_backend = None
+
+
+def load_vinet(variant: str = "S"):
+    """
+    Load and cache a ViNetSaliencyBackend instance.
+
+    Returns:
+        ViNetSaliencyBackend ready for saliency prediction.
+    """
+    global _cached_backend
+    if _cached_backend is not None:
+        return _cached_backend
+
+    root = project_root()
+    repo_dir = root / "vinet_v2"
+    if variant == "S":
+        checkpoint = repo_dir / "final_models" / "ViNet_S" / "vinet_s_mvva_randomsplit.pt"
+    else:
+        checkpoint = repo_dir / "final_models" / "ViNet_A" / "vinet_a_mvva_randomsplit.pt"
+
+    if not repo_dir.exists() or not checkpoint.exists():
+        raise FileNotFoundError(
+            f"ViNet assets not found at {repo_dir}. "
+            "Run 'python -m lib.utils.vinet_setup' to download."
+        )
+
+    from src.pipelines.common.dynamic_cropping import ViNetSaliencyBackend
+
+    backend = ViNetSaliencyBackend(
+        repo_dir=repo_dir,
+        checkpoint_path=checkpoint,
+        variant=variant,
+        clip_len=32,
+    )
+    _cached_backend = backend
+    return backend
+
+
 if __name__ == "__main__":
     main()

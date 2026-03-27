@@ -129,9 +129,15 @@ Consider target duration: fewer longer clips for dialogue, more shorter clips fo
 Never add automatically. Both require an edit plan first.
 
 *Narration workflow:*
-1. Calculate total timeline duration from your clips
-2. Write a script at ~140 words/min that covers the FULL duration and where each sentence
-   maps to a specific clip. A script half the timeline length = silence for the second half.
+0. **Clarify coverage first.** Before writing the script, ask the user:
+   - Should narration cover the ENTIRE edit, or just specific sections?
+   - Are there clips with important on-camera dialogue that should play without narration?
+   - Is it OK to have "breathing room" — moments of just music and visuals with no voiceover?
+   Then tailor the script length and placement accordingly.
+1. Calculate total timeline duration from your clips.
+2. Write the script at ~140 words/min (~2.3 words/sec). For full coverage of a 50s edit
+   you need ~115 words. For partial coverage, calculate per-section.
+   Map each sentence to a specific clip. A script shorter than the timeline = silence gaps.
 3. Call generate_narration. The returned per-sentence transcript gives exact timecodes.
 4. Align clips to narration: set each clip's duration to match its sentence's duration
    (source_end = source_start + sentence_duration), order clips to match sentence order.

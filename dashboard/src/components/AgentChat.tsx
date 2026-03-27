@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import type { AgentEvent, ChatMessage, ScratchpadState, ScratchpadTimestamps, EditDecision, RenderState } from '../hooks/useAgentChat';
+import type { AgentEvent, ChatMessage, ScratchpadState, ScratchpadTimestamps, EditDecision, EditDecisionClip, TransformSettings, RenderState } from '../hooks/useAgentChat';
 import type { ProjectSummary } from '../types';
 import { listProjects, clearGists, clearPlanning, clearMemories, indexProject } from '../api';
 import { useBreakpoint } from '../hooks/useBreakpoint';
@@ -8,6 +8,9 @@ import { SimpleMarkdown } from './SimpleMarkdown';
 import { NLETimeline } from './NLETimeline';
 import { VideoPreview } from './VideoPreview';
 import type { VideoPreviewHandle } from './VideoPreview';
+import ClipInspector from './ClipInspector';
+import TransformPreview from './TransformPreview';
+import TimelineSettingsBar from './TimelineSettingsBar';
 
 interface AgentChatProps {
   project: ProjectSummary;
@@ -17,6 +20,7 @@ interface AgentChatProps {
   scratchpadTimestamps: ScratchpadTimestamps;
   editDecision: EditDecision | null;
   renderState: RenderState;
+  cropStatuses: Record<string, { clip_id: string; status: string; step?: string }>;
   connected: boolean;
   busy: boolean;
   onSend: (text: string) => void;
@@ -24,6 +28,7 @@ interface AgentChatProps {
   onBack: () => void;
   onClearState: () => void;
   onEditDecisionChange: (updated: EditDecision) => void;
+  onRequestCropClip: (clipId: string) => void;
 }
 
 const PAD_LABELS: Record<string, string> = {
@@ -106,7 +111,7 @@ function useDragDivider(
 }
 
 export function AgentChat({
-  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, connected, busy, onSend, onRequestRender, onBack, onClearState, onEditDecisionChange,
+  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, cropStatuses, connected, busy, onSend, onRequestRender, onBack, onClearState, onEditDecisionChange, onRequestCropClip,
 }: AgentChatProps) {
   const [project, setProject] = useState(initialProject);
   const [input, setInput] = useState('');
@@ -117,6 +122,7 @@ export function AgentChat({
   const [indexing, setIndexing] = useState(false);
   const [expandedFile, setExpandedFile] = useState<string | null>(null);
   const [playheadTime, setPlayheadTime] = useState(0);
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const manageRef = useRef<HTMLDivElement>(null);
@@ -137,6 +143,15 @@ export function AgentChat({
     const iv = setInterval(() => setTick((t) => t + 1), 30_000);
     return () => clearInterval(iv);
   }, []);
+
+  // Escape key deselects clip
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && selectedClipId) setSelectedClipId(null);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [selectedClipId]);
 
   const onDrag0 = useDragDivider(rowHeights, setRowHeights, 0);
   const onDrag1 = useDragDivider(rowHeights, setRowHeights, 1);
@@ -341,6 +356,64 @@ export function AgentChat({
     setPlayheadTime(time);
     videoPreviewRef.current?.seekTo(time);
   }, []);
+
+  const selectedClip = useMemo(() => {
+    if (!selectedClipId || !editDecision) return null;
+    return editDecision.clips.find(c => c.id === selectedClipId) || null;
+  }, [selectedClipId, editDecision]);
+
+  const tlWidth = editDecision?.timeline?.width ?? 1920;
+  const tlHeight = editDecision?.timeline?.height ?? 1080;
+
+  const handleTransformChange = useCallback((clipId: string, transform: TransformSettings) => {
+    if (!editDecision) return;
+    const updated = {
+      ...editDecision,
+      clips: editDecision.clips.map(c =>
+        c.id === clipId ? { ...c, transform, transform_mode: 'custom' as const } : c
+      ),
+    };
+    onEditDecisionChange(updated);
+  }, [editDecision, onEditDecisionChange]);
+
+  const handleResetTransform = useCallback((clipId: string) => {
+    if (!editDecision) return;
+    const clip = editDecision.clips.find(c => c.id === clipId);
+    if (!clip) return;
+    const srcW = clip.source_width || 1920;
+    const fitScale = tlWidth / srcW;
+    const resetTransform: TransformSettings = {
+      scale_x: fitScale, scale_y: fitScale,
+      position_x: 0, position_y: 0, rotation: 0,
+    };
+    const updated = {
+      ...editDecision,
+      clips: editDecision.clips.map(c =>
+        c.id === clipId ? { ...c, transform: resetTransform, transform_mode: 'fit' as const } : c
+      ),
+    };
+    onEditDecisionChange(updated);
+  }, [editDecision, onEditDecisionChange, tlWidth]);
+
+  const handleResolutionChange = useCallback((w: number, h: number) => {
+    if (!editDecision) return;
+    const updated = {
+      ...editDecision,
+      timeline: { ...(editDecision.timeline || {}), width: w, height: h },
+      clips: editDecision.clips.map(c => {
+        if (c.transform_mode === 'fit' || !c.transform_mode) {
+          const srcW = c.source_width || 1920;
+          const fitScale = w / srcW;
+          return {
+            ...c,
+            transform: { scale_x: fitScale, scale_y: fitScale, position_x: 0, position_y: 0, rotation: 0 },
+          };
+        }
+        return c;
+      }),
+    };
+    onEditDecisionChange(updated);
+  }, [editDecision, onEditDecisionChange]);
 
   async function handleIndex() {
     setIndexing(true);
@@ -644,8 +717,25 @@ export function AgentChat({
         }}
       >
         {/* Timeline */}
-        <div style={{ width: isTablet ? '100%' : `${timelinePct}%`, minWidth: 0, overflow: 'hidden' }}>
-          <NLETimeline editDecision={editDecision} playheadTime={playheadTime} onSeek={handleTimelineSeek} onEditDecisionChange={onEditDecisionChange} />
+        <div style={{ width: isTablet ? '100%' : `${timelinePct}%`, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          {editDecision && editDecision.clips.length > 0 && (
+            <TimelineSettingsBar
+              width={tlWidth}
+              height={tlHeight}
+              onChange={handleResolutionChange}
+            />
+          )}
+          <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+            <NLETimeline
+              editDecision={editDecision}
+              playheadTime={playheadTime}
+              selectedClipId={selectedClipId}
+              cropStatuses={cropStatuses}
+              onSeek={handleTimelineSeek}
+              onEditDecisionChange={onEditDecisionChange}
+              onClipSelect={setSelectedClipId}
+            />
+          </div>
         </div>
 
         {/* Column divider */}
@@ -683,17 +773,64 @@ export function AgentChat({
           </div>
         )}
 
-        {/* Video preview */}
+        {/* Video preview / Clip inspector */}
         {!isTablet && (
-          <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
-            <VideoPreview
-              ref={videoPreviewRef}
-              projectName={project.project_name}
-              renderState={renderState}
-              hasEditDecision={editDecision !== null && editDecision.clips.length > 0}
-              onRequestRender={onRequestRender}
-              onTimeUpdate={setPlayheadTime}
-            />
+          <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            {selectedClip ? (
+              <>
+                <div style={{ flex: 2, minHeight: 150, overflow: 'hidden' }}>
+                  <TransformPreview
+                    clip={selectedClip}
+                    projectName={project.project_name}
+                    timelineWidth={tlWidth}
+                    timelineHeight={tlHeight}
+                    cropStatus={cropStatuses[selectedClipId!]}
+                  />
+                </div>
+                <div style={{ borderTop: '1px solid var(--border)', overflow: 'auto', flex: 1, minHeight: 0 }}>
+                  <ClipInspector
+                    clip={selectedClip}
+                    cropStatus={cropStatuses[selectedClipId!]}
+                    timelineWidth={tlWidth}
+                    timelineHeight={tlHeight}
+                    onTransformChange={handleTransformChange}
+                    onResetTransform={handleResetTransform}
+                    onRequestCrop={onRequestCropClip}
+                    onClose={() => setSelectedClipId(null)}
+                  />
+                  {editDecision && editDecision.clips.length > 0 && (
+                    <div style={{ padding: '8px 12px', borderTop: '1px solid var(--border)' }}>
+                      <button
+                        onClick={onRequestRender}
+                        disabled={renderState.status === 'rendering'}
+                        style={{
+                          width: '100%',
+                          padding: '6px 12px',
+                          background: renderState.status === 'rendering' ? 'var(--surface-2)' : 'var(--accent-blue)',
+                          color: '#fff',
+                          border: 'none',
+                          borderRadius: 'var(--radius-md)',
+                          cursor: renderState.status === 'rendering' ? 'not-allowed' : 'pointer',
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: 12,
+                        }}
+                      >
+                        {renderState.status === 'rendering' ? 'Rendering...' : '↻ Render Preview'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <VideoPreview
+                ref={videoPreviewRef}
+                projectName={project.project_name}
+                renderState={renderState}
+                hasEditDecision={editDecision !== null && editDecision.clips.length > 0}
+                onRequestRender={onRequestRender}
+                onTimeUpdate={setPlayheadTime}
+              />
+            )}
           </div>
         )}
       </div>
