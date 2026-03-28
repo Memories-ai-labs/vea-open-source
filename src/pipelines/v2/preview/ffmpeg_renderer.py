@@ -30,6 +30,25 @@ from src.pipelines.v2.schemas import (
 
 logger = logging.getLogger(__name__)
 
+_drawtext_available: Optional[bool] = None
+
+def _has_drawtext() -> bool:
+    """Check if FFmpeg was built with the drawtext filter (requires libfreetype)."""
+    global _drawtext_available
+    if _drawtext_available is not None:
+        return _drawtext_available
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-filters"], capture_output=True, text=True, timeout=5,
+        )
+        _drawtext_available = "drawtext" in result.stdout
+    except Exception:
+        _drawtext_available = False
+    if not _drawtext_available:
+        logger.info("[PREVIEW] drawtext filter not available in this FFmpeg build")
+    return _drawtext_available
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -315,28 +334,38 @@ def _build_transform_filter(
     tl_w: int, tl_h: int,
     out_w: int, out_h: int,
 ) -> str:
-    """Convert TransformSettings to an FFmpeg crop+scale filter string."""
+    """Convert TransformSettings to an FFmpeg crop+scale filter string.
+
+    Uses iw/ih (actual input dimensions) for crop bounds so the filter works
+    even when declared source dimensions don't match the real file.
+    """
     sx = transform.scale_x or 1.0
     sy = transform.scale_y or 1.0
 
-    # If scale is ~1.0 and position is ~0, just scale (no crop needed)
-    if abs(sx - 1.0) < 0.01 and abs(sy - 1.0) < 0.01 and abs(transform.position_x) < 1 and abs(transform.position_y) < 1:
+    # If scale is close to default fit or 1.0 and no significant pan, just scale
+    default_scale = tl_w / max(src_w, 1)
+    is_fit = (abs(sx - default_scale) < 0.02 or abs(sx - 1.0) < 0.02) and abs(transform.position_x) < 1 and abs(transform.position_y) < 1
+    if is_fit:
         return f"scale={out_w}:{out_h}:flags=bilinear"
 
-    # Compute crop region in source pixels
-    crop_w = tl_w / sx
-    crop_h = tl_h / sy
-    crop_x = (src_w / 2.0) - (crop_w / 2.0) - (transform.position_x / sx)
-    crop_y = (src_h / 2.0) - (crop_h / 2.0) + (transform.position_y / sy)
+    # Compute crop as a fraction of the source, then apply using iw/ih
+    # so FFmpeg uses actual input dimensions, not the declared ones.
+    crop_frac_w = min(1.0, (tl_w / sx) / max(src_w, 1))
+    crop_frac_h = min(1.0, (tl_h / sy) / max(src_h, 1))
 
-    # Clamp to source bounds
-    crop_w = min(crop_w, src_w)
-    crop_h = min(crop_h, src_h)
-    crop_x = max(0, min(crop_x, src_w - crop_w))
-    crop_y = max(0, min(crop_y, src_h - crop_h))
+    # Position offset as a fraction of source
+    norm = 19.2
+    off_frac_x = (transform.position_x * norm) / max(src_w * sx, 1)
+    off_frac_y = (transform.position_y * norm) / max(src_h * sy, 1)
+
+    # Build crop expression using iw/ih for runtime resolution
+    cw = f"iw*{crop_frac_w:.4f}"
+    ch = f"ih*{crop_frac_h:.4f}"
+    cx = f"(iw-iw*{crop_frac_w:.4f})/2-iw*{off_frac_x:.4f}"
+    cy = f"(ih-ih*{crop_frac_h:.4f})/2+ih*{off_frac_y:.4f}"
 
     return (
-        f"crop={int(crop_w)}:{int(crop_h)}:{int(crop_x)}:{int(crop_y)},"
+        f"crop={cw}:{ch}:{cx}:{cy},"
         f"scale={out_w}:{out_h}:flags=bilinear"
     )
 
@@ -507,14 +536,13 @@ async def _mix_audio_and_titles(
     else:
         audio_map = "0:a"
 
-    # Text overlays
-    video_map = "[0:v]"
-    if has_titles:
+    # Text overlays — requires FFmpeg built with --enable-libfreetype (drawtext filter)
+    video_map = "0:v"
+    if has_titles and _has_drawtext():
         vf_chain = "[0:v]"
+        txt_files: List[Path] = []
         for ti, title in enumerate(edit.titles):
-            # Scale font size to output resolution
             scaled_size = max(12, int(title.font_size * out_h / edit.timeline.height))
-            escaped = title.text.replace("'", "\\'").replace(":", "\\:")
             start_t = title.timeline_offset
             end_t = start_t + title.duration
             is_subtitle = getattr(title, "style", "title") == "subtitle"
@@ -526,8 +554,13 @@ async def _mix_audio_and_titles(
             else:
                 y_expr = "(h-text_h)/2"
             box_opts = ":box=1:boxcolor=black@0.5:boxborderw=6" if is_subtitle else ""
+            # Write text to a temp file to avoid FFmpeg filter escaping issues
+            import tempfile as _tf
+            txt_file = Path(_tf.mktemp(suffix=".txt", dir=str(output.parent)))
+            txt_file.write_text(title.text, encoding="utf-8")
+            txt_files.append(txt_file)
             vf_chain += (
-                f"drawtext=text='{escaped}':"
+                f"drawtext=textfile='{txt_file}':"
                 f"fontsize={scaled_size}:fontcolor=white:"
                 f"x=(w-text_w)/2:y={y_expr}{box_opts}:"
                 f"enable='between(t\\,{start_t:.3f}\\,{end_t:.3f})'"
@@ -537,12 +570,24 @@ async def _mix_audio_and_titles(
         vf_chain += "[vout]"
         filter_parts.append(vf_chain)
         video_map = "[vout]"
+    elif has_titles:
+        logger.warning("[PREVIEW] drawtext filter not available — skipping text overlays. "
+                       "Install FFmpeg with --enable-libfreetype for subtitle support.")
 
     cmd = ["ffmpeg", "-y"] + inputs
 
+    logger.info(f"[PREVIEW] Mix pass: filter_parts={len(filter_parts)} video_map={video_map} audio_map={audio_map}")
     if filter_parts:
+        for i, fp in enumerate(filter_parts):
+            logger.info(f"[PREVIEW]   filter_part[{i}]: {fp[:120]}")
+        # If we have audio filters but video_map is still raw input,
+        # pipe video through the filter graph so -map works with -filter_complex
+        if video_map == "0:v":
+            filter_parts.insert(0, "[0:v]null[vpass]")
+            video_map = "[vpass]"
         filter_complex = ";\n".join(filter_parts)
         cmd.extend(["-filter_complex", filter_complex])
+        logger.info(f"[PREVIEW] filter_complex:\n{filter_complex}")
 
     cmd.extend([
         "-map", video_map,
@@ -553,6 +598,7 @@ async def _mix_audio_and_titles(
         "-movflags", "+faststart",
         str(output),
     ])
+    logger.info(f"[PREVIEW] Mix cmd: {' '.join(str(c) for c in cmd)}")
 
     await _run_ffmpeg(cmd)
 
