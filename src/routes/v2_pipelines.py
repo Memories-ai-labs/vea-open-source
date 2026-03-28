@@ -7,6 +7,7 @@ import traceback
 from pathlib import Path
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response
 
 from src.schema import (
     V2IndexRequest,
@@ -507,6 +508,42 @@ async def v2_serve_footage_thumbnail(project_name: str, filename: str):
         if proc.returncode != 0:
             raise HTTPException(status_code=500, detail=f"ffmpeg thumbnail failed: {stderr.decode()}")
     return FileResponse(str(thumb_path), media_type="image/jpeg")
+
+
+@router.get(f"{_config.V2_API_PREFIX}/projects/{{project_name}}/preview/frame")
+async def get_preview_frame(project_name: str, t: float = 0.0):
+    """Extract a single frame at a timeline position for scrub preview."""
+    workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    if not workspace.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
+
+    ed_path = workspace.root / "edit_decision.json"
+    if not ed_path.exists():
+        # Also check fcpxml subdir (common location)
+        ed_path = workspace.root / "fcpxml" / "edit_decision.json"
+    if not ed_path.exists():
+        raise HTTPException(status_code=404, detail="No edit decision found.")
+
+    try:
+        import json as _json
+        from src.pipelines.v2.schemas import EditDecision
+        from src.pipelines.v2.preview.ffmpeg_renderer import extract_frame
+
+        with open(ed_path) as f:
+            ed_data = _json.load(f)
+        edit = EditDecision.model_validate(ed_data)
+
+        footage_dir = workspace.get_footage_dir()
+        jpeg_bytes = await extract_frame(edit, footage_dir, timeline_time=t)
+        if not jpeg_bytes:
+            raise HTTPException(status_code=404, detail="No frame extracted.")
+
+        return Response(content=jpeg_bytes, media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[V2 PREVIEW FRAME] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get(f"{_config.V2_API_PREFIX}/resolve/status", response_model=V2ResolveStatusResponse)

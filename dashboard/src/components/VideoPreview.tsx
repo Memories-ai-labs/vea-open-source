@@ -7,6 +7,8 @@ interface VideoPreviewProps {
   hasEditDecision: boolean;
   onRequestRender?: () => void;
   onTimeUpdate?: (time: number) => void;
+  fcpxmlPath?: string;
+  onCopyPath?: () => void;
 }
 
 export interface VideoPreviewHandle {
@@ -15,7 +17,7 @@ export interface VideoPreviewHandle {
 }
 
 export const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(function VideoPreview(
-  { projectName, renderState, hasEditDecision, onRequestRender, onTimeUpdate },
+  { projectName, renderState, hasEditDecision, onRequestRender, onTimeUpdate, fcpxmlPath, onCopyPath },
   ref,
 ) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -202,7 +204,26 @@ export const VideoPreview = forwardRef<VideoPreviewHandle, VideoPreviewProps>(fu
             Render Preview
           </button>
         )}
-        {hasEditDecision && (
+        {hasEditDecision && onCopyPath && fcpxmlPath && (
+          <button onClick={onCopyPath} style={{ ...renderBtnStyle, padding: '4px 12px' }}>
+            Copy FCPXML Path
+          </button>
+        )}
+        {hasEditDecision && fcpxmlPath && (
+          <span style={{
+            ...labelStyle,
+            fontSize: '8px',
+            color: 'var(--text-muted)',
+            fontFamily: 'var(--font-mono)',
+            maxWidth: '90%',
+            textAlign: 'center',
+            wordBreak: 'break-all',
+            lineHeight: 1.5,
+          }}>
+            {fcpxmlPath}
+          </span>
+        )}
+        {hasEditDecision && !fcpxmlPath && (
           <span style={{ ...labelStyle, fontSize: '8px', color: 'var(--text-muted)' }}>
             Rendering requires DaVinci Resolve Studio
           </span>

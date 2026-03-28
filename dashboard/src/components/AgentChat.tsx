@@ -2,15 +2,16 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { createPortal } from 'react-dom';
 import type { AgentEvent, ChatMessage, ScratchpadState, ScratchpadTimestamps, EditDecision, EditDecisionClip, TransformSettings, RenderState } from '../hooks/useAgentChat';
 import type { ProjectSummary } from '../types';
-import { listProjects, clearGists, clearPlanning, clearMemories, indexProject } from '../api';
+import { listProjects, clearGists, clearPlanning, clearMemories, indexProject, getResolveStatus } from '../api';
 import { useBreakpoint } from '../hooks/useBreakpoint';
 import { SimpleMarkdown } from './SimpleMarkdown';
 import { NLETimeline } from './NLETimeline';
-import { VideoPreview } from './VideoPreview';
-import type { VideoPreviewHandle } from './VideoPreview';
+import { PreviewPanel } from './PreviewPanel';
+import type { PreviewPanelHandle } from './PreviewPanel';
 import ClipInspector from './ClipInspector';
 import TransformPreview from './TransformPreview';
 import TimelineSettingsBar from './TimelineSettingsBar';
+import { useToast } from './Toast';
 
 interface AgentChatProps {
   project: ProjectSummary;
@@ -20,15 +21,25 @@ interface AgentChatProps {
   scratchpadTimestamps: ScratchpadTimestamps;
   editDecision: EditDecision | null;
   renderState: RenderState;
+  draftRenderState: RenderState;
   cropStatuses: Record<string, { clip_id: string; status: string; step?: string }>;
   connected: boolean;
   busy: boolean;
   onSend: (text: string) => void;
   onRequestRender: () => void;
+  onRequestDraftRender: () => void;
   onBack: () => void;
   onClearState: () => void;
   onEditDecisionChange: (updated: EditDecision) => void;
   onRequestCropClip: (clipId: string) => void;
+}
+
+function formatTime(iso: string | undefined): string {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  } catch { return ''; }
 }
 
 const PAD_LABELS: Record<string, string> = {
@@ -52,70 +63,50 @@ const PAD_EMPTY_HINTS: Record<string, string> = {
   fcpxml: 'Ask the agent to generate an FCPXML once planning is complete. The timeline XML will appear here.',
 };
 
-// ── Resizable row divider ──
-const ROW_MINS = [48, 80, 200]; // min heights for top, middle, bottom
-const ROW_MAXS = [400, 400, Infinity]; // max heights
-
-function useDragDivider(
-  rowHeights: number[],
-  setRowHeights: React.Dispatch<React.SetStateAction<number[]>>,
-  dividerIndex: number, // 0 = between row 0 and 1, 1 = between row 1 and 2
+// ── Drag divider (horizontal, between upper and lower rows) ──
+function useHorizontalDivider(
+  upperPct: number,
+  setUpperPct: React.Dispatch<React.SetStateAction<number>>,
+  containerRef: React.RefObject<HTMLDivElement | null>,
 ) {
   const dragging = useRef(false);
-  const startY = useRef(0);
-  const startHeights = useRef<number[]>([]);
 
   const onMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     dragging.current = true;
-    startY.current = e.clientY;
-    startHeights.current = [...rowHeights];
     document.body.style.cursor = 'row-resize';
     document.body.style.userSelect = 'none';
 
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!dragging.current) return;
-      const delta = ev.clientY - startY.current;
-      const h = [...startHeights.current];
-      const above = dividerIndex;
-      const below = dividerIndex + 1;
-      let newAbove = h[above] + delta;
-      let newBelow = h[below] - delta;
-
-      // Clamp
-      newAbove = Math.max(ROW_MINS[above], Math.min(ROW_MAXS[above], newAbove));
-      newBelow = Math.max(ROW_MINS[below], Math.min(ROW_MAXS[below], newBelow));
-
-      // Recalculate delta after clamping
-      const actualDelta = newAbove - h[above];
-      h[above] = h[above] + actualDelta;
-      h[below] = h[below] - actualDelta;
-
-      if (h[below] < ROW_MINS[below]) return;
-      setRowHeights(h);
+    const onMove = (ev: MouseEvent) => {
+      if (!dragging.current || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const pct = ((ev.clientY - rect.top) / rect.height) * 100;
+      setUpperPct(Math.max(25, Math.min(75, pct)));
     };
 
-    const onMouseUp = () => {
+    const onUp = () => {
       dragging.current = false;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup', onMouseUp);
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
     };
 
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-  }, [rowHeights, setRowHeights, dividerIndex]);
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [upperPct, setUpperPct, containerRef]);
 
   return onMouseDown;
 }
 
 export function AgentChat({
-  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, cropStatuses, connected, busy, onSend, onRequestRender, onBack, onClearState, onEditDecisionChange, onRequestCropClip,
+  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, connected, busy, onSend, onRequestRender, onRequestDraftRender, onBack, onClearState, onEditDecisionChange, onRequestCropClip,
 }: AgentChatProps) {
+  const { toast } = useToast();
   const [project, setProject] = useState(initialProject);
   const [input, setInput] = useState('');
   const [activePad, setActivePad] = useState<string>('comprehension');
+  const [resolveRunning, setResolveRunning] = useState<boolean | null>(null);
   const [manageOpen, setManageOpen] = useState(false);
   const [manageLoading, setManageLoading] = useState<string | null>(null);
   const [manageMsg, setManageMsg] = useState('');
@@ -123,7 +114,7 @@ export function AgentChat({
   const [expandedFile, setExpandedFile] = useState<string | null>(null);
   const [playheadTime, setPlayheadTime] = useState(0);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
-  const videoPreviewRef = useRef<VideoPreviewHandle>(null);
+  const previewPanelRef = useRef<PreviewPanelHandle>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const manageRef = useRef<HTMLDivElement>(null);
   const manageBtnRef = useRef<HTMLButtonElement>(null);
@@ -131,17 +122,39 @@ export function AgentChat({
   const isTablet = useBreakpoint(1080);
   const isMobile = useBreakpoint(720);
 
-  // Row heights: [top, middle, bottom]. Bottom uses flex to fill remaining space.
-  // We store top and middle as fixed px, bottom is flex: 1.
-  const [rowHeights, setRowHeights] = useState<number[]>([120, 240, 500]);
-  // Column split for middle row: percentage of width for the timeline (0-100)
-  const [timelinePct, setTimelinePct] = useState(70);
+  // Panel visibility toggles
+  const [showMediaPool, setShowMediaPool] = useState(true);
+  const [showInspector, setShowInspector] = useState(true);
+
+  // Layout: upper row pct (of the main content area), lower gets the rest
+  const [upperPct, setUpperPct] = useState(55);
+  // Timeline/chat horizontal split in lower row
+  const [timelinePct, setTimelinePct] = useState(65);
+
+  const mainContentRef = useRef<HTMLDivElement>(null);
+  const onRowDrag = useHorizontalDivider(upperPct, setUpperPct, mainContentRef);
 
   // Tick every 30s to keep "updated X ago" labels fresh
   const [, setTick] = useState(0);
   useEffect(() => {
     const iv = setInterval(() => setTick((t) => t + 1), 30_000);
     return () => clearInterval(iv);
+  }, []);
+
+  // Poll DaVinci Resolve status
+  useEffect(() => {
+    let mounted = true;
+    async function check() {
+      try {
+        const r = await getResolveStatus();
+        if (mounted) setResolveRunning(r.running);
+      } catch {
+        if (mounted) setResolveRunning(null);
+      }
+    }
+    check();
+    const iv = setInterval(check, 15000);
+    return () => { mounted = false; clearInterval(iv); };
   }, []);
 
   // Escape key deselects clip
@@ -153,12 +166,9 @@ export function AgentChat({
     return () => window.removeEventListener('keydown', handler);
   }, [selectedClipId]);
 
-  const onDrag0 = useDragDivider(rowHeights, setRowHeights, 0);
-  const onDrag1 = useDragDivider(rowHeights, setRowHeights, 1);
-
-  // Horizontal column drag divider for timeline/preview split
+  // Horizontal column drag divider for timeline/chat split in lower row
+  const lowerRowRef = useRef<HTMLDivElement>(null);
   const colDragging = useRef(false);
-  const colContainerRef = useRef<HTMLDivElement>(null);
   const onColDragDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     colDragging.current = true;
@@ -166,10 +176,10 @@ export function AgentChat({
     document.body.style.userSelect = 'none';
 
     const onMove = (ev: MouseEvent) => {
-      if (!colDragging.current || !colContainerRef.current) return;
-      const rect = colContainerRef.current.getBoundingClientRect();
+      if (!colDragging.current || !lowerRowRef.current) return;
+      const rect = lowerRowRef.current.getBoundingClientRect();
       const pct = ((ev.clientX - rect.left) / rect.width) * 100;
-      setTimelinePct(Math.max(30, Math.min(85, pct)));
+      setTimelinePct(Math.max(30, Math.min(80, pct)));
     };
     const onUp = () => {
       colDragging.current = false;
@@ -181,30 +191,6 @@ export function AgentChat({
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
   }, []);
-
-  // Auto-size preview to fill row height when render completes
-  useEffect(() => {
-    if (renderState.status !== 'complete' || !colContainerRef.current || isTablet) return;
-    const container = colContainerRef.current;
-    const containerW = container.getBoundingClientRect().width;
-    const rowH = rowHeights[1];
-    if (containerW <= 0 || rowH <= 0) return;
-
-    // Use the edit decision's aspect ratio, default to 16:9
-    const edW = editDecision?.timeline?.width ?? 1920;
-    const edH = editDecision?.timeline?.height ?? 1080;
-    const aspectRatio = edW / edH;
-
-    // The ideal preview width is the row height * aspect ratio
-    // Account for header bar (~30px) and some padding
-    const videoHeight = rowH - 34;
-    const idealPreviewW = videoHeight * aspectRatio;
-    // Add a small margin (8px)
-    const previewW = idealPreviewW + 8;
-    // Convert to percentage and set timeline to fill the rest
-    const newTimelinePct = Math.max(30, Math.min(85, ((containerW - previewW - 6) / containerW) * 100));
-    setTimelinePct(newTimelinePct);
-  }, [renderState.status, rowHeights, editDecision, isTablet]);
 
   const refresh = useCallback(async () => {
     try {
@@ -236,7 +222,7 @@ export function AgentChat({
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'TEXTAREA' || tag === 'INPUT' || (e.target as HTMLElement).isContentEditable) return;
       e.preventDefault();
-      videoPreviewRef.current?.togglePlayback();
+      previewPanelRef.current?.togglePlayback();
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
@@ -247,8 +233,9 @@ export function AgentChat({
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, events]);
 
-  // Current activity
+  // Current activity — only show spinner when agent is actively working
   const currentActivity = useMemo(() => {
+    if (!busy) return null;
     for (let i = events.length - 1; i >= 0; i--) {
       const e = events[i];
       switch (e.type) {
@@ -258,14 +245,11 @@ export function AgentChat({
           continue;
         case 'done':
         case 'error':
-          // Previous round finished — but a new round may be in progress
-          if (busy) return { label: 'Thinking...', active: true };
           if (e.type === 'error') return { label: `Error: ${e.data.message}`, active: false };
           return null;
       }
     }
-    if (busy) return { label: 'Thinking...', active: true };
-    return null;
+    return { label: 'Thinking...', active: true };
   }, [events, busy]);
 
   // Timeline items — merge tool_call + tool_result into single entries
@@ -273,11 +257,10 @@ export function AgentChat({
     const items: TimelineItem[] = [];
     let msgIdx = 0;
 
-    // Check if the LATEST turn is finished — only look at done/error after the last tool_call
     const lastToolCallIdx = events.reduce((acc, e, i) => e.type === 'tool_call' ? i : acc, -1);
-    const turnDone = lastToolCallIdx >= 0 && events.slice(lastToolCallIdx).some(e => e.type === 'done' || e.type === 'error');
+    const hasDoneEvent = lastToolCallIdx >= 0 && events.slice(lastToolCallIdx).some(e => e.type === 'done' || e.type === 'error');
+    const turnDone = hasDoneEvent || (!busy && lastToolCallIdx >= 0);
 
-    // Track which tool_calls have been completed (by index)
     const toolCallCompleted: boolean[] = [];
     const toolCalls: AgentEvent[] = [];
     const toolResults: AgentEvent[] = [];
@@ -285,7 +268,6 @@ export function AgentChat({
       if (e.type === 'tool_call') toolCalls.push(e);
       if (e.type === 'tool_result') toolResults.push(e);
     }
-    // Match tool_calls to tool_results by order (1st call → 1st result of same tool, etc.)
     const resultUsed = new Array(toolResults.length).fill(false);
     for (let ci = 0; ci < toolCalls.length; ci++) {
       const tc = toolCalls[ci];
@@ -298,12 +280,9 @@ export function AgentChat({
           break;
         }
       }
-      // If turn is done, mark all tool_calls as completed even without explicit result
       if (!found) toolCallCompleted.push(turnDone);
     }
 
-    // Collect refine_progress events to determine which are "done"
-    // A refine_progress is done if it's not the last one, or if the turn is complete
     const refineEvents: AgentEvent[] = events.filter(e => e.type === 'refine_progress');
 
     let toolCallIdx = 0;
@@ -321,7 +300,6 @@ export function AgentChat({
         items.push({ kind: 'tool_call', event: e, completed });
         toolCallIdx++;
       }
-      // Skip tool_result as separate rows — they're merged into tool_call
       else if (e.type === 'tool_result') continue;
       else if (e.type === 'refine_progress') {
         const isLast = e === refineEvents[refineEvents.length - 1];
@@ -335,7 +313,7 @@ export function AgentChat({
       msgIdx++;
     }
     return items;
-  }, [events, messages]);
+  }, [events, messages, busy]);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -354,7 +332,7 @@ export function AgentChat({
 
   const handleTimelineSeek = useCallback((time: number) => {
     setPlayheadTime(time);
-    videoPreviewRef.current?.seekTo(time);
+    previewPanelRef.current?.seekTo(time);
   }, []);
 
   const selectedClip = useMemo(() => {
@@ -419,662 +397,909 @@ export function AgentChat({
     setIndexing(true);
     try {
       await indexProject(project.project_name);
+      toast('Indexing started', 'success');
       await refresh();
-    } catch { /* ignore */ }
+    } catch (e: any) {
+      toast(`Indexing failed: ${e.message ?? String(e)}`, 'error');
+    }
     finally { setIndexing(false); }
   }
 
   const padContent = scratchpads[activePad as keyof ScratchpadState] || '';
   const isIndexed = project.status !== 'new';
 
+  // ── RENDER ──
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', padding: isMobile ? '10px' : '0' }}>
-      {/* ── Top row: compact header bar ── */}
-      <div
-        className="glass-card"
-        style={{
-          margin: isMobile ? '0' : '16px 16px 0',
-          padding: isMobile ? '10px 14px' : '0',
-          flexShrink: 0,
-          height: isTablet ? 'auto' : `${rowHeights[0]}px`,
-          minHeight: isTablet ? undefined : `${ROW_MINS[0]}px`,
-          maxHeight: isTablet ? undefined : `${ROW_MAXS[0]}px`,
-          overflow: 'auto',
-        }}
-      >
-        {/* Navigation bar */}
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '12px',
-          padding: isMobile ? '0' : '12px 20px',
-          flexWrap: isMobile ? 'wrap' : 'nowrap',
-        }}>
-          {/* Left: back + project name */}
-          <button
-            onClick={onBack}
-            style={{
-              ...btnStyle('var(--text-secondary)'),
-              padding: '6px 12px',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              flexShrink: 0,
-            }}
-          >
-            <span style={{ fontSize: '13px' }}>&larr;</span> Back
-          </button>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
 
-          <div style={{ width: '1px', height: '20px', background: 'var(--border)', flexShrink: 0 }} />
-
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: '10px', minWidth: 0, flex: '1 1 0' }}>
-            <div
-              title="Project name (rename not yet supported)"
-              style={{
-                fontSize: 'clamp(18px, 2.5vw, 26px)',
-                fontWeight: 800,
-                letterSpacing: '-0.04em',
-                lineHeight: 1.2,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-                borderBottom: '1px dashed transparent',
-                transition: 'border-color 0.15s',
-                cursor: 'default',
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--border-strong)'; }}
-              onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'transparent'; }}
-            >
-              {project.project_name}
-            </div>
-            <span className="eyebrow" style={{ flexShrink: 0 }}>workspace</span>
-          </div>
-
-          {/* Spacer */}
-          <div style={{ flex: 1 }} />
-
-          {/* Right: status pills + manage */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-            <span className="pill">
-              <span style={{ color: 'var(--accent-blue)', fontSize: '13px', fontWeight: 800 }}>{project.video_count}</span>
-              footage
-            </span>
-
-            <span className="pill">
-              <span style={{ color: isIndexed ? 'var(--accent-green)' : 'var(--text-muted)', fontSize: '13px', fontWeight: 800 }}>{project.indexed_files?.length || 0}</span>
-              indexed
-            </span>
-
-            <div style={{ width: '1px', height: '20px', background: 'var(--border)', flexShrink: 0 }} />
-
-            <div style={{ position: 'relative' }}>
-              <button
-                ref={manageBtnRef}
-                onClick={() => {
-                  setManageOpen(o => {
-                    if (!o && manageBtnRef.current) {
-                      const rect = manageBtnRef.current.getBoundingClientRect();
-                      setDropdownPos({ top: rect.bottom + 8, right: window.innerWidth - rect.right });
-                    }
-                    return !o;
-                  });
-                  setManageMsg('');
-                }}
-                style={{
-                  ...btnStyle('var(--text-secondary)'),
-                  padding: '6px 12px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                }}
-              >
-                <span style={{ fontSize: '10px' }}>{manageOpen ? '▾' : '▸'}</span> Manage
-              </button>
-
-              {/* Dropdown rendered via portal to escape glass-card containing block */}
-              {manageOpen && dropdownPos && createPortal(
-                <div ref={manageRef} style={{
-                  position: 'fixed',
-                  top: dropdownPos.top,
-                  right: dropdownPos.right,
-                  zIndex: 1000,
-                  background: 'rgba(28,25,23,0.97)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 'var(--radius-md)',
-                  padding: '12px',
-                  minWidth: '220px',
-                  display: 'grid',
-                  gap: '6px',
-                  boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-                  backdropFilter: 'blur(12px)',
-                }}>
-                  {manageMsg && <div className="status-message info" style={{ fontSize: '11px', padding: '6px 10px' }}>{manageMsg}</div>}
-                  {project.footage_files.length > 0 && (
-                    <DropdownBtn color={isIndexed ? 'var(--text-secondary)' : 'var(--accent-blue)'} disabled={indexing} onClick={handleIndex}>
-                      {indexing ? 'Indexing...' : isIndexed ? 'Re-index footage' : 'Index footage'}
-                    </DropdownBtn>
-                  )}
-                  <DropdownBtn color="var(--text-secondary)" disabled={manageLoading === 'gists'} onClick={async () => { setManageLoading('gists'); try { await clearGists(project.project_name); setManageMsg('Gists cleared.'); await refresh(); } catch (e: any) { setManageMsg(`Error: ${e.message}`); } finally { setManageLoading(null); } }}>
-                    {manageLoading === 'gists' ? 'Clearing...' : 'Clear gists'}
-                  </DropdownBtn>
-                  <DropdownBtn color="var(--text-secondary)" disabled={manageLoading === 'planning'} onClick={async () => { setManageLoading('planning'); onClearState(); try { await clearPlanning(project.project_name); setManageMsg('Planning + chat cleared.'); await refresh(); } catch (e: any) { setManageMsg(`Error: ${e.message}`); } finally { setManageLoading(null); } }}>
-                    {manageLoading === 'planning' ? 'Clearing...' : 'Clear planning + chat'}
-                  </DropdownBtn>
-                  <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
-                  <DropdownBtn color="var(--accent-red)" disabled={manageLoading === 'memories'} onClick={async () => { if (!confirm(`Delete Memories.ai uploads for "${project.project_name}"?`)) return; setManageLoading('memories'); try { const r = await clearMemories(project.project_name); setManageMsg(`Deleted ${r.deleted.length} video(s).`); await refresh(); } catch (e: any) { setManageMsg(`Error: ${e.message}`); } finally { setManageLoading(null); } }}>
-                    {manageLoading === 'memories' ? 'Deleting...' : 'Delete from Memories.ai'}
-                  </DropdownBtn>
-                </div>,
-                document.body
-              )}
-            </div>
-
-            <span className="pill" title={connected ? 'WebSocket connected' : 'Disconnected'}>
-              <span
-                className={connected ? 'pulse-dot' : ''}
-                style={{ display: 'inline-block', width: '7px', height: '7px', borderRadius: '50%', background: connected ? 'var(--accent-green)' : 'var(--accent-red)' }}
-              />
-              {connected ? 'Live' : 'Offline'}
-            </span>
-          </div>
-        </div>
-
-        {/* Footage strip */}
-        {project.footage_files.length > 0 && (
-          <div style={{
-            borderTop: '1px solid var(--border)',
-            padding: isMobile ? '8px 14px' : '8px 20px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            overflowX: 'auto',
-          }}>
-            <span className="eyebrow" style={{ flexShrink: 0 }}>footage</span>
-            <div style={{ width: '1px', height: '16px', background: 'var(--border)', flexShrink: 0 }} />
-            {project.footage_files.map((f) => {
-              const indexed = project.indexed_files?.includes(f);
-              const fileGist = project.video_gists?.[f] ?? '';
-              const thumbUrl = `/video-edit/v2/projects/${encodeURIComponent(project.project_name)}/footage/${encodeURIComponent(f)}/thumbnail`;
-              return (
-                <button
-                  key={f}
-                  onClick={() => fileGist && setExpandedFile(expandedFile === f ? null : f)}
-                  style={{
-                    flexShrink: 0,
-                    padding: '3px 10px 3px 3px',
-                    borderRadius: '8px',
-                    border: `1px solid ${indexed ? 'rgba(138,210,126,0.22)' : 'rgba(255,255,255,0.06)'}`,
-                    background: indexed ? 'rgba(138,210,126,0.06)' : 'rgba(255,255,255,0.03)',
-                    color: 'var(--text-secondary)',
-                    fontSize: '10px',
-                    fontFamily: 'var(--font-mono)',
-                    cursor: fileGist ? 'pointer' : 'default',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                    maxWidth: '300px',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  <img
-                    src={thumbUrl}
-                    alt=""
-                    style={{
-                      width: '36px',
-                      height: '24px',
-                      objectFit: 'cover',
-                      borderRadius: '4px',
-                      background: 'rgba(0,0,0,0.3)',
-                      flexShrink: 0,
-                    }}
-                    onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                  />
-                  <span style={{ fontSize: '10px', color: indexed ? 'var(--accent-green)' : 'var(--text-muted)', flexShrink: 0 }}>
-                    {indexed ? '✓' : '○'}
-                  </span>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{f}</span>
-                  {fileGist && <span style={{ fontSize: '9px', color: 'var(--text-muted)' }}>{expandedFile === f ? '▾' : '▸'}</span>}
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        {/* Expanded gist panel (if a file is selected) */}
-        {expandedFile && project.video_gists?.[expandedFile] && (
-          <div style={{
-            borderTop: '1px solid var(--border)',
-            padding: isMobile ? '10px 14px' : '10px 20px',
-            maxHeight: '120px',
-            overflowY: 'auto',
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
-              <span className="eyebrow" style={{ color: 'var(--accent-green)' }}>gist</span>
-              <span style={{ color: 'var(--text-muted)', fontSize: '10px', fontFamily: 'var(--font-mono)' }}>{expandedFile}</span>
-              <div style={{ flex: 1 }} />
-              <button
-                onClick={() => setExpandedFile(null)}
-                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '12px' }}
-              >
-                &times;
-              </button>
-            </div>
-            <div style={{ color: 'var(--text-secondary)', fontSize: '11px', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>
-              {project.video_gists[expandedFile]}
-            </div>
-          </div>
-        )}
-
-        {/* No footage hint */}
-        {project.footage_files.length === 0 && (
-          <div style={{
-            borderTop: '1px solid var(--border)',
-            padding: isMobile ? '8px 14px' : '8px 20px',
-            color: 'var(--text-muted)',
-            fontSize: '11px',
-            fontFamily: 'var(--font-mono)',
-          }}>
-            No footage yet — drop files into <code>data/workspaces/{project.project_name}/footage/</code>
-          </div>
-        )}
-      </div>
-
-      {/* Divider between header and timeline */}
-      {!isTablet && (
-        <div
-          onMouseDown={onDrag0}
-          style={dividerStyle}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
-            const inner = e.currentTarget.firstChild as HTMLElement;
-            if (inner) { inner.style.background = 'rgba(255,255,255,0.18)'; inner.style.width = '64px'; }
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'transparent';
-            const inner = e.currentTarget.firstChild as HTMLElement;
-            if (inner) { inner.style.background = 'rgba(255,255,255,0.08)'; inner.style.width = '48px'; }
+      {/* ════════════════════════════════════════════════════════════
+          ROW 1: TOOLBAR (36px fixed)
+          ════════════════════════════════════════════════════════════ */}
+      <div style={{
+        height: '36px',
+        flexShrink: 0,
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px',
+        padding: '0 12px',
+        background: 'rgba(22,17,16,0.95)',
+        borderBottom: '1px solid var(--border)',
+        fontSize: '11px',
+        fontFamily: 'var(--font-mono)',
+      }}>
+        {/* Left cluster: back + project name */}
+        <button
+          onClick={onBack}
+          style={{
+            ...toolbarBtnStyle,
+            display: 'flex', alignItems: 'center', gap: '4px',
           }}
         >
-          <div style={dividerInnerStyle} />
-        </div>
-      )}
+          <span style={{ fontSize: '12px' }}>&larr;</span> Back
+        </button>
 
-      {/* ── Middle row: NLE timeline + video preview ── */}
+        <div style={{ width: '1px', height: '18px', background: 'var(--border)', flexShrink: 0 }} />
+
+        <span style={{
+          fontWeight: 700,
+          fontSize: '12px',
+          letterSpacing: '-0.02em',
+          color: 'var(--text-primary)',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          maxWidth: '180px',
+        }}>
+          {project.project_name}
+        </span>
+        <span style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+          workspace
+        </span>
+
+        {/* Center cluster: panel toggle buttons */}
+        <div style={{ flex: 1 }} />
+
+        <button
+          onClick={() => setShowMediaPool(v => !v)}
+          style={{
+            ...toolbarToggleBtnStyle,
+            background: showMediaPool ? 'rgba(255,255,255,0.1)' : 'transparent',
+            color: showMediaPool ? 'var(--text-primary)' : 'var(--text-muted)',
+          }}
+        >
+          Media Pool
+        </button>
+
+        <button
+          onClick={() => setShowInspector(v => !v)}
+          style={{
+            ...toolbarToggleBtnStyle,
+            background: showInspector ? 'rgba(255,255,255,0.1)' : 'transparent',
+            color: showInspector ? 'var(--text-primary)' : 'var(--text-muted)',
+          }}
+        >
+          Inspector
+        </button>
+
+        <div style={{ flex: 1 }} />
+
+        {/* Right cluster: status pills + manage */}
+        <span className="pill" style={{ fontSize: '9px', padding: '2px 8px' }}>
+          <span style={{ color: 'var(--accent-blue)', fontWeight: 800 }}>{project.video_count}</span> footage
+        </span>
+
+        <span className="pill" style={{ fontSize: '9px', padding: '2px 8px' }}>
+          <span style={{ color: isIndexed ? 'var(--accent-green)' : 'var(--text-muted)', fontWeight: 800 }}>{project.indexed_files?.length || 0}</span> indexed
+        </span>
+
+        <div style={{ position: 'relative' }}>
+          <button
+            ref={manageBtnRef}
+            onClick={() => {
+              setManageOpen(o => {
+                if (!o && manageBtnRef.current) {
+                  const rect = manageBtnRef.current.getBoundingClientRect();
+                  setDropdownPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                }
+                return !o;
+              });
+              setManageMsg('');
+            }}
+            style={{
+              ...toolbarBtnStyle,
+              display: 'flex', alignItems: 'center', gap: '4px',
+            }}
+          >
+            <span style={{ fontSize: '8px' }}>{manageOpen ? '▾' : '▸'}</span> Manage
+          </button>
+
+          {/* Dropdown rendered via portal */}
+          {manageOpen && dropdownPos && createPortal(
+            <div ref={manageRef} style={{
+              position: 'fixed',
+              top: dropdownPos.top,
+              right: dropdownPos.right,
+              zIndex: 1000,
+              background: 'rgba(28,25,23,0.97)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              padding: '12px',
+              minWidth: '220px',
+              display: 'grid',
+              gap: '6px',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+              backdropFilter: 'blur(12px)',
+            }}>
+              {manageMsg && <div className="status-message info" style={{ fontSize: '11px', padding: '6px 10px' }}>{manageMsg}</div>}
+              {project.footage_files.length > 0 && (
+                <DropdownBtn color={isIndexed ? 'var(--text-secondary)' : 'var(--accent-blue)'} disabled={indexing} onClick={handleIndex}>
+                  {indexing ? 'Indexing...' : isIndexed ? 'Re-index footage' : 'Index footage'}
+                </DropdownBtn>
+              )}
+              <DropdownBtn color="var(--text-secondary)" disabled={manageLoading === 'gists'} onClick={async () => { setManageLoading('gists'); try { await clearGists(project.project_name); setManageMsg('Gists cleared.'); toast('Gists cleared', 'success'); await refresh(); } catch (e: any) { setManageMsg(`Error: ${e.message}`); toast(`Failed to clear gists: ${e.message}`, 'error'); } finally { setManageLoading(null); } }}>
+                {manageLoading === 'gists' ? 'Clearing...' : 'Clear gists'}
+              </DropdownBtn>
+              <DropdownBtn color="var(--text-secondary)" disabled={manageLoading === 'planning'} onClick={async () => { setManageLoading('planning'); onClearState(); try { await clearPlanning(project.project_name); setManageMsg('Planning + chat cleared.'); toast('Planning + chat cleared', 'success'); await refresh(); } catch (e: any) { setManageMsg(`Error: ${e.message}`); toast(`Failed to clear planning: ${e.message}`, 'error'); } finally { setManageLoading(null); } }}>
+                {manageLoading === 'planning' ? 'Clearing...' : 'Clear planning + chat'}
+              </DropdownBtn>
+              <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
+              <DropdownBtn color="var(--accent-red)" disabled={manageLoading === 'memories'} onClick={async () => { if (!confirm(`Delete Memories.ai uploads for "${project.project_name}"?`)) return; setManageLoading('memories'); try { const r = await clearMemories(project.project_name); setManageMsg(`Deleted ${r.deleted.length} video(s).`); toast(`Deleted ${r.deleted.length} video(s) from Memories.ai`, 'success'); await refresh(); } catch (e: any) { setManageMsg(`Error: ${e.message}`); toast(`Failed to delete from Memories.ai: ${e.message}`, 'error'); } finally { setManageLoading(null); } }}>
+                {manageLoading === 'memories' ? 'Deleting...' : 'Delete from Memories.ai'}
+              </DropdownBtn>
+            </div>,
+            document.body
+          )}
+        </div>
+
+        <span className="pill" style={{ fontSize: '9px', padding: '2px 8px' }} title={resolveRunning === true ? 'DaVinci Resolve running' : resolveRunning === false ? 'DaVinci Resolve not detected' : 'Checking Resolve status...'}>
+          <span
+            style={{ display: 'inline-block', width: '6px', height: '6px', borderRadius: '50%', background: resolveRunning === true ? 'var(--accent-green)' : resolveRunning === false ? 'var(--accent-red)' : 'var(--text-muted)' }}
+          />
+          {resolveRunning === true ? 'Resolve' : resolveRunning === false ? 'No Resolve' : '?'}
+        </span>
+
+        <span className="pill" style={{ fontSize: '9px', padding: '2px 8px' }} title={connected ? 'WebSocket connected' : 'Disconnected'}>
+          <span
+            className={connected ? 'pulse-dot' : ''}
+            style={{ display: 'inline-block', width: '6px', height: '6px', borderRadius: '50%', background: connected ? 'var(--accent-green)' : 'var(--accent-red)' }}
+          />
+          {connected ? 'OK' : 'Off'}
+        </span>
+      </div>
+
+      {/* ════════════════════════════════════════════════════════════
+          MAIN CONTENT (fills remaining space)
+          ════════════════════════════════════════════════════════════ */}
       <div
-        ref={colContainerRef}
+        ref={mainContentRef}
         className="glass-card"
         style={{
-          margin: isMobile ? '10px 0 0' : '0 16px',
-          padding: '0',
-          flexShrink: 0,
-          height: isTablet ? '120px' : `${rowHeights[1]}px`,
-          minHeight: isTablet ? '80px' : `${ROW_MINS[1]}px`,
-          maxHeight: isTablet ? '160px' : `${ROW_MAXS[1]}px`,
-          overflow: 'hidden',
+          flex: 1,
+          minHeight: 0,
+          margin: '0',
+          borderRadius: '0',
           display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
         }}
       >
-        {/* Timeline */}
-        <div style={{ width: isTablet ? '100%' : `${timelinePct}%`, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          {editDecision && editDecision.clips.length > 0 && (
-            <TimelineSettingsBar
-              width={tlWidth}
-              height={tlHeight}
-              onChange={handleResolutionChange}
-            />
+
+        {/* ── ROW 2: UPPER — Media Pool | Viewer | Inspector ── */}
+        <div style={{
+          height: isTablet ? '50%' : `${upperPct}%`,
+          flexShrink: 0,
+          display: 'flex',
+          overflow: 'hidden',
+        }}>
+
+          {/* LEFT PANEL: Media Pool + Scratchpads */}
+          {showMediaPool && !isTablet && (
+            <div style={{
+              width: '20%',
+              minWidth: '180px',
+              maxWidth: '320px',
+              borderRight: '1px solid var(--border)',
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden',
+            }}>
+              {/* Media Pool header */}
+              <div style={{
+                padding: '6px 10px',
+                borderBottom: '1px solid var(--border)',
+                fontSize: '9px',
+                fontFamily: 'var(--font-mono)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.08em',
+                color: 'var(--text-muted)',
+                flexShrink: 0,
+              }}>
+                Media Pool
+              </div>
+
+              {/* Footage files list */}
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+                {project.footage_files.length === 0 ? (
+                  <div style={{ padding: '12px 10px', color: 'var(--text-muted)', fontSize: '10px', fontFamily: 'var(--font-mono)', lineHeight: 1.6 }}>
+                    No footage yet. Drop files into <code>data/workspaces/{project.project_name}/footage/</code>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1px' }}>
+                    {project.footage_files.map((f) => {
+                      const indexed = project.indexed_files?.includes(f);
+                      const fileGist = project.video_gists?.[f] ?? '';
+                      const thumbUrl = `/video-edit/v2/projects/${encodeURIComponent(project.project_name)}/footage/${encodeURIComponent(f)}/thumbnail`;
+                      const isExpanded = expandedFile === f;
+                      return (
+                        <div key={f}>
+                          <button
+                            onClick={() => fileGist && setExpandedFile(isExpanded ? null : f)}
+                            style={{
+                              width: '100%',
+                              padding: '4px 8px',
+                              background: isExpanded ? 'rgba(255,255,255,0.04)' : 'transparent',
+                              border: 'none',
+                              color: 'var(--text-secondary)',
+                              fontSize: '10px',
+                              fontFamily: 'var(--font-mono)',
+                              cursor: fileGist ? 'pointer' : 'default',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '6px',
+                              textAlign: 'left',
+                            }}
+                          >
+                            <img
+                              src={thumbUrl}
+                              alt=""
+                              style={{
+                                width: '32px', height: '20px', objectFit: 'cover',
+                                borderRadius: '3px', background: 'rgba(0,0,0,0.3)', flexShrink: 0,
+                              }}
+                              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                            />
+                            <span style={{ fontSize: '9px', color: indexed ? 'var(--accent-green)' : 'var(--text-muted)', flexShrink: 0 }}>
+                              {indexed ? '\u2713' : '\u25CB'}
+                            </span>
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{f}</span>
+                            {fileGist && <span style={{ fontSize: '8px', color: 'var(--text-muted)', flexShrink: 0 }}>{isExpanded ? '\u25BE' : '\u25B8'}</span>}
+                          </button>
+                          {isExpanded && fileGist && (
+                            <div style={{
+                              padding: '6px 10px 8px 46px',
+                              color: 'var(--text-secondary)',
+                              fontSize: '10px',
+                              lineHeight: 1.7,
+                              whiteSpace: 'pre-wrap',
+                              background: 'rgba(0,0,0,0.1)',
+                              borderBottom: '1px solid var(--border)',
+                            }}>
+                              {fileGist}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Divider between media pool and scratchpads */}
+              <div style={{ borderTop: '1px solid var(--border)', flexShrink: 0 }} />
+
+              {/* Scratchpad section header */}
+              <div style={{
+                padding: '6px 10px',
+                borderBottom: '1px solid var(--border)',
+                fontSize: '9px',
+                fontFamily: 'var(--font-mono)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.08em',
+                color: 'var(--text-muted)',
+                flexShrink: 0,
+              }}>
+                Scratchpads
+              </div>
+
+              {/* Scratchpad tabs */}
+              <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', flexShrink: 0, overflowX: 'auto' }}>
+                {Object.keys(PAD_LABELS).map((key) => {
+                  const ts = scratchpadTimestamps[key as keyof ScratchpadTimestamps];
+                  const ago = timeAgo(ts);
+                  return (
+                    <button
+                      key={key}
+                      onClick={() => setActivePad(key)}
+                      style={{
+                        flex: 1,
+                        padding: '5px 2px 4px',
+                        background: activePad === key ? 'rgba(255,255,255,0.04)' : 'transparent',
+                        border: 'none',
+                        borderBottom: activePad === key ? `2px solid ${PAD_COLORS[key]}` : '2px solid transparent',
+                        color: activePad === key ? PAD_COLORS[key] : 'var(--text-muted)',
+                        fontSize: '8px',
+                        fontFamily: 'var(--font-mono)',
+                        letterSpacing: '0.04em',
+                        textTransform: 'uppercase',
+                        cursor: 'pointer',
+                        whiteSpace: 'nowrap',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        gap: '1px',
+                      }}
+                    >
+                      {PAD_LABELS[key]}
+                      {ago && (
+                        <span style={{ fontSize: '7px', opacity: 0.5, textTransform: 'none', letterSpacing: '0.02em' }}>
+                          {ago}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Scratchpad content */}
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '8px 10px', fontSize: '11px' }}>
+                {padContent ? (
+                  <SimpleMarkdown text={padContent} />
+                ) : (
+                  <div style={{ color: 'var(--text-muted)', fontSize: '10px', padding: '4px 0', lineHeight: 1.8 }}>
+                    {PAD_EMPTY_HINTS[activePad] || 'No content yet.'}
+                  </div>
+                )}
+              </div>
+            </div>
           )}
-          <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
-            <NLETimeline
-              editDecision={editDecision}
-              playheadTime={playheadTime}
-              selectedClipId={selectedClipId}
-              cropStatuses={cropStatuses}
-              onSeek={handleTimelineSeek}
-              onEditDecisionChange={onEditDecisionChange}
-              onClipSelect={setSelectedClipId}
-            />
+
+          {/* CENTER PANEL: Program Viewer */}
+          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            {selectedClip ? (
+              <TransformPreview
+                clip={selectedClip}
+                projectName={project.project_name}
+                timelineWidth={tlWidth}
+                timelineHeight={tlHeight}
+                cropStatus={cropStatuses[selectedClipId!]}
+              />
+            ) : (
+              <PreviewPanel
+                ref={previewPanelRef}
+                projectName={project.project_name}
+                draftRenderState={draftRenderState}
+                finalRenderState={renderState}
+                editDecision={editDecision}
+                onRequestDraftRender={onRequestDraftRender}
+                onRequestFinalRender={onRequestRender}
+                onTimeUpdate={setPlayheadTime}
+                playheadTime={playheadTime}
+                resolveRunning={resolveRunning}
+              />
+            )}
+            {/* Render buttons — always visible when a clip is selected (PreviewPanel has its own) */}
+            {selectedClip && editDecision && editDecision.clips.length > 0 && (
+              <div style={{
+                display: 'flex',
+                gap: '4px',
+                padding: '4px 8px',
+                borderTop: '1px solid rgba(255,255,255,0.06)',
+                flexShrink: 0,
+                background: 'rgba(255,255,255,0.015)',
+              }}>
+                <button
+                  onClick={onRequestDraftRender}
+                  disabled={draftRenderState.status === 'rendering'}
+                  style={{
+                    flex: 1, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
+                    borderRadius: '3px', color: 'var(--text-secondary)', fontSize: '9px', fontFamily: 'var(--font-mono)',
+                    padding: '4px 8px', letterSpacing: '0.04em', textTransform: 'uppercase' as const,
+                    opacity: draftRenderState.status === 'rendering' ? 0.5 : 1,
+                    cursor: draftRenderState.status === 'rendering' ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {draftRenderState.status === 'rendering' ? 'Rendering...' : 'Render Draft'}
+                </button>
+                <button
+                  onClick={onRequestRender}
+                  disabled={renderState.status === 'rendering' || resolveRunning !== true}
+                  style={{
+                    flex: 1, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
+                    borderRadius: '3px', color: 'var(--text-secondary)', fontSize: '9px', fontFamily: 'var(--font-mono)',
+                    padding: '4px 8px', letterSpacing: '0.04em', textTransform: 'uppercase' as const,
+                    opacity: (renderState.status === 'rendering' || resolveRunning !== true) ? 0.5 : 1,
+                    cursor: (renderState.status === 'rendering' || resolveRunning !== true) ? 'not-allowed' : 'pointer',
+                  }}
+                  title={resolveRunning !== true ? 'Requires DaVinci Resolve' : undefined}
+                >
+                  {renderState.status === 'rendering' ? 'Rendering...' : resolveRunning !== true ? 'Export Final (Resolve)' : 'Export Final'}
+                </button>
+              </div>
+            )}
           </div>
+
+          {/* RIGHT PANEL: Inspector */}
+          {showInspector && !isTablet && (
+            <div style={{
+              width: '30%',
+              minWidth: '200px',
+              maxWidth: '360px',
+              borderLeft: '1px solid var(--border)',
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden',
+            }}>
+              {/* Inspector header */}
+              <div style={{
+                padding: '6px 10px',
+                borderBottom: '1px solid var(--border)',
+                fontSize: '9px',
+                fontFamily: 'var(--font-mono)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.08em',
+                color: 'var(--text-muted)',
+                flexShrink: 0,
+              }}>
+                Inspector
+              </div>
+
+              <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+                {selectedClip ? (
+                  <>
+                    <ClipInspector
+                      clip={selectedClip}
+                      cropStatus={cropStatuses[selectedClipId!]}
+                      timelineWidth={tlWidth}
+                      timelineHeight={tlHeight}
+                      onTransformChange={handleTransformChange}
+                      onResetTransform={handleResetTransform}
+                      onRequestCrop={onRequestCropClip}
+                      onClose={() => setSelectedClipId(null)}
+                    />
+                    {editDecision && editDecision.clips.length > 0 && (
+                      <div style={{ padding: '8px 10px', borderTop: '1px solid var(--border)' }}>
+                        <button
+                          onClick={onRequestRender}
+                          disabled={renderState.status === 'rendering'}
+                          style={{
+                            width: '100%',
+                            padding: '5px 10px',
+                            background: renderState.status === 'rendering' ? 'var(--surface-2)' : 'var(--accent-blue)',
+                            color: '#fff',
+                            border: 'none',
+                            borderRadius: 'var(--radius-md)',
+                            cursor: renderState.status === 'rendering' ? 'not-allowed' : 'pointer',
+                            fontFamily: 'var(--font-mono)',
+                            fontSize: 11,
+                          }}
+                        >
+                          {renderState.status === 'rendering' ? 'Rendering...' : '\u21BB Render Preview'}
+                        </button>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  /* Edit-level settings when no clip selected */
+                  <div style={{ padding: '10px', overflow: 'hidden', minWidth: 0 }}>
+                    <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '12px', fontWeight: 600 }}>
+                      Timeline Settings
+                    </div>
+
+                    {editDecision && editDecision.clips.length > 0 ? (
+                      <>
+                        <TimelineSettingsBar
+                          width={tlWidth}
+                          height={tlHeight}
+                          onChange={handleResolutionChange}
+                          compact
+                        />
+
+                        <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                          <div style={inspectorRowStyle}>
+                            <span style={inspectorLabelStyle}>Clips</span>
+                            <span style={inspectorValueStyle}>{editDecision.clips.length}</span>
+                          </div>
+                          <div style={inspectorRowStyle}>
+                            <span style={inspectorLabelStyle}>FPS</span>
+                            <span style={inspectorValueStyle}>{editDecision.timeline?.fps ?? 24}</span>
+                          </div>
+                          {editDecision.timeline?.name && (
+                            <div style={inspectorRowStyle}>
+                              <span style={inspectorLabelStyle}>Name</span>
+                              <span style={{ ...inspectorValueStyle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {editDecision.timeline.name}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    ) : (
+                      <div style={{ color: 'var(--text-muted)', fontSize: '10px', fontFamily: 'var(--font-mono)', lineHeight: 1.7 }}>
+                        No edit decision yet. Start a conversation with the agent to create one.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* Column divider */}
+        {/* ── Horizontal divider between upper and lower rows ── */}
         {!isTablet && (
           <div
-            onMouseDown={onColDragDown}
-            style={{
-              width: '6px',
-              cursor: 'col-resize',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              flexShrink: 0,
-              background: 'transparent',
-              transition: 'background 0.15s',
-            }}
+            onMouseDown={onRowDrag}
+            style={hDividerStyle}
             onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
+              e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
               const inner = e.currentTarget.firstChild as HTMLElement;
-              if (inner) { inner.style.background = 'rgba(255,255,255,0.2)'; inner.style.height = '40px'; }
+              if (inner) { inner.style.background = 'rgba(255,255,255,0.18)'; inner.style.width = '64px'; }
             }}
             onMouseLeave={(e) => {
               e.currentTarget.style.background = 'transparent';
               const inner = e.currentTarget.firstChild as HTMLElement;
-              if (inner) { inner.style.background = 'rgba(255,255,255,0.08)'; inner.style.height = '28px'; }
+              if (inner) { inner.style.background = 'rgba(255,255,255,0.08)'; inner.style.width = '48px'; }
             }}
           >
-            <div style={{
-              width: '2px',
-              height: '28px',
-              borderRadius: '999px',
-              background: 'rgba(255,255,255,0.08)',
-              transition: 'background 0.15s, height 0.15s',
-            }} />
+            <div style={hDividerInnerStyle} />
           </div>
         )}
 
-        {/* Video preview / Clip inspector */}
-        {!isTablet && (
-          <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-            {selectedClip ? (
-              <>
-                <div style={{ flex: 2, minHeight: 150, overflow: 'hidden' }}>
-                  <TransformPreview
-                    clip={selectedClip}
-                    projectName={project.project_name}
-                    timelineWidth={tlWidth}
-                    timelineHeight={tlHeight}
-                    cropStatus={cropStatuses[selectedClipId!]}
-                  />
-                </div>
-                <div style={{ borderTop: '1px solid var(--border)', overflow: 'auto', flex: 1, minHeight: 0 }}>
-                  <ClipInspector
-                    clip={selectedClip}
-                    cropStatus={cropStatuses[selectedClipId!]}
-                    timelineWidth={tlWidth}
-                    timelineHeight={tlHeight}
-                    onTransformChange={handleTransformChange}
-                    onResetTransform={handleResetTransform}
-                    onRequestCrop={onRequestCropClip}
-                    onClose={() => setSelectedClipId(null)}
-                  />
-                  {editDecision && editDecision.clips.length > 0 && (
-                    <div style={{ padding: '8px 12px', borderTop: '1px solid var(--border)' }}>
-                      <button
-                        onClick={onRequestRender}
-                        disabled={renderState.status === 'rendering'}
-                        style={{
-                          width: '100%',
-                          padding: '6px 12px',
-                          background: renderState.status === 'rendering' ? 'var(--surface-2)' : 'var(--accent-blue)',
-                          color: '#fff',
-                          border: 'none',
-                          borderRadius: 'var(--radius-md)',
-                          cursor: renderState.status === 'rendering' ? 'not-allowed' : 'pointer',
-                          fontFamily: 'var(--font-mono)',
-                          fontSize: 12,
-                        }}
-                      >
-                        {renderState.status === 'rendering' ? 'Rendering...' : '↻ Render Preview'}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </>
-            ) : (
-              <VideoPreview
-                ref={videoPreviewRef}
-                projectName={project.project_name}
-                renderState={renderState}
-                hasEditDecision={editDecision !== null && editDecision.clips.length > 0}
-                onRequestRender={onRequestRender}
-                onTimeUpdate={setPlayheadTime}
-              />
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Divider */}
-      {!isTablet && (
+        {/* ── ROW 3: LOWER — Timeline | Chat ── */}
         <div
-          onMouseDown={onDrag1}
-          style={dividerStyle}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
-            const inner = e.currentTarget.firstChild as HTMLElement;
-            if (inner) { inner.style.background = 'rgba(255,255,255,0.18)'; inner.style.width = '64px'; }
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'transparent';
-            const inner = e.currentTarget.firstChild as HTMLElement;
-            if (inner) { inner.style.background = 'rgba(255,255,255,0.08)'; inner.style.width = '48px'; }
-          }}
-        >
-          <div style={dividerInnerStyle} />
-        </div>
-      )}
-
-      {/* ── Bottom row: chat + scratchpads ── */}
-      <div
-        className="glass-card"
-        style={{
-          margin: isMobile ? '10px 0 0' : '0 16px 16px',
-          flex: 1,
-          minHeight: 0,
-          padding: 0,
-          display: 'grid',
-          gridTemplateColumns: isTablet ? '1fr' : '1fr minmax(300px, 0.5fr)',
-          gridTemplateRows: isTablet ? 'minmax(0, 1fr) minmax(220px, 0.5fr)' : undefined,
-          overflow: 'hidden',
-        }}
-      >
-        {/* Chat panel */}
-        <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, borderRight: isTablet ? 'none' : '1px solid var(--border)', borderBottom: isTablet ? '1px solid var(--border)' : 'none' }}>
-          {/* Messages */}
-          <div style={{
+          ref={lowerRowRef}
+          style={{
             flex: 1,
             minHeight: 0,
-            overflowY: 'auto',
-            padding: '16px',
+            display: 'flex',
+            overflow: 'hidden',
+          }}
+        >
+
+          {/* Timeline area */}
+          <div style={{
+            width: isTablet ? '100%' : `${timelinePct}%`,
+            minWidth: 0,
             display: 'flex',
             flexDirection: 'column',
-            gap: '6px',
+            overflow: 'hidden',
           }}>
-            {timeline.length === 0 && !busy && (
-              <div style={{ color: 'var(--text-muted)', textAlign: 'center', marginTop: '40px', fontSize: '13px', lineHeight: 1.8 }}>
-                Start a conversation to begin editing.<br />
-                The agent has access to your indexed footage.
-              </div>
+            {editDecision && editDecision.clips.length > 0 && !showInspector && (
+              <TimelineSettingsBar
+                width={tlWidth}
+                height={tlHeight}
+                onChange={handleResolutionChange}
+              />
             )}
-
-            {timeline.map((item, i) => {
-              if (item.kind === 'message') {
-                const m = item.message!;
-                const isUser = m.role === 'user';
-                return (
-                    <div
-                      key={i}
-                      className="slide-in"
-                      style={{
-                        alignSelf: isUser ? 'flex-end' : 'flex-start',
-                        maxWidth: isMobile ? '94%' : '85%',
-                        padding: '10px 14px',
-                      borderRadius: isUser ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
-                      background: isUser
-                        ? 'linear-gradient(135deg, rgba(96,213,200,0.18), rgba(241,191,99,0.12))'
-                        : 'rgba(255,255,255,0.04)',
-                      border: `1px solid ${isUser ? 'rgba(96,213,200,0.22)' : 'rgba(255,255,255,0.06)'}`,
-                      color: 'var(--text-primary)',
-                      fontSize: '13px',
-                      lineHeight: 1.7,
-                      wordBreak: 'break-word',
-                    }}
-                  >
-                    {isUser ? m.text : <SimpleMarkdown text={m.text} />}
-                  </div>
-                );
-              }
-
-              if (item.kind === 'tool_call') {
-                const done = item.completed;
-                return (
-                  <div key={i} style={toolCallStyle}>
-                    {done
-                      ? <span style={{ color: 'var(--accent-green)', fontSize: '10px', width: '10px', textAlign: 'center' }}>&#10003;</span>
-                      : <span className="activity-spinner" style={{ color: 'var(--accent-blue)', width: '10px', height: '10px', borderWidth: '1.5px' }} />}
-                    <span style={{ color: done ? 'var(--text-muted)' : undefined }}>
-                      {toolLabel(item.event!.data.tool, item.event!.data.args)}
-                    </span>
-                  </div>
-                );
-              }
-
-              if (item.kind === 'refine_progress') {
-                const done = item.completed;
-                return (
-                  <div key={i} style={{ ...toolCallStyle, paddingLeft: '24px', fontSize: '10px', color: done ? 'var(--text-muted)' : 'var(--accent-yellow)' }}>
-                    {done
-                      ? <span style={{ color: 'var(--accent-green)', fontSize: '8px', width: '8px', textAlign: 'center' }}>&#10003;</span>
-                      : <span className="activity-spinner" style={{ color: 'var(--accent-yellow)', width: '8px', height: '8px', borderWidth: '1.5px' }} />}
-                    <span>{item.event!.data.message || item.event!.data.step}</span>
-                  </div>
-                );
-              }
-
-              if (item.kind === 'scratchpad_update') {
-                const padName = item.event!.data.name || '';
-                return (
-                  <div key={i} style={{ ...toolCallStyle, color: PAD_COLORS[padName] || 'var(--text-muted)' }}>
-                    <span style={{ fontSize: '10px' }}>&#9998;</span>
-                    <span>Updated {PAD_LABELS[padName] || padName} scratchpad</span>
-                  </div>
-                );
-              }
-
-              return null;
-            })}
-
-            {currentActivity && currentActivity.active && (
-              <div className="activity-status slide-in" style={{ alignSelf: 'flex-start', marginTop: '4px' }}>
-                <span className="activity-spinner" />
-                <span style={{ color: 'var(--text-secondary)' }}>{currentActivity.label}</span>
-              </div>
-            )}
-
-            <div ref={messagesEndRef} />
+            <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+              <NLETimeline
+                editDecision={editDecision}
+                playheadTime={playheadTime}
+                selectedClipId={selectedClipId}
+                cropStatuses={cropStatuses}
+                onSeek={handleTimelineSeek}
+                onEditDecisionChange={onEditDecisionChange}
+                onClipSelect={setSelectedClipId}
+              />
+            </div>
           </div>
 
-          {/* Input */}
-          <form onSubmit={handleSubmit} style={{
-            padding: isMobile ? '10px 12px' : '12px 16px',
-            borderTop: '1px solid var(--border)',
-            display: 'flex',
-            flexDirection: isMobile ? 'column' : 'row',
-            gap: '8px',
-            flexShrink: 0,
-          }}>
-            <textarea
-              value={input}
-              onChange={(e) => {
-                setInput(e.target.value);
-                // Auto-grow
-                e.target.style.height = 'auto';
-                e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
-              }}
-              onKeyDown={handleKeyDown}
-              placeholder={busy ? 'Agent is working...' : 'Type a message...'}
-              rows={1}
+          {/* Vertical divider between timeline and chat */}
+          {!isTablet && (
+            <div
+              onMouseDown={onColDragDown}
               style={{
-                flex: 1,
-                background: 'rgba(18,15,14,0.55)',
-                border: '1px solid var(--border)',
-                borderRadius: '10px',
-                color: 'var(--text-primary)',
-                fontSize: '13px',
-                padding: '10px 14px',
-                resize: 'none',
-                lineHeight: 1.5,
-                fontFamily: 'inherit',
-                minHeight: '38px',
-                maxHeight: '120px',
-                overflow: 'auto',
+                width: '6px',
+                cursor: 'col-resize',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                flexShrink: 0,
+                background: 'transparent',
+                transition: 'background 0.15s',
               }}
-            />
-            <button
-              type="submit"
-              disabled={!input.trim() || !connected}
-              style={{
-                ...btnStyle('var(--accent-blue)', !input.trim() || !connected),
-                padding: '10px 16px',
-                alignSelf: isMobile ? 'stretch' : 'flex-end',
-                width: isMobile ? '100%' : undefined,
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
+                const inner = e.currentTarget.firstChild as HTMLElement;
+                if (inner) { inner.style.background = 'rgba(255,255,255,0.2)'; inner.style.height = '40px'; }
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = 'transparent';
+                const inner = e.currentTarget.firstChild as HTMLElement;
+                if (inner) { inner.style.background = 'rgba(255,255,255,0.08)'; inner.style.height = '28px'; }
               }}
             >
-              Send
-            </button>
-          </form>
-        </div>
+              <div style={{
+                width: '2px', height: '28px', borderRadius: '999px',
+                background: 'rgba(255,255,255,0.08)', transition: 'background 0.15s, height 0.15s',
+              }} />
+            </div>
+          )}
 
-        {/* Scratchpad panel */}
-        <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, background: 'rgba(0,0,0,0.12)', maxHeight: isTablet ? '40vh' : undefined }}>
-          {/* Tabs */}
-          <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', flexShrink: 0, overflowX: 'auto' }}>
-            {Object.keys(PAD_LABELS).map((key) => {
-              const ts = scratchpadTimestamps[key as keyof ScratchpadTimestamps];
-              const ago = timeAgo(ts);
-              return (
-                <button
-                  key={key}
-                  onClick={() => setActivePad(key)}
+          {/* Chat area */}
+          {!isTablet && (
+            <div style={{
+              flex: 1,
+              minWidth: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              borderLeft: '1px solid var(--border)',
+              overflow: 'hidden',
+            }}>
+              {/* Reconnection banner */}
+              {!connected && (
+                <div className="reconnect-banner">
+                  <span className="activity-spinner" style={{ width: '10px', height: '10px', borderWidth: '1.5px' }} />
+                  Reconnecting...
+                </div>
+              )}
+
+              {/* Messages */}
+              <div style={{
+                flex: 1,
+                minHeight: 0,
+                overflowY: 'auto',
+                padding: '12px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '6px',
+              }}>
+                {timeline.length === 0 && !busy && (
+                  <div style={{ color: 'var(--text-muted)', textAlign: 'center', marginTop: '40px', fontSize: '12px', lineHeight: 1.8 }}>
+                    Start a conversation to begin editing.<br />
+                    The agent has access to your indexed footage.
+                  </div>
+                )}
+
+                {timeline.map((item, i) => {
+                  if (item.kind === 'message') {
+                    const m = item.message!;
+                    const isUser = m.role === 'user';
+                    return (
+                      <div
+                        key={i}
+                        className="slide-in"
+                        style={{
+                          alignSelf: isUser ? 'flex-end' : 'flex-start',
+                          maxWidth: '90%',
+                          padding: '8px 12px',
+                          borderRadius: isUser ? '12px 12px 4px 12px' : '12px 12px 12px 4px',
+                          background: isUser
+                            ? 'linear-gradient(135deg, rgba(96,213,200,0.18), rgba(241,191,99,0.12))'
+                            : 'rgba(255,255,255,0.04)',
+                          border: `1px solid ${isUser ? 'rgba(96,213,200,0.22)' : 'rgba(255,255,255,0.06)'}`,
+                          color: 'var(--text-primary)',
+                          fontSize: '12px',
+                          lineHeight: 1.7,
+                          wordBreak: 'break-word',
+                        }}
+                      >
+                        {isUser ? m.text : <SimpleMarkdown text={m.text} />}
+                        {m.timestamp && (
+                          <div style={{ textAlign: 'right', marginTop: '3px', fontSize: '8px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', opacity: 0.7, letterSpacing: '0.02em' }}>
+                            {formatTime(m.timestamp)}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+
+                  if (item.kind === 'tool_call') {
+                    const done = item.completed;
+                    const ts = formatTime(item.event!.data.timestamp);
+                    return (
+                      <div key={i} style={toolCallStyle}>
+                        {done
+                          ? <span style={{ color: 'var(--accent-green)', fontSize: '10px', width: '10px', textAlign: 'center' }}>&#10003;</span>
+                          : <span className="activity-spinner" style={{ color: 'var(--accent-blue)', width: '10px', height: '10px', borderWidth: '1.5px' }} />}
+                        <span style={{ color: done ? 'var(--text-muted)' : undefined, flex: 1 }}>
+                          {toolLabel(item.event!.data.tool, item.event!.data.args)}
+                        </span>
+                        {ts && <span style={{ fontSize: '9px', color: 'var(--text-muted)', opacity: 0.5, flexShrink: 0 }}>{ts}</span>}
+                      </div>
+                    );
+                  }
+
+                  if (item.kind === 'refine_progress') {
+                    const done = item.completed;
+                    return (
+                      <div key={i} style={{ ...toolCallStyle, paddingLeft: '24px', fontSize: '10px', color: done ? 'var(--text-muted)' : 'var(--accent-yellow)' }}>
+                        {done
+                          ? <span style={{ color: 'var(--accent-green)', fontSize: '8px', width: '8px', textAlign: 'center' }}>&#10003;</span>
+                          : <span className="activity-spinner" style={{ color: 'var(--accent-yellow)', width: '8px', height: '8px', borderWidth: '1.5px' }} />}
+                        <span>{item.event!.data.message || item.event!.data.step}</span>
+                      </div>
+                    );
+                  }
+
+                  if (item.kind === 'scratchpad_update') {
+                    const padName = item.event!.data.name || '';
+                    return (
+                      <div key={i} style={{ ...toolCallStyle, color: PAD_COLORS[padName] || 'var(--text-muted)' }}>
+                        <span style={{ fontSize: '10px' }}>&#9998;</span>
+                        <span>Updated {PAD_LABELS[padName] || padName} scratchpad</span>
+                      </div>
+                    );
+                  }
+
+                  return null;
+                })}
+
+                {currentActivity && currentActivity.active && (
+                  <div className="activity-status slide-in" style={{ alignSelf: 'flex-start', marginTop: '4px' }}>
+                    <span className="activity-spinner" />
+                    <span style={{ color: 'var(--text-secondary)' }}>{currentActivity.label}</span>
+                  </div>
+                )}
+
+                <div ref={messagesEndRef} />
+              </div>
+
+              {/* Input */}
+              <form onSubmit={handleSubmit} style={{
+                padding: '8px 12px',
+                borderTop: '1px solid var(--border)',
+                display: 'flex',
+                gap: '6px',
+                flexShrink: 0,
+              }}>
+                <textarea
+                  value={input}
+                  onChange={(e) => {
+                    setInput(e.target.value);
+                    e.target.style.height = 'auto';
+                    e.target.style.height = Math.min(e.target.scrollHeight, 100) + 'px';
+                  }}
+                  onKeyDown={handleKeyDown}
+                  placeholder={busy ? 'Agent is working...' : 'Type a message...'}
+                  rows={1}
                   style={{
-                    flex: isTablet ? '0 0 auto' : 1,
-                    padding: '8px 4px 6px',
-                    background: activePad === key ? 'rgba(255,255,255,0.04)' : 'transparent',
-                    border: 'none',
-                    borderBottom: activePad === key ? `2px solid ${PAD_COLORS[key]}` : '2px solid transparent',
-                    color: activePad === key ? PAD_COLORS[key] : 'var(--text-muted)',
-                    fontSize: '9px',
-                    fontFamily: 'var(--font-mono)',
-                    letterSpacing: '0.06em',
-                    textTransform: 'uppercase',
-                    cursor: 'pointer',
-                    whiteSpace: 'nowrap',
-                    minWidth: isTablet ? '120px' : undefined,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    gap: '2px',
+                    flex: 1,
+                    background: 'rgba(18,15,14,0.55)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '8px',
+                    color: 'var(--text-primary)',
+                    fontSize: '12px',
+                    padding: '8px 10px',
+                    resize: 'none',
+                    lineHeight: 1.5,
+                    fontFamily: 'inherit',
+                    minHeight: '34px',
+                    maxHeight: '100px',
+                    overflow: 'auto',
+                  }}
+                />
+                <button
+                  type="submit"
+                  disabled={!input.trim() || !connected}
+                  style={{
+                    ...btnStyle('var(--accent-blue)', !input.trim() || !connected),
+                    padding: '8px 14px',
+                    alignSelf: 'flex-end',
                   }}
                 >
-                  {PAD_LABELS[key]}
-                  {ago && (
-                    <span style={{
-                      fontSize: '7px',
-                      opacity: 0.5,
-                      textTransform: 'none',
-                      letterSpacing: '0.02em',
-                    }}>
-                      {ago}
-                    </span>
-                  )}
+                  Send
                 </button>
-              );
-            })}
-          </div>
-
-          {/* Content */}
-          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px' }}>
-            {padContent ? (
-              <SimpleMarkdown text={padContent} />
-            ) : (
-              <div style={{ color: 'var(--text-muted)', fontSize: '11px', padding: '8px 0', lineHeight: 1.8 }}>
-                {PAD_EMPTY_HINTS[activePad] || 'No content yet.'}
-              </div>
-            )}
-          </div>
+              </form>
+            </div>
+          )}
         </div>
       </div>
+
+      {/* ── Tablet/mobile fallback: show chat + scratchpads below ── */}
+      {isTablet && (
+        <div
+          className="glass-card"
+          style={{
+            margin: '0',
+            borderRadius: '0',
+            flex: 1,
+            minHeight: 0,
+            padding: 0,
+            display: 'grid',
+            gridTemplateColumns: '1fr',
+            gridTemplateRows: 'minmax(0, 1fr) minmax(180px, 0.4fr)',
+            overflow: 'hidden',
+          }}
+        >
+          {/* Chat panel */}
+          <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, borderBottom: '1px solid var(--border)' }}>
+            {!connected && (
+              <div className="reconnect-banner">
+                <span className="activity-spinner" style={{ width: '10px', height: '10px', borderWidth: '1.5px' }} />
+                Reconnecting...
+              </div>
+            )}
+            <div style={{
+              flex: 1, minHeight: 0, overflowY: 'auto', padding: '12px',
+              display: 'flex', flexDirection: 'column', gap: '6px',
+            }}>
+              {timeline.length === 0 && !busy && (
+                <div style={{ color: 'var(--text-muted)', textAlign: 'center', marginTop: '40px', fontSize: '12px', lineHeight: 1.8 }}>
+                  Start a conversation to begin editing.
+                </div>
+              )}
+              {timeline.map((item, i) => {
+                if (item.kind === 'message') {
+                  const m = item.message!;
+                  const isUser = m.role === 'user';
+                  return (
+                    <div key={i} className="slide-in" style={{
+                      alignSelf: isUser ? 'flex-end' : 'flex-start',
+                      maxWidth: '94%', padding: '8px 12px',
+                      borderRadius: isUser ? '12px 12px 4px 12px' : '12px 12px 12px 4px',
+                      background: isUser ? 'linear-gradient(135deg, rgba(96,213,200,0.18), rgba(241,191,99,0.12))' : 'rgba(255,255,255,0.04)',
+                      border: `1px solid ${isUser ? 'rgba(96,213,200,0.22)' : 'rgba(255,255,255,0.06)'}`,
+                      color: 'var(--text-primary)', fontSize: '12px', lineHeight: 1.7, wordBreak: 'break-word',
+                    }}>
+                      {isUser ? m.text : <SimpleMarkdown text={m.text} />}
+                    </div>
+                  );
+                }
+                if (item.kind === 'tool_call') {
+                  const done = item.completed;
+                  return (
+                    <div key={i} style={toolCallStyle}>
+                      {done ? <span style={{ color: 'var(--accent-green)', fontSize: '10px' }}>&#10003;</span>
+                        : <span className="activity-spinner" style={{ width: '10px', height: '10px', borderWidth: '1.5px' }} />}
+                      <span style={{ color: done ? 'var(--text-muted)' : undefined, flex: 1 }}>{toolLabel(item.event!.data.tool, item.event!.data.args)}</span>
+                    </div>
+                  );
+                }
+                return null;
+              })}
+              {currentActivity && currentActivity.active && (
+                <div className="activity-status slide-in" style={{ alignSelf: 'flex-start', marginTop: '4px' }}>
+                  <span className="activity-spinner" />
+                  <span style={{ color: 'var(--text-secondary)' }}>{currentActivity.label}</span>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+            <form onSubmit={handleSubmit} style={{
+              padding: '8px 12px', borderTop: '1px solid var(--border)',
+              display: 'flex', gap: '6px', flexShrink: 0,
+            }}>
+              <textarea
+                value={input}
+                onChange={(e) => { setInput(e.target.value); e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 100) + 'px'; }}
+                onKeyDown={handleKeyDown}
+                placeholder={busy ? 'Agent is working...' : 'Type a message...'}
+                rows={1}
+                style={{
+                  flex: 1, background: 'rgba(18,15,14,0.55)', border: '1px solid var(--border)',
+                  borderRadius: '8px', color: 'var(--text-primary)', fontSize: '12px',
+                  padding: '8px 10px', resize: 'none', lineHeight: 1.5, fontFamily: 'inherit',
+                  minHeight: '34px', maxHeight: '100px', overflow: 'auto',
+                }}
+              />
+              <button type="submit" disabled={!input.trim() || !connected} style={{ ...btnStyle('var(--accent-blue)', !input.trim() || !connected), padding: '8px 14px', alignSelf: 'flex-end' }}>Send</button>
+            </form>
+          </div>
+
+          {/* Scratchpad panel for tablet */}
+          <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, background: 'rgba(0,0,0,0.12)' }}>
+            <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', flexShrink: 0, overflowX: 'auto' }}>
+              {Object.keys(PAD_LABELS).map((key) => (
+                <button key={key} onClick={() => setActivePad(key)} style={{
+                  flex: '0 0 auto', padding: '6px 8px 4px', background: activePad === key ? 'rgba(255,255,255,0.04)' : 'transparent',
+                  border: 'none', borderBottom: activePad === key ? `2px solid ${PAD_COLORS[key]}` : '2px solid transparent',
+                  color: activePad === key ? PAD_COLORS[key] : 'var(--text-muted)', fontSize: '9px',
+                  fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase', cursor: 'pointer', whiteSpace: 'nowrap',
+                }}>{PAD_LABELS[key]}</button>
+              ))}
+            </div>
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '10px' }}>
+              {padContent ? <SimpleMarkdown text={padContent} /> : (
+                <div style={{ color: 'var(--text-muted)', fontSize: '10px', padding: '4px 0', lineHeight: 1.8 }}>
+                  {PAD_EMPTY_HINTS[activePad] || 'No content yet.'}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1099,7 +1324,7 @@ type TimelineItem = {
   kind: 'message' | 'tool_call' | 'tool_result' | 'refine_progress' | 'scratchpad_update';
   message?: ChatMessage;
   event?: AgentEvent;
-  completed?: boolean;  // for tool_call: has a matching tool_result
+  completed?: boolean;
 };
 
 function toolLabel(toolName: string, args?: Record<string, any>): string {
@@ -1123,7 +1348,7 @@ function toolLabel(toolName: string, args?: Record<string, any>): string {
       const start = args?.source_start != null ? Number(args.source_start).toFixed(1) : '?';
       const end = args?.source_end != null ? Number(args.source_end).toFixed(1) : '?';
       const target = args?.target_duration != null ? Number(args.target_duration).toFixed(0) : '?';
-      return `Refining ${truncate(file, 24)} [${start}s–${end}s] → ${target}s`;
+      return `Refining ${truncate(file, 24)} [${start}s\u2013${end}s] \u2192 ${target}s`;
     }
     case 'generate_narration':
       return `Generating voiceover (${(args?.script || '').split(/\s+/).length} words)`;
@@ -1140,9 +1365,10 @@ function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + '...' : s;
 }
 
-const dividerStyle: React.CSSProperties = {
-  height: '8px',
-  margin: '0 16px',
+// ── Styles ──
+
+const hDividerStyle: React.CSSProperties = {
+  height: '6px',
   cursor: 'row-resize',
   display: 'flex',
   alignItems: 'center',
@@ -1153,7 +1379,7 @@ const dividerStyle: React.CSSProperties = {
   transition: 'background 0.15s',
 };
 
-const dividerInnerStyle: React.CSSProperties = {
+const hDividerInnerStyle: React.CSSProperties = {
   width: '48px',
   height: '3px',
   borderRadius: '999px',
@@ -1170,6 +1396,54 @@ const toolCallStyle: React.CSSProperties = {
   fontFamily: 'var(--font-mono)',
   color: 'var(--text-muted)',
   letterSpacing: '0.02em',
+};
+
+const toolbarBtnStyle: React.CSSProperties = {
+  background: 'transparent',
+  border: 'none',
+  color: 'var(--text-secondary)',
+  fontSize: '10px',
+  fontFamily: 'var(--font-mono)',
+  fontWeight: 600,
+  letterSpacing: '0.06em',
+  textTransform: 'uppercase',
+  cursor: 'pointer',
+  padding: '4px 8px',
+  borderRadius: '4px',
+};
+
+const toolbarToggleBtnStyle: React.CSSProperties = {
+  border: '1px solid rgba(255,255,255,0.08)',
+  fontSize: '9px',
+  fontFamily: 'var(--font-mono)',
+  fontWeight: 600,
+  letterSpacing: '0.06em',
+  textTransform: 'uppercase',
+  cursor: 'pointer',
+  padding: '3px 8px',
+  borderRadius: '4px',
+  transition: 'background 0.15s, color 0.15s',
+};
+
+const inspectorRowStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '8px',
+};
+
+const inspectorLabelStyle: React.CSSProperties = {
+  fontSize: '10px',
+  color: 'var(--text-muted)',
+  fontFamily: 'var(--font-mono)',
+  textTransform: 'uppercase',
+  letterSpacing: '0.06em',
+};
+
+const inspectorValueStyle: React.CSSProperties = {
+  fontSize: '11px',
+  color: 'var(--text-primary)',
+  fontFamily: 'var(--font-mono)',
 };
 
 function DropdownBtn({ color, disabled = false, children, onClick }: { color: string; disabled?: boolean; children: React.ReactNode; onClick?: () => void }) {

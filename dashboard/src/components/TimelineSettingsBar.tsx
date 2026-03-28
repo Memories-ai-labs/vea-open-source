@@ -6,6 +6,7 @@ interface TimelineSettingsBarProps {
   width: number;
   height: number;
   onChange: (width: number, height: number) => void;
+  compact?: boolean;
 }
 
 interface Preset {
@@ -51,6 +52,7 @@ const TimelineSettingsBar: React.FC<TimelineSettingsBarProps> = ({
   width,
   height,
   onChange,
+  compact = false,
 }) => {
   const [localW, setLocalW] = useState(String(width));
   const [localH, setLocalH] = useState(String(height));
@@ -108,12 +110,13 @@ const TimelineSettingsBar: React.FC<TimelineSettingsBarProps> = ({
     display: 'flex',
     alignItems: 'center',
     gap: 8,
-    height: 32,
-    padding: '0 10px',
+    minHeight: 32,
+    padding: '4px 10px',
     background: 'var(--bg-surface, #1a1a1a)',
     borderBottom: '1px solid var(--border)',
     userSelect: 'none',
     fontSize: 12,
+    flexWrap: 'wrap',
   };
 
   const eyebrow: React.CSSProperties = {
@@ -138,6 +141,8 @@ const TimelineSettingsBar: React.FC<TimelineSettingsBarProps> = ({
     outline: 'none',
     cursor: 'pointer',
     appearance: 'auto' as React.CSSProperties['appearance'],
+    minWidth: 0,
+    flex: '0 1 auto',
   };
 
   const swapBtn: React.CSSProperties = {
@@ -158,7 +163,9 @@ const TimelineSettingsBar: React.FC<TimelineSettingsBarProps> = ({
   };
 
   const numInput: React.CSSProperties = {
-    width: 56,
+    width: 48,
+    minWidth: 36,
+    flex: '0 1 48px',
     height: 22,
     fontSize: 11,
     fontFamily: 'var(--font-mono)',
@@ -166,7 +173,7 @@ const TimelineSettingsBar: React.FC<TimelineSettingsBarProps> = ({
     background: 'transparent',
     border: '1px solid var(--border)',
     borderRadius: 'var(--radius-md)',
-    padding: '0 5px',
+    padding: '0 3px',
     outline: 'none',
     textAlign: 'center',
   };
@@ -209,35 +216,39 @@ const TimelineSettingsBar: React.FC<TimelineSettingsBarProps> = ({
         <option value="Custom">Custom</option>
       </select>
 
-      <button
-        style={swapBtn}
-        title="Swap width and height"
-        onClick={handleSwap}
-      >
-        &#x21C4;
-      </button>
+      {!compact && (
+        <>
+          <button
+            style={swapBtn}
+            title="Swap width and height"
+            onClick={handleSwap}
+          >
+            &#x21C4;
+          </button>
 
-      <input
-        style={numInput}
-        type="number"
-        min={1}
-        value={localW}
-        onChange={(e) => setLocalW(e.target.value)}
-        onBlur={commitCustom}
-        onKeyDown={handleKeyDown}
-        aria-label="Width"
-      />
-      <span style={sep}>&times;</span>
-      <input
-        style={numInput}
-        type="number"
-        min={1}
-        value={localH}
-        onChange={(e) => setLocalH(e.target.value)}
-        onBlur={commitCustom}
-        onKeyDown={handleKeyDown}
-        aria-label="Height"
-      />
+          <input
+            style={numInput}
+            type="number"
+            min={1}
+            value={localW}
+            onChange={(e) => setLocalW(e.target.value)}
+            onBlur={commitCustom}
+            onKeyDown={handleKeyDown}
+            aria-label="Width"
+          />
+          <span style={sep}>&times;</span>
+          <input
+            style={numInput}
+            type="number"
+            min={1}
+            value={localH}
+            onChange={(e) => setLocalH(e.target.value)}
+            onBlur={commitCustom}
+            onKeyDown={handleKeyDown}
+            aria-label="Height"
+          />
+        </>
+      )}
 
       <span style={badge}>{ratio}</span>
     </div>

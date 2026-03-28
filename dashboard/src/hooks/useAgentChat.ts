@@ -105,12 +105,15 @@ interface UseAgentChatResult {
   scratchpadTimestamps: ScratchpadTimestamps;
   editDecision: EditDecision | null;
   renderState: RenderState;
+  draftRenderState: RenderState;
   cropStatuses: Record<string, CropStatus>;
   footageFiles: string[];
   indexedFiles: string[];
   connected: boolean;
   busy: boolean;
   send: (text: string) => void;
+  requestRender: () => void;
+  requestDraftRender: () => void;
   clearAndReconnect: () => void;
   updateEditDecision: (updated: EditDecision) => void;
   requestCropClip: (clipId: string) => void;
@@ -133,6 +136,9 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
   });
   const [editDecision, setEditDecision] = useState<EditDecision | null>(null);
   const [renderState, setRenderState] = useState<RenderState>({
+    status: 'idle', progress: 0, filename: null, error: null,
+  });
+  const [draftRenderState, setDraftRenderState] = useState<RenderState>({
     status: 'idle', progress: 0, filename: null, error: null,
   });
   const [cropStatuses, setCropStatuses] = useState<Record<string, CropStatus>>({});
@@ -197,6 +203,15 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
                 error: rs.error || null,
               });
             }
+            if (event.data.draft_render_state) {
+              const drs = event.data.draft_render_state;
+              setDraftRenderState({
+                status: drs.status || 'idle',
+                progress: drs.progress ?? (drs.status === 'complete' ? 100 : 0),
+                filename: drs.filename || null,
+                error: drs.error || null,
+              });
+            }
             // Replay persisted events (tool calls, results, scratchpad updates)
             if (event.data.event_log && Array.isArray(event.data.event_log)) {
               const replayed: AgentEvent[] = (event.data.event_log as Array<{ type: string; data: Record<string, any> }>).map((e) => ({
@@ -246,30 +261,38 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
             }
             break;
 
-          case 'render_start':
-            setRenderState({ status: 'rendering', progress: 0, filename: null, error: null });
+          case 'render_start': {
+            const setter = event.data.renderer === 'ffmpeg' ? setDraftRenderState : setRenderState;
+            setter({ status: 'rendering', progress: 0, filename: null, error: null });
             break;
+          }
 
-          case 'render_progress':
-            setRenderState(prev => ({ ...prev, progress: event.data.percent || 0 }));
+          case 'render_progress': {
+            const setter = event.data.renderer === 'ffmpeg' ? setDraftRenderState : setRenderState;
+            setter(prev => ({ ...prev, progress: event.data.percent || 0 }));
             break;
+          }
 
-          case 'render_complete':
-            setRenderState({
+          case 'render_complete': {
+            const setter = event.data.renderer === 'ffmpeg' ? setDraftRenderState : setRenderState;
+            setter({
               status: 'complete',
               progress: 100,
               filename: event.data.filename || null,
               error: null,
             });
             break;
+          }
 
-          case 'render_error':
-            setRenderState(prev => ({
+          case 'render_error': {
+            const setter = event.data.renderer === 'ffmpeg' ? setDraftRenderState : setRenderState;
+            setter(prev => ({
               ...prev,
               status: 'error',
               error: event.data.error || 'Render failed',
             }));
             break;
+          }
 
           case 'crop_progress':
             setCropStatuses(prev => ({
@@ -349,6 +372,7 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
       setScratchpadTimestamps({ comprehension: null, creative_direction: null, planning: null, fcpxml: null });
       setEditDecision(null);
       setRenderState({ status: 'idle', progress: 0, filename: null, error: null });
+      setDraftRenderState({ status: 'idle', progress: 0, filename: null, error: null });
       setConnected(false);
       setBusy(false);
       return;
@@ -407,6 +431,13 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     }
   }, []);
 
+  const requestDraftRender = useCallback(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      setDraftRenderState({ status: 'rendering', progress: 0, filename: null, error: null });
+      wsRef.current.send(JSON.stringify({ type: 'render_draft' }));
+    }
+  }, []);
+
   const updateEditDecision = useCallback((updated: EditDecision) => {
     setEditDecision(updated);
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -432,6 +463,7 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     setScratchpadTimestamps({ comprehension: null, creative_direction: null, planning: null, fcpxml: null });
     setEditDecision(null);
     setRenderState({ status: 'idle', progress: 0, filename: null, error: null });
+    setDraftRenderState({ status: 'idle', progress: 0, filename: null, error: null });
     setCropStatuses({});
     setBusy(false);
     // Close and reconnect WebSocket so backend sends fresh init
@@ -450,5 +482,5 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     setTimeout(() => { if (mountedRef.current) connect(); }, 300);
   }, [connect]);
 
-  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, cropStatuses, footageFiles, indexedFiles, connected, busy, send, requestRender, clearAndReconnect, updateEditDecision, requestCropClip };
+  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, footageFiles, indexedFiles, connected, busy, send, requestRender, requestDraftRender, clearAndReconnect, updateEditDecision, requestCropClip };
 }

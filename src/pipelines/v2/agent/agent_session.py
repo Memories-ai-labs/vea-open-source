@@ -87,6 +87,7 @@ class AgentSession:
 
         # Render state — persists across WebSocket reconnects
         self._render_state: Dict = {"status": "idle"}
+        self._draft_render_state: Dict = {"status": "idle"}
 
         # Scratchpads
         self.scratchpads = ScratchpadManager(workspace.root)
@@ -365,8 +366,85 @@ class AgentSession:
 
     # ── Auto-render ─────────────────────────────────────────────────────
 
+    async def _render_ffmpeg_draft(self) -> None:
+        """Render a draft 480p preview via FFmpeg."""
+        try:
+            import json as _json
+            from src.pipelines.v2.schemas import EditDecision
+            from src.pipelines.v2.preview.ffmpeg_renderer import render_ffmpeg_preview
+
+            ed_path = self.workspace.root / "fcpxml" / "edit_decision.json"
+            if not ed_path.exists():
+                ed_path = self.workspace.root / "edit_decision.json"
+            if not ed_path.exists():
+                logger.warning("[AGENT] No edit_decision.json for FFmpeg draft render")
+                return
+
+            with open(ed_path) as f:
+                ed_data = _json.load(f)
+            edit = EditDecision.model_validate(ed_data)
+
+            footage_dir = self.workspace.get_footage_dir()
+            output_path = self.workspace.get_render_path("draft")
+
+            self._draft_render_state = {"status": "rendering", "progress": 0}
+            try:
+                await self._emit("render_start", {
+                    "renderer": "ffmpeg",
+                    "quality": "draft",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass  # client may be disconnected
+
+            async def progress_cb(pct: float):
+                self._draft_render_state["progress"] = pct
+                try:
+                    await self._emit("render_progress", {
+                        "renderer": "ffmpeg",
+                        "percent": pct,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+                except Exception:
+                    pass  # client may be disconnected
+
+            rendered = await render_ffmpeg_preview(
+                edit=edit,
+                footage_dir=footage_dir,
+                output_path=output_path,
+                resolution=480,
+                progress_callback=progress_cb,
+            )
+
+            self._draft_render_state = {"status": "complete", "filename": Path(rendered).name}
+            try:
+                await self._emit("render_complete", {
+                    "renderer": "ffmpeg",
+                    "filename": Path(rendered).name,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass  # client may be disconnected
+            logger.info(f"[AGENT] FFmpeg draft render complete: {rendered}")
+
+        except Exception as e:
+            logger.warning(f"[AGENT] FFmpeg draft render failed (non-fatal): {e}")
+            self._draft_render_state = {"status": "error", "error": str(e)}
+            try:
+                await self._emit("render_error", {
+                    "renderer": "ffmpeg",
+                    "error": str(e),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass  # client may be disconnected
+
     async def _auto_render_preview(self, fcpxml_result: Dict) -> None:
         """Kick off a Resolve preview render in the background after FCPXML generation."""
+        # Start FFmpeg draft render first (fast, no Resolve dependency)
+        asyncio.create_task(self._render_ffmpeg_draft())
+
+        # Then attempt Resolve render
         try:
             from lib.utils.resolve_render import ResolveRenderer
 
@@ -380,6 +458,7 @@ class AgentSession:
             self._render_state = {"status": "rendering", "progress": 0}
             try:
                 await self._emit("render_start", {
+                    "renderer": "resolve",
                     "quality": "preview",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
@@ -390,6 +469,7 @@ class AgentSession:
                 self._render_state["progress"] = pct
                 try:
                     await self._emit("render_progress", {
+                        "renderer": "resolve",
                         "percent": pct,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     })
@@ -408,6 +488,7 @@ class AgentSession:
             self._render_state = {"status": "complete", "filename": Path(rendered).name}
             try:
                 await self._emit("render_complete", {
+                    "renderer": "resolve",
                     "output_path": rendered,
                     "filename": Path(rendered).name,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -421,6 +502,7 @@ class AgentSession:
             self._render_state = {"status": "error", "error": str(e)}
             try:
                 await self._emit("render_error", {
+                    "renderer": "resolve",
                     "error": str(e),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })

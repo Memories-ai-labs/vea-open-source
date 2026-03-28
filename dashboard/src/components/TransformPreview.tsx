@@ -77,10 +77,12 @@ export default function TransformPreview({
     frameH = frameW / tlAspect;
   }
 
-  // The video fills the frame — at scale=1 the source matches the frame dimensions
-  // For "fit" mode (no transform), the video is scaled to fit the timeline width
-  const videoDisplayW = frameW * (srcW / timelineWidth) * fitScale;
-  const videoDisplayH = frameH * (srcH / timelineHeight) * fitScale;
+  // How many pixels represent one timeline pixel in the preview
+  const previewScale = frameW / timelineWidth;
+
+  // The video display size: source pixels * fitScale * previewScale
+  const videoDisplayW = srcW * fitScale * previewScale;
+  const videoDisplayH = srcH * fitScale * previewScale;
 
   // Position offset from transform (FCPXML units → pixels)
   const pxPerUnit = frameW / (timelineWidth / 19.2);

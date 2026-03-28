@@ -1,7 +1,8 @@
-import { useEffect, useCallback, useMemo, useState } from 'react';
+import { useEffect, useCallback, useMemo, useState, useRef } from 'react';
 import type { ProjectSummary } from '../types';
 import { listProjects, createProject } from '../api';
 import { useBreakpoint } from '../hooks/useBreakpoint';
+import { useToast } from './Toast';
 
 function statusColor(status: string): string {
   switch (status) {
@@ -12,6 +13,26 @@ function statusColor(status: string): string {
     case 'error': return 'var(--accent-red)';
     default: return 'var(--text-muted)';
   }
+}
+
+function humanizeStatus(status: string): string {
+  const map: Record<string, string> = {
+    new: 'New',
+    ready: 'Ready',
+    planning: 'Planning',
+    plan_ready: 'Plan Ready',
+    indexed: 'Indexed',
+    rendered: 'Rendered',
+    done: 'Done',
+    error: 'Error',
+  };
+  return map[status] || status.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function cleanFileName(name: string): string {
+  let cleaned = name;
+  if (cleaned.startsWith('user_media_')) cleaned = cleaned.slice('user_media_'.length);
+  return cleaned.replace(/_/g, ' ');
 }
 
 function relativeTime(iso: string | null): string {
@@ -92,7 +113,7 @@ function ProjectCard({ project, onSelect }: ProjectCardProps) {
             textTransform: 'uppercase',
           }}
         >
-          {project.status}
+          {humanizeStatus(project.status)}
         </span>
       </div>
 
@@ -122,7 +143,7 @@ function ProjectCard({ project, onSelect }: ProjectCardProps) {
             lineHeight: 1.6,
           }}
         >
-          {project.footage_files.slice(0, 2).join(' · ')}
+          {project.footage_files.slice(0, 2).map(cleanFileName).join(' \u00B7 ')}
           {project.footage_files.length > 2 && ` +${project.footage_files.length - 2} more`}
         </div>
       )}
@@ -160,6 +181,7 @@ function CreateForm({ onCreated, disabled }: CreateFormProps) {
   const [name, setName] = useState('');
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
+  const { toast } = useToast();
 
   async function handleCreate() {
     const trimmed = name.trim();
@@ -168,10 +190,13 @@ function CreateForm({ onCreated, disabled }: CreateFormProps) {
     setErr('');
     try {
       await createProject(trimmed);
+      toast(`Project "${trimmed}" created`, 'success');
       onCreated(trimmed);
       setName('');
     } catch (e: any) {
-      setErr(e.message ?? String(e));
+      const msg = e.message ?? String(e);
+      setErr(msg);
+      toast(`Failed to create project: ${msg}`, 'error');
     } finally {
       setLoading(false);
     }
@@ -237,17 +262,41 @@ export function ProjectBrowser({ onSelectProject }: ProjectBrowserProps) {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
+  const [loadTimeout, setLoadTimeout] = useState(false);
   const isTablet = useBreakpoint(1100);
   const isMobile = useBreakpoint(720);
+  const loadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setErr('');
+  const refresh = useCallback(async (isPolling = false) => {
+    if (!isPolling) {
+      setLoading(true);
+      setErr('');
+      setLoadTimeout(false);
+      if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
+      loadTimerRef.current = setTimeout(() => setLoadTimeout(true), 8000);
+    }
     try {
-      const { projects: ps } = await listProjects();
-      setProjects(ps);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(`/video-edit/v2/projects`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+      const data = await res.json();
+      if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
+      setLoadTimeout(false);
+      setProjects(data.projects);
+      setErr('');
     } catch (e: any) {
-      setErr(e.message ?? String(e));
+      if (e.name === 'AbortError') {
+        if (!isPolling) {
+          setLoadTimeout(true);
+          setErr('Backend not responding — is the server running?');
+        }
+      } else {
+        if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
+        setLoadTimeout(false);
+        setErr(e.message ?? String(e));
+      }
     } finally {
       setLoading(false);
     }
@@ -255,10 +304,11 @@ export function ProjectBrowser({ onSelectProject }: ProjectBrowserProps) {
 
   useEffect(() => {
     refresh();
+    return () => { if (loadTimerRef.current) clearTimeout(loadTimerRef.current); };
   }, [refresh]);
 
   useEffect(() => {
-    const id = setInterval(refresh, 5000);
+    const id = setInterval(() => refresh(true), 5000);
     return () => clearInterval(id);
   }, [refresh]);
 
@@ -375,8 +425,33 @@ export function ProjectBrowser({ onSelectProject }: ProjectBrowserProps) {
 
         {err && <div className="status-message error">{err}</div>}
 
-        {loading && projects.length === 0 && (
+        {loading && projects.length === 0 && !loadTimeout && (
           <div className="status-message info">Loading workspaces...</div>
+        )}
+
+        {loadTimeout && projects.length === 0 && (
+          <div className="status-message error" style={{ display: 'flex', alignItems: 'center', gap: '12px', justifyContent: 'space-between' }}>
+            <span>Could not load projects — the backend may be unavailable.</span>
+            <button
+              onClick={refresh}
+              style={{
+                padding: '6px 14px',
+                borderRadius: '999px',
+                border: '1px solid rgba(255,125,111,0.4)',
+                background: 'rgba(255,125,111,0.12)',
+                color: 'var(--accent-red)',
+                cursor: 'pointer',
+                fontSize: '11px',
+                fontWeight: 700,
+                fontFamily: 'var(--font-mono)',
+                letterSpacing: '0.06em',
+                textTransform: 'uppercase',
+                flexShrink: 0,
+              }}
+            >
+              Retry
+            </button>
+          </div>
         )}
 
         {!loading && projects.length === 0 && !err ? (

@@ -3,6 +3,7 @@ import type { ProjectSummary } from './types';
 import { useAgentChat } from './hooks/useAgentChat';
 import { ProjectBrowser } from './components/ProjectBrowser';
 import { AgentChat } from './components/AgentChat';
+import { ToastProvider } from './components/Toast';
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 
@@ -70,31 +71,37 @@ export default function App() {
   // ── Browser ──
   if (!selectedProject || !agentProjectName) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
-        <ProjectBrowser onSelectProject={handleSelectProject} />
-      </div>
+      <ToastProvider>
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+          <ProjectBrowser onSelectProject={handleSelectProject} />
+        </div>
+      </ToastProvider>
     );
   }
 
   // ── Workspace (agent chat + project info) ──
   return (
-    <AgentChat
-      project={selectedProject}
-      events={agent.events}
-      messages={agent.messages}
-      scratchpads={agent.scratchpads}
-      scratchpadTimestamps={agent.scratchpadTimestamps}
-      editDecision={agent.editDecision}
-      renderState={agent.renderState}
-      cropStatuses={agent.cropStatuses}
-      connected={agent.connected}
-      busy={agent.busy}
-      onSend={agent.send}
-      onRequestRender={agent.requestRender}
-      onBack={handleBack}
-      onClearState={agent.clearAndReconnect}
-      onEditDecisionChange={agent.updateEditDecision}
-      onRequestCropClip={agent.requestCropClip}
-    />
+    <ToastProvider>
+      <AgentChat
+        project={selectedProject}
+        events={agent.events}
+        messages={agent.messages}
+        scratchpads={agent.scratchpads}
+        scratchpadTimestamps={agent.scratchpadTimestamps}
+        editDecision={agent.editDecision}
+        renderState={agent.renderState}
+        draftRenderState={agent.draftRenderState}
+        cropStatuses={agent.cropStatuses}
+        connected={agent.connected}
+        busy={agent.busy}
+        onSend={agent.send}
+        onRequestRender={agent.requestRender}
+        onRequestDraftRender={agent.requestDraftRender}
+        onBack={handleBack}
+        onClearState={agent.clearAndReconnect}
+        onEditDecisionChange={agent.updateEditDecision}
+        onRequestCropClip={agent.requestCropClip}
+      />
+    </ToastProvider>
   );
 }

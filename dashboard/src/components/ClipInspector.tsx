@@ -128,7 +128,7 @@ export default function ClipInspector({
           min={-100}
           max={100}
           step={0.1}
-          value={currentTransform.position_x}
+          value={Math.round(currentTransform.position_x * 100) / 100}
           onChange={(e) => handlePositionChange('x', parseFloat(e.target.value) || 0)}
           style={styles.numericInput}
         />
@@ -142,7 +142,7 @@ export default function ClipInspector({
           min={-100}
           max={100}
           step={0.1}
-          value={currentTransform.position_y}
+          value={Math.round(currentTransform.position_y * 100) / 100}
           onChange={(e) => handlePositionChange('y', parseFloat(e.target.value) || 0)}
           style={styles.numericInput}
         />

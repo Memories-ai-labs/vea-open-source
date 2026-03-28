@@ -211,6 +211,7 @@ def register_websocket_routes(app: FastAPI):
                 init_data["edit_decision"] = edit_decision_data
             if render_state:
                 init_data["render_state"] = render_state
+            init_data["draft_render_state"] = agent._draft_render_state
             await websocket.send_json({
                 "type": "init",
                 "data": init_data,
@@ -284,6 +285,11 @@ def register_websocket_routes(app: FastAPI):
                                 "type": "render_error",
                                 "data": {"error": "No FCPXML found. Generate one first."},
                             })
+
+                    elif msg_type == "render_draft":
+                        # Force FFmpeg draft render
+                        agent._emit = emit
+                        asyncio.create_task(agent._render_ffmpeg_draft())
 
                     elif msg_type == "crop_clip":
                         clip_id = msg.get("clip_id", "")

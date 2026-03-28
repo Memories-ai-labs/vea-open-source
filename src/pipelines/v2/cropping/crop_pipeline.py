@@ -64,11 +64,12 @@ async def crop_single_clip(
             lambda: _run_multishot_saliency(
                 source_path, start_sec, end_sec,
                 src_w, src_h, aspect_ratio,
+                tl_w=tl_w, tl_h=tl_h,
             ),
         )
     except Exception as e:
         logger.warning(f"[CROP] Multi-shot saliency failed for {source_path}: {e}, using center")
-        scale, pos_x, pos_y = _compute_fcpxml_transform(0.5, 0.5, src_w, src_h, aspect_ratio)
+        scale, pos_x, pos_y = _compute_fcpxml_transform(0.5, 0.5, src_w, src_h, aspect_ratio, tl_w=tl_w, tl_h=tl_h)
         shot_results = [(start_sec, end_sec, (scale, pos_x, pos_y), {"x": 0.5, "y": 0.5})]
 
     if progress_cb:
@@ -89,7 +90,7 @@ async def crop_single_clip(
         ))
 
     if not shots:
-        scale, pos_x, pos_y = _compute_fcpxml_transform(0.5, 0.5, src_w, src_h, aspect_ratio)
+        scale, pos_x, pos_y = _compute_fcpxml_transform(0.5, 0.5, src_w, src_h, aspect_ratio, tl_w=tl_w, tl_h=tl_h)
         shots = [ShotCropResult(
             source_start=start_sec,
             source_end=end_sec,
@@ -114,6 +115,8 @@ def _run_multishot_saliency(
     src_w: int,
     src_h: int,
     aspect_ratio: float,
+    tl_w: int = 0,
+    tl_h: int = 0,
 ) -> List[Tuple[float, float, Tuple[float, float, float], dict]]:
     """
     Full v1-equivalent pipeline:
@@ -147,7 +150,7 @@ def _run_multishot_saliency(
     if clamped_end <= clamped_start:
         full_video.close()
         return [(start_sec, end_sec,
-                 _compute_fcpxml_transform(0.5, 0.5, src_w, src_h, aspect_ratio),
+                 _compute_fcpxml_transform(0.5, 0.5, src_w, src_h, aspect_ratio, tl_w=tl_w, tl_h=tl_h),
                  {"x": 0.5, "y": 0.5})]
 
     clip = full_video.subclipped(clamped_start, clamped_end)
@@ -233,7 +236,7 @@ def _run_multishot_saliency(
             abs_start = clamped_start + shot_start_time
             abs_end = clamped_start + shot_end_time
             results.append((abs_start, abs_end,
-                           _compute_fcpxml_transform(0.5, 0.5, src_w, src_h, aspect_ratio),
+                           _compute_fcpxml_transform(0.5, 0.5, src_w, src_h, aspect_ratio, tl_w=tl_w, tl_h=tl_h),
                            {"x": 0.5, "y": 0.5}))
             continue
 
@@ -249,7 +252,8 @@ def _run_multishot_saliency(
 
         # Convert to FCPXML transform
         scale, pos_x, pos_y = _compute_fcpxml_transform(
-            center_norm_x, center_norm_y, src_w, src_h, aspect_ratio
+            center_norm_x, center_norm_y, src_w, src_h, aspect_ratio,
+            tl_w=tl_w, tl_h=tl_h,
         )
 
         # Convert to absolute source times
@@ -326,17 +330,29 @@ def _compute_saliency_strided(
 # ---------------------------------------------------------------------------
 
 def _compute_fcpxml_transform(
-    center_x: float, center_y: float, src_w: int, src_h: int, aspect_ratio: float
+    center_x: float, center_y: float, src_w: int, src_h: int, aspect_ratio: float,
+    tl_w: int = 0, tl_h: int = 0,
 ) -> Tuple[float, float, float]:
     """
     Compute scale and position for FCPXML adjust-transform to crop to aspect_ratio.
     Mirrors the math in fcpxml_exporter.py.
+
+    For vertical targets (e.g. 9:16) from landscape sources, the scale must be
+    large enough to fill the timeline frame — use max(tl_w/src_w, tl_h/src_h).
     """
-    tgt_w = int(src_h * aspect_ratio)
-    tgt_h = src_h
-    scale = src_h / max(tgt_h, 1)
+    # If timeline dimensions supplied, compute scale to fill the frame
+    if tl_w > 0 and tl_h > 0:
+        scale = max(tl_w / max(src_w, 1), tl_h / max(src_h, 1))
+    else:
+        # Legacy fallback: height-based
+        tgt_h = src_h
+        scale = src_h / max(tgt_h, 1)
+
     scaled_w = src_w * scale
     scaled_h = src_h * scale
+    # Target dimensions in source-pixel space
+    tgt_w = int(src_h * aspect_ratio) if tl_w == 0 else tl_w
+    tgt_h = src_h if tl_h == 0 else tl_h
     max_pan_x = max(0.0, (scaled_w - tgt_w) / 2.0)
     max_pan_y = max(0.0, (scaled_h - tgt_h) / 2.0)
     pos_x_px = (0.5 - center_x) * scaled_w
@@ -348,10 +364,11 @@ def _compute_fcpxml_transform(
 
 
 def _default_transform(
-    tl_w: int, tl_h: int, aspect_ratio: float
+    tl_w: int, tl_h: int, aspect_ratio: float,
+    src_w: int = 1920, src_h: int = 1080,
 ) -> Tuple[float, float, float]:
     """Return a centered, no-pan transform."""
-    scale, px, py = _compute_fcpxml_transform(0.5, 0.5, tl_w, tl_h, aspect_ratio)
+    scale, px, py = _compute_fcpxml_transform(0.5, 0.5, src_w, src_h, aspect_ratio, tl_w=tl_w, tl_h=tl_h)
     return scale, 0.0, 0.0
 
 

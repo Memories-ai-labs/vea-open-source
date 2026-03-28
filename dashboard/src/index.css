@@ -299,6 +299,20 @@ code {
   flex-shrink: 0;
 }
 
+.reconnect-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  background: rgba(241,191,99,0.1);
+  border-bottom: 1px solid rgba(241,191,99,0.2);
+  color: var(--accent-yellow);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+}
+
 @media (max-width: 900px) {
   .dashboard-shell {
     padding: 18px;
