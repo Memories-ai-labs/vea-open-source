@@ -208,6 +208,8 @@ class TextOverlay(BaseModel):
     duration: float            # seconds
     lane: int = 1              # positive = above spine
     font_size: int = 72
+    style: str = "title"       # "title" = centered graphic, "subtitle" = bottom caption
+    position: str = "center"   # "center", "bottom", "top"
 
 class EditDecision(BaseModel):
     """

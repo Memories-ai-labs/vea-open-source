@@ -79,6 +79,8 @@ class ToolExecutor:
                 return await self._select_music(args)
             elif tool_name == "verify_preview":
                 return await self._verify_preview(args)
+            elif tool_name == "generate_subtitles":
+                return await self._generate_subtitles(args)
             elif tool_name == "message_user":
                 return self._message_user(args)
             else:
@@ -468,6 +470,151 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
                 shutil.rmtree(tmp_dir, ignore_errors=True)
             except Exception:
                 pass
+
+    async def _generate_subtitles(self, args: Dict) -> Dict:
+        """Generate subtitles by transcribing original audio from each clip."""
+        import os
+        import shutil
+
+        max_words = args.get("max_words_per_line", 8)
+        font_size = args.get("font_size", 48)
+
+        api_key = os.environ.get("ELEVENLABS_API_KEY")
+        if not api_key:
+            return {"error": "ELEVENLABS_API_KEY not set — subtitles unavailable"}
+
+        # Load current edit decision
+        json_path = self.workspace.root / "fcpxml" / "edit_decision.json"
+        if not json_path.exists():
+            return {"error": "No edit decision found. Generate an edit first."}
+
+        from src.pipelines.v2.schemas import EditDecision, TextOverlay
+        edit = EditDecision.model_validate_json(json_path.read_text())
+
+        if not edit.clips:
+            return {"error": "Edit has no clips."}
+
+        await self._emit("refine_progress", {
+            "step": "generating_subtitles",
+            "message": "Transcribing clip audio for subtitles...",
+        })
+
+        # Compute timeline offset for each clip
+        clip_tl_offsets = []
+        cursor = 0.0
+        for clip in edit.clips:
+            clip_tl_offsets.append(cursor)
+            cursor += (clip.source_end - clip.source_start)
+
+        subtitles: list = []
+        tmp_dir = tempfile.mkdtemp(prefix="vea_stt_")
+
+        try:
+            for ci, clip in enumerate(edit.clips):
+                tl_offset = clip_tl_offsets[ci]
+                clip_dur = clip.source_end - clip.source_start
+
+                # Find source footage file
+                footage_dir = self.workspace.root / "footage"
+                src_path = footage_dir / clip.source_file
+                if not src_path.exists():
+                    logger.warning(f"[SUBTITLES] Source not found: {src_path}")
+                    continue
+
+                await self._emit("refine_progress", {
+                    "step": "transcribing_clip",
+                    "message": f"Transcribing clip {ci + 1}/{len(edit.clips)}: {clip.label or clip.source_file}",
+                })
+
+                # Extract audio segment from source
+                audio_out = Path(tmp_dir) / f"clip_{ci}.wav"
+                cmd = [
+                    "ffmpeg", "-y", "-ss", str(clip.source_start),
+                    "-t", str(clip_dur), "-i", str(src_path),
+                    "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                    str(audio_out),
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.wait()
+
+                if not audio_out.exists() or audio_out.stat().st_size < 1000:
+                    logger.warning(f"[SUBTITLES] Audio extraction failed for clip {ci}")
+                    continue
+
+                # Run STT
+                try:
+                    loop = asyncio.get_event_loop()
+                    words = await loop.run_in_executor(
+                        None,
+                        lambda: stt_word_timestamps(str(audio_out), api_key),
+                    )
+                except Exception as e:
+                    logger.warning(f"[SUBTITLES] STT failed for clip {ci}: {e}")
+                    continue
+
+                if not words:
+                    continue
+
+                # Group words into subtitle lines
+                line_words: list = []
+                line_start = 0.0
+                for w in words:
+                    if w.get("type") != "word":
+                        continue
+                    if not line_words:
+                        line_start = w["start"]
+                    line_words.append(w)
+
+                    if len(line_words) >= max_words:
+                        line_text = " ".join(lw["text"] for lw in line_words)
+                        line_end = line_words[-1]["end"]
+                        subtitles.append(TextOverlay(
+                            text=line_text,
+                            timeline_offset=tl_offset + line_start,
+                            duration=max(0.3, line_end - line_start),
+                            lane=2,
+                            font_size=font_size,
+                            style="subtitle",
+                            position="bottom",
+                        ))
+                        line_words = []
+
+                # Flush remaining words
+                if line_words:
+                    line_text = " ".join(lw["text"] for lw in line_words)
+                    line_end = line_words[-1]["end"]
+                    subtitles.append(TextOverlay(
+                        text=line_text,
+                        timeline_offset=tl_offset + line_start,
+                        duration=max(0.3, line_end - line_start),
+                        lane=2,
+                        font_size=font_size,
+                        style="subtitle",
+                        position="bottom",
+                    ))
+
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        # Replace existing subtitles, keep title-style overlays
+        edit.titles = [t for t in edit.titles if t.style != "subtitle"] + subtitles
+
+        # Save updated edit decision
+        with open(json_path, "w") as f:
+            json.dump(edit.model_dump(), f, indent=2)
+
+        # Emit updated edit decision to dashboard
+        await self._emit("edit_decision", edit.model_dump())
+
+        logger.info(f"[SUBTITLES] Generated {len(subtitles)} subtitle lines for {len(edit.clips)} clips")
+
+        return {
+            "status": "generated",
+            "subtitle_count": len(subtitles),
+            "clips_processed": len(edit.clips),
+        }
 
     def _message_user(self, args: Dict) -> Dict:
         message = args.get("message", "")

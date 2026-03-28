@@ -230,6 +230,30 @@ TOOL_DECLARATIONS = Tool(
             },
         ),
         FunctionDeclaration(
+            name="generate_subtitles",
+            description=(
+                "Generate subtitles for the current edit by transcribing the original audio "
+                "from each clip. Uses ElevenLabs speech-to-text to get word-level timestamps, "
+                "groups words into subtitle lines, and adds them to the edit decision as text "
+                "overlays. Must be called AFTER clips are finalized in the edit decision. "
+                "The user must explicitly request subtitles."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "max_words_per_line": {
+                        "type": "integer",
+                        "description": "Maximum words per subtitle line. Default 8.",
+                    },
+                    "font_size": {
+                        "type": "integer",
+                        "description": "Font size for subtitle text. Default 48.",
+                    },
+                },
+                "required": [],
+            },
+        ),
+        FunctionDeclaration(
             name="message_user",
             description=(
                 "Send a visible message to the user in the chat interface. "

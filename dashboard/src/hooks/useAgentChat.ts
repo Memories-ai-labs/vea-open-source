@@ -73,6 +73,8 @@ export interface TextOverlay {
   timeline_offset: number;
   duration: number;
   font_size?: number;
+  style?: 'title' | 'subtitle';
+  position?: 'center' | 'bottom' | 'top';
 }
 
 export interface EditDecision {

@@ -430,17 +430,30 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
             start="0s",
             duration=_format_fraction_seconds(t_tl_dur),
         )
+        is_subtitle = getattr(title, "style", "title") == "subtitle"
         text_style_def = SubElement(title_el, "text-style-def", id=f"ts-{id(title)}")
-        SubElement(
-            text_style_def, "text-style",
-            font="Helvetica Neue",
-            fontSize=str(title.font_size),
-            fontColor="1 1 1 1",
-            alignment="center",
-        )
+        style_attrs = {
+            "font": "Helvetica Neue",
+            "fontSize": str(title.font_size),
+            "fontColor": "1 1 1 1",
+            "alignment": "center",
+        }
+        if is_subtitle:
+            style_attrs["bold"] = "1"
+        SubElement(text_style_def, "text-style", **style_attrs)
         text_el = SubElement(title_el, "text")
         ts = SubElement(text_el, "text-style", ref=f"ts-{id(title)}")
         ts.text = title.text
+        # Position subtitle titles near the bottom of the frame
+        if is_subtitle:
+            tl_h = edit.timeline.height
+            # Move down ~40% of frame height
+            y_offset = -(tl_h * 0.38)
+            SubElement(
+                title_el, "adjust-transform",
+                position=f"0 {y_offset:.1f}",
+                scale="1 1",
+            )
 
     # --- Write to disk ---
     _indent(fcpxml)
