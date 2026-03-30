@@ -43,6 +43,7 @@ export interface EditDecisionClip {
   label?: string;
   description?: string;
   gain_db?: number | null;
+  measured_loudness_lufs?: number | null;
   speed?: { rate: number } | null;
   transform?: TransformSettings | null;
   transform_mode?: 'fit' | 'custom' | 'saliency';
@@ -59,6 +60,7 @@ export interface NarrationSegment {
   start: number;
   duration: number;
   gain_db: number;
+  measured_loudness_lufs?: number | null;
 }
 
 export interface MusicTrack {
@@ -66,6 +68,7 @@ export interface MusicTrack {
   start: number;
   duration: number;
   gain_db: number;
+  measured_loudness_lufs?: number | null;
 }
 
 export interface TextOverlay {

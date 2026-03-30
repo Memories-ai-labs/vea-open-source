@@ -416,6 +416,27 @@ class AgentSession:
                 progress_callback=progress_cb,
             )
 
+            # Measure loudness of each clip/narration/music and save back
+            try:
+                from src.pipelines.v2.audio.loudness import measure_edit_loudness
+                loudness_summary = await asyncio.get_event_loop().run_in_executor(
+                    None, measure_edit_loudness, edit, footage_dir,
+                )
+                # Save updated edit decision with loudness measurements
+                with open(ed_path, "w") as f:
+                    _json.dump(edit.model_dump(), f, indent=2)
+                # Emit updated edit decision to dashboard
+                try:
+                    await self._emit("timeline_update", {
+                        "edit_decision": edit.model_dump(),
+                        "loudness": loudness_summary,
+                    })
+                except Exception:
+                    pass
+                logger.info(f"[AGENT] Loudness measured: {len(loudness_summary.get('clips', []))} clips")
+            except Exception as e:
+                logger.warning(f"[AGENT] Loudness measurement failed (non-fatal): {e}")
+
             self._draft_render_state = {"status": "complete", "filename": Path(rendered).name}
             try:
                 await self._emit("render_complete", {

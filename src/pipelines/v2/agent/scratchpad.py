@@ -105,17 +105,17 @@ class ScratchpadManager:
         for name in PAD_NAMES:
             path = self._dir / f"{name}.md"
             if path.exists():
-                self.pads[name] = path.read_text()
+                self.pads[name] = path.read_text(encoding="utf-8")
 
     def _save(self, name: str) -> None:
         path = self._dir / f"{name}.md"
-        path.write_text(self.pads[name])
+        path.write_text(self.pads[name], encoding="utf-8")
 
     def _load_timestamps(self) -> None:
         path = self._dir / "timestamps.json"
         if path.exists():
             try:
-                data = json.loads(path.read_text())
+                data = json.loads(path.read_text(encoding="utf-8"))
                 for name in PAD_NAMES:
                     if name in data:
                         self.last_updated[name] = data[name]
@@ -124,4 +124,4 @@ class ScratchpadManager:
 
     def _save_timestamps(self) -> None:
         path = self._dir / "timestamps.json"
-        path.write_text(json.dumps(self.last_updated))
+        path.write_text(json.dumps(self.last_updated), encoding="utf-8")

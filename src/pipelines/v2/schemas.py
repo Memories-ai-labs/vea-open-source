@@ -171,6 +171,11 @@ class ClipDecision(BaseModel):
     label: str = ""             # human-readable description
     description: str = ""       # brief content description (what's in this clip)
     gain_db: Optional[float] = None
+    measured_loudness_lufs: Optional[float] = Field(
+        default=None,
+        description="Measured integrated loudness in LUFS. Set automatically during rendering. "
+                    "Use this to reason about gain_db adjustments.",
+    )
     speed: Optional[SpeedChange] = None
     transform: Optional[TransformSettings] = None
     transform_mode: Literal["fit", "custom", "saliency"] = "fit"
@@ -193,6 +198,7 @@ class NarrationSegment(BaseModel):
     start: float = 0.0          # in-point within the narration file
     duration: float             # duration of this segment
     gain_db: float = 0.0
+    measured_loudness_lufs: Optional[float] = None
 
 class MusicTrack(BaseModel):
     """Background music spanning the timeline."""
@@ -200,6 +206,7 @@ class MusicTrack(BaseModel):
     start: float = 0.0         # in-point within the music file
     duration: float = 0.0      # 0 = use full timeline duration
     gain_db: float = -12.0
+    measured_loudness_lufs: Optional[float] = None
 
 class TextOverlay(BaseModel):
     """A title/text overlay at a specific timeline position."""

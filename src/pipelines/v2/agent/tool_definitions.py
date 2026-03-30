@@ -95,6 +95,7 @@ TOOL_DECLARATIONS = Tool(
                             '{"timeline": {"name": str, "fps": number, "width": int, "height": int}, '
                             '"clips": [{"id": str, "source_file": str, "source_start": number, '
                             '"source_end": number, "label": str, "description": str, "gain_db": number, '
+                            '"measured_loudness_lufs": number (read-only, set by renderer), '
                             '"speed": {"rate": number}, '
                             '"transition_after": {"type": "cross-dissolve"|"fade-in"|"fade-out", "duration_seconds": number}, '
                             '"track": number (default 1, use 2+ for overlay tracks), '

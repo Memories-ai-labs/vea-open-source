@@ -323,6 +323,14 @@ class ToolExecutor:
                 "edit_decision_saved": str(json_path),
             }
 
+        # Include loudness data from previous measurements if available
+        loudness_info = []
+        for c in edit.clips:
+            if c.measured_loudness_lufs is not None:
+                loudness_info.append(
+                    f"{c.id} ({c.label}): {c.measured_loudness_lufs} LUFS, gain_db={c.gain_db}"
+                )
+
         result = {
             "status": "compiled",
             "fcpxml_path": output,
@@ -332,6 +340,10 @@ class ToolExecutor:
             "has_music": edit.music is not None,
             "title_count": len(edit.titles),
         }
+        if loudness_info:
+            result["loudness_measurements"] = loudness_info
+            if edit.music and edit.music.measured_loudness_lufs is not None:
+                result["music_loudness"] = f"{edit.music.measured_loudness_lufs} LUFS, gain_db={edit.music.gain_db}"
         if beat_metadata:
             result["beat_sync"] = {
                 "tempo_bpm": beat_metadata.get("tempo_bpm", 0),
