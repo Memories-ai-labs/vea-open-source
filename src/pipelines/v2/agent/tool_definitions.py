@@ -255,6 +255,47 @@ TOOL_DECLARATIONS = Tool(
             },
         ),
         FunctionDeclaration(
+            name="generate_content",
+            description=(
+                "Generate a short AI video clip from a text prompt using Veo (Google's video "
+                "generation model). Returns the file path to the generated MP4 which can then "
+                "be used as a clip in the edit decision. Generation takes 1-5 minutes. "
+                "The user MUST explicitly request AI-generated content — do NOT call this unprompted. "
+                "Generated clips are saved to the workspace and can be referenced by source_file "
+                "in the edit decision."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": (
+                            "Detailed description of the video to generate. Be specific about: "
+                            "visual content, camera movement, lighting, mood, action. "
+                            "Example: 'A slow aerial drone shot over a misty mountain range at sunrise, "
+                            "golden light breaking through clouds, cinematic 4K quality.'"
+                        ),
+                    },
+                    "duration": {
+                        "type": "integer",
+                        "description": "Video duration in seconds. Options: 4, 6, or 8. Default 8.",
+                    },
+                    "aspect_ratio": {
+                        "type": "string",
+                        "description": "Aspect ratio: '16:9' (landscape) or '9:16' (portrait). Default '16:9'.",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Short name for the generated clip (used as filename). "
+                            "Example: 'mountain_sunrise'. Default 'generated'."
+                        ),
+                    },
+                },
+                "required": ["prompt"],
+            },
+        ),
+        FunctionDeclaration(
             name="message_user",
             description=(
                 "Send a visible message to the user in the chat interface. "

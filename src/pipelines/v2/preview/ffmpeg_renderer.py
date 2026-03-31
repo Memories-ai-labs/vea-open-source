@@ -294,6 +294,11 @@ def _resolve_source(clip: ClipDecision, footage_dir: Path) -> Path:
     p2 = Path(clip.source_file)
     if p2.exists():
         return p2
+    # Try generated/ subdirectory (AI-generated content)
+    workspace_root = footage_dir.parent
+    p3 = workspace_root / "generated" / clip.source_file
+    if p3.exists():
+        return p3
     return footage_dir / clip.source_file  # return expected path even if missing
 
 
@@ -513,6 +518,8 @@ async def _mix_audio_and_titles(
     if has_music and edit.music:
         mus = edit.music
         mus_path = _resolve_audio_file(mus.file, footage_dir)
+        if not mus_path.exists():
+            logger.warning(f"[PREVIEW] Music file not found: {mus.file} (resolved to {mus_path})")
         if mus_path.exists():
             inputs.extend(["-i", str(mus_path)])
             mus_dur = mus.duration if mus.duration > 0 else total_dur
@@ -613,6 +620,11 @@ def _resolve_audio_file(file_path: str, footage_dir: Path) -> Path:
     p2 = workspace_root / file_path
     if p2.exists():
         return p2
+    # Try common subdirectories (music/, narration/)
+    for subdir in ("music", "narration"):
+        p3 = workspace_root / subdir / Path(file_path).name
+        if p3.exists():
+            return p3
     return p
 
 

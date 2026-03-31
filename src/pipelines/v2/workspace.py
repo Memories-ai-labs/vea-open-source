@@ -286,3 +286,7 @@ class WorkspaceManager:
 
     def get_render_path(self, quality: str) -> Path:
         return self.root / "renders" / f"{quality}.mp4"
+
+    def get_generated_video_path(self, name: str = "generated") -> Path:
+        """Path for AI-generated video content."""
+        return self.root / "generated" / f"{name}.mp4"

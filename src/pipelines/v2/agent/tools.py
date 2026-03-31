@@ -81,6 +81,8 @@ class ToolExecutor:
                 return await self._verify_preview(args)
             elif tool_name == "generate_subtitles":
                 return await self._generate_subtitles(args)
+            elif tool_name == "generate_content":
+                return await self._generate_content(args)
             elif tool_name == "message_user":
                 return self._message_user(args)
             else:
@@ -280,10 +282,13 @@ class ToolExecutor:
         # Resolve source_path for clips that only have source_file
         footage_dir = self.workspace.get_footage_dir()
         footage_files = self.workspace.scan_footage() if footage_dir.is_dir() else []
+        generated_dir = self.workspace.root / "generated"
+        generated_files = list(generated_dir.glob("*.mp4")) if generated_dir.is_dir() else []
+        all_sources = footage_files + generated_files
         for clip in edit.clips:
             if not clip.source_path and clip.source_file:
                 # Match by exact filename or substring
-                for fp in footage_files:
+                for fp in all_sources:
                     if fp.name == clip.source_file or clip.source_file in fp.name or fp.name in clip.source_file:
                         clip.source_path = str(fp)
                         break
@@ -626,6 +631,66 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
             "status": "generated",
             "subtitle_count": len(subtitles),
             "clips_processed": len(edit.clips),
+        }
+
+    async def _generate_content(self, args: Dict) -> Dict:
+        """Generate an AI video clip using Veo via Vertex AI."""
+        from src.pipelines.v2.video_generation.video_gen_pipeline import generate_video_async
+
+        prompt = args.get("prompt", "")
+        if not prompt.strip():
+            return {"error": "Prompt is empty"}
+
+        duration = args.get("duration", 8)
+        aspect_ratio = args.get("aspect_ratio", "16:9")
+        name = args.get("name", "generated")
+        # Sanitize name for filename
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+
+        output_path = self.workspace.get_generated_video_path(safe_name)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"[AGENT] generate_content: prompt={prompt[:80]}... duration={duration}s")
+
+        async def progress_cb(step, message):
+            await self._emit("tool_progress", {
+                "tool": "generate_content",
+                "step": step,
+                "message": message,
+            })
+
+        result = await generate_video_async(
+            prompt=prompt,
+            output_path=str(output_path),
+            duration=duration,
+            aspect_ratio=aspect_ratio,
+            progress_callback=progress_cb,
+        )
+
+        if "error" in result:
+            logger.warning(f"[AGENT] generate_content failed: {result['error']}")
+            return result
+
+        # Get video info for the edit decision
+        file_path = result["file_path"]
+        rel_path = str(Path(file_path).relative_to(self.workspace.root.parent.parent))
+
+        logger.info(
+            f"[AGENT] generate_content complete: {file_path} "
+            f"({result.get('generation_time_seconds', '?')}s generation time)"
+        )
+
+        return {
+            "status": "complete",
+            "file_path": file_path,
+            "source_file": Path(file_path).name,
+            "duration_seconds": duration,
+            "aspect_ratio": aspect_ratio,
+            "generation_time_seconds": result.get("generation_time_seconds"),
+            "usage_hint": (
+                f"Use source_file='{Path(file_path).name}' in the edit decision. "
+                f"The file is at {file_path} and will be resolved automatically."
+            ),
         }
 
     def _message_user(self, args: Dict) -> Dict:
@@ -1173,17 +1238,17 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
         transcript_section = ""
         if transcript:
             transcript_section = f"""
-## Audio transcript (word-level)
+## Audio transcript (word-level) — AUTHORITATIVE for speech clips
 
-The following is a WORD-LEVEL transcription with precise timestamps (relative to video timecode).
-Each line is one word with its exact start and end time.
+The following is a WORD-LEVEL transcription with frame-accurate timestamps from speech-to-text.
+Each line is one word with its exact start and end time. Words ending in `.` `?` `!` mark
+sentence boundaries.
 
 {transcript}
 
-CRITICAL: Use these precise word timestamps to find natural speech boundaries. NEVER cut in the
-middle of a word. Prefer cutting at sentence boundaries (after periods, question marks, etc.).
-Align your new_start to just before the first word of a sentence and new_end to just after the
-last word of a sentence, including a brief natural pause (~0.2s).
+For speech-heavy clips, these timestamps are MORE RELIABLE than the video for choosing cut points.
+Pick your new_start/new_end by reading the transcript and finding complete sentences — do NOT
+rely on visual cues to decide where speech starts or ends.
 """
 
         return f"""\
@@ -1210,17 +1275,21 @@ Your ideal clip duration is ~{target_duration:.1f}s.
 {transcript_section}
 ## Instructions
 
-Watch the video AND listen to the audio carefully. Use both to decide the best cut points.
+First, determine if this clip is **speech-heavy** (someone talking) or **visual** (b-roll, reactions, scenery).
 
-- **Dialogue clips**: Listen for complete sentences and natural speech boundaries. NEVER cut
-  mid-sentence. Include brief pauses before/after key statements. If a sentence starts before
-  or continues after the region of interest, expand to capture the full sentence.
+**If speech-heavy (dialogue/presentation):** The transcript above is your PRIMARY source for
+cut points — NOT the video. The word-level timestamps are frame-accurate from STT. Your job:
+1. Read the transcript and find the sentence that best matches what this clip needs.
+2. Set `new_start` to the timestamp of the FIRST word of that sentence (minus ~0.15s for breathing room).
+3. Set `new_end` to the timestamp AFTER the LAST word of that sentence (plus ~0.2s for natural tail).
+4. NEVER cut mid-word or mid-sentence. If the best content spans multiple sentences, include them all.
+5. Use the video only to confirm the speaker is on screen — do NOT let visual cuts override transcript boundaries.
 
-- **Visual clips** (b-roll, reactions, scenery): Prioritize visual composition, movement
-  peaks, and natural motion boundaries. Cut on action.
+**If visual (b-roll, reactions, scenery):** Prioritize visual composition, movement peaks,
+and natural motion boundaries. Cut on action. Transcript is secondary.
 
-- **Audio-driven clips** (music, applause, sound effects): Align cuts with audio beats,
-  applause peaks, or natural audio transitions.
+**If audio-driven (music, applause, sound effects):** Align cuts with audio beats,
+applause peaks, or natural audio transitions.
 
 ## Truncation detection
 
