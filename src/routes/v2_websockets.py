@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI
@@ -121,28 +122,34 @@ def register_websocket_routes(app: FastAPI):
             await websocket.close()
             return
 
-        session_data = workspace.load_session()
-        if not session_data.videos:
-            await websocket.send_json({"type": "error", "data": {"message": "No videos indexed for this project."}})
-            await websocket.close()
-            return
+        # Try to load session — may have zero videos if not indexed yet
+        try:
+            session_data = workspace.load_session()
+        except Exception:
+            # Session file may not exist yet
+            from src.pipelines.v2.schemas import SessionData
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).isoformat()
+            session_data = SessionData(
+                project_name=project_name,
+                created_at=now,
+                updated_at=now,
+                status="new",
+                videos=[],
+                gist="",
+            )
 
-        # Get or create AgentSession
-        agent = services._agent_sessions.get(project_name)
-        if agent is None:
-            # Event emitter that sends over this WebSocket
-            # We'll replace this with a subscriber model below
-            pass
+        needs_indexing = not session_data.videos
 
         # Subscriber queue for this client
         client_queue: asyncio.Queue = asyncio.Queue()
 
-        # Build emit function that pushes to the client queue
         async def emit(event_type: str, data: dict):
             await client_queue.put({"type": event_type, "data": data})
 
-        # Create or reuse agent session
-        if agent is None:
+        # Get or create AgentSession (skip if no videos — agent loop needs them)
+        agent = services._agent_sessions.get(project_name)
+        if agent is None and not needs_indexing:
             try:
                 agent = AgentSession(
                     project_name=project_name,
@@ -161,9 +168,14 @@ def register_websocket_routes(app: FastAPI):
                 await websocket.close()
                 return
 
-        # Always point the agent's emit at the current connection's queue
-        agent._emit = emit
-        print(f"[AGENT WS] Bound emit to current connection for project={project_name}", flush=True)
+        # Always point the agent's emit at the current connection's queue (if agent exists)
+        if agent is not None:
+            agent._emit = emit
+            print(f"[AGENT WS] Bound emit to current connection for project={project_name}", flush=True)
+
+        # Register this client's emit on the project-level indexing channel so the
+        # client receives index_progress events even when no agent exists yet.
+        services._indexing_emitters.setdefault(project_name, []).append(emit)
 
         # Load edit decision if it exists
         edit_decision_data = None
@@ -176,47 +188,71 @@ def register_websocket_routes(app: FastAPI):
             except Exception:
                 pass
 
-        # Get render state from agent (survives reconnects) or fall back to file check
-        # Suppress Resolve-not-available errors — they're not actionable and confuse the UI
+        # Get render state — if there's an agent, use its state; otherwise just check files
+        # Check both new "final.mp4" and legacy "preview.mp4" names for backwards compat.
+        def _find_existing_render() -> Optional[Path]:
+            for name in ("final", "preview"):
+                p = workspace.get_render_path(name)
+                if p.exists():
+                    return p
+            return None
+
         render_state = None
-        agent_rs = agent._render_state
-        is_resolve_error = (
-            agent_rs.get("status") == "error" and
-            "resolve" in str(agent_rs.get("error", "")).lower()
-        )
-        if agent_rs.get("status") in ("rendering", "complete", "error") and not is_resolve_error:
-            render_state = agent_rs
+        if agent is not None:
+            agent_rs = agent._render_state
+            is_resolve_error = (
+                agent_rs.get("status") == "error" and
+                "resolve" in str(agent_rs.get("error", "")).lower()
+            )
+            if agent_rs.get("status") in ("rendering", "complete", "error") and not is_resolve_error:
+                render_state = agent_rs
+            else:
+                rp = _find_existing_render()
+                if rp:
+                    render_state = {"status": "complete", "filename": rp.name}
         else:
-            render_path = workspace.get_render_path("preview")
-            if render_path.exists():
-                render_state = {"status": "complete", "filename": render_path.name}
+            rp = _find_existing_render()
+            if rp:
+                render_state = {"status": "complete", "filename": rp.name}
 
         # Send initial state on connect
         try:
-            # Scan footage directory for actual files
             footage_files = [f.name for f in workspace.scan_footage()] if workspace.get_footage_dir().is_dir() else []
             indexed_files = [v.video_name for v in session_data.videos if v.video_no]
 
+            # Detect if indexing is currently in progress
+            indexing_state = services._indexing_progress.get(project_name)
+
             init_data: dict = {
-                "scratchpads": agent.get_scratchpad_state(),
-                "scratchpad_timestamps": agent.get_scratchpad_timestamps(),
-                "chat_history": agent.get_chat_history(),
-                "event_log": agent.get_event_log(),
                 "project_name": project_name,
                 "video_count": len(footage_files),
                 "footage_files": footage_files,
                 "indexed_files": indexed_files,
+                "needs_indexing": needs_indexing,
             }
+            if agent is not None:
+                init_data["scratchpads"] = agent.get_scratchpad_state()
+                init_data["scratchpad_timestamps"] = agent.get_scratchpad_timestamps()
+                init_data["chat_history"] = agent.get_chat_history()
+                init_data["event_log"] = agent.get_event_log()
+                init_data["draft_render_state"] = agent._draft_render_state
+            else:
+                init_data["scratchpads"] = {}
+                init_data["scratchpad_timestamps"] = {}
+                init_data["chat_history"] = []
+                init_data["event_log"] = []
+                init_data["draft_render_state"] = {"status": "idle"}
             if edit_decision_data:
                 init_data["edit_decision"] = edit_decision_data
             if render_state:
                 init_data["render_state"] = render_state
-            init_data["draft_render_state"] = agent._draft_render_state
+            if indexing_state:
+                init_data["indexing_state"] = indexing_state
             await websocket.send_json({
                 "type": "init",
                 "data": init_data,
             })
-            print(f"[AGENT WS] Sent init to client for project={project_name}", flush=True)
+            print(f"[AGENT WS] Sent init to client for project={project_name} (needs_indexing={needs_indexing})", flush=True)
         except Exception as e:
             print(f"[AGENT WS] Failed to send init: {e}", flush=True)
             return
@@ -259,41 +295,60 @@ def register_websocket_routes(app: FastAPI):
 
                     if msg_type == "user_message":
                         text = msg.get("text", "").strip()
-                        if text and agent_task is None:
+                        if not text:
+                            pass
+                        elif agent is None:
+                            await websocket.send_json({
+                                "type": "error",
+                                "data": {"message": "Project must be indexed before chatting with the agent."},
+                            })
+                        elif agent_task is None:
                             # Reassign emit in case this is a reconnection
                             agent._emit = emit
                             agent_task = asyncio.create_task(
                                 agent.handle_user_message(text)
                             )
-                        elif text and agent_task is not None:
+                        else:
                             # Agent is busy -- queue the message for later
                             await websocket.send_json({
                                 "type": "queued",
                                 "data": {"text": text, "message": "Agent is working. Your message will be processed next."},
                             })
 
-                    elif msg_type == "render":
-                        # Force re-render via Resolve
-                        agent._emit = emit
-                        fcpxml = agent.workspace.get_latest_fcpxml()
-                        if fcpxml:
-                            asyncio.create_task(
-                                agent._auto_render_preview({"fcpxml_path": str(fcpxml)})
-                            )
+                    elif msg_type == "index_now":
+                        # Trigger indexing for this project. Runs in the background and
+                        # broadcasts index_progress events through the project's emitter list.
+                        if services._indexing_progress.get(project_name, {}).get("status") == "running":
+                            await emit("index_progress", services._indexing_progress[project_name])
                         else:
-                            await websocket.send_json({
-                                "type": "render_error",
-                                "data": {"error": "No FCPXML found. Generate one first."},
-                            })
+                            asyncio.create_task(_run_indexing(project_name, workspace))
+
+                    elif msg_type == "render":
+                        if agent is None:
+                            await websocket.send_json({"type": "render_error", "data": {"error": "Project must be indexed first."}})
+                        else:
+                            agent._emit = emit
+                            fcpxml = agent.workspace.get_latest_fcpxml()
+                            if fcpxml:
+                                asyncio.create_task(
+                                    agent._auto_render_preview({"fcpxml_path": str(fcpxml)})
+                                )
+                            else:
+                                await websocket.send_json({
+                                    "type": "render_error",
+                                    "data": {"error": "No FCPXML found. Generate one first."},
+                                })
 
                     elif msg_type == "render_draft":
-                        # Force FFmpeg draft render
-                        agent._emit = emit
-                        asyncio.create_task(agent._render_ffmpeg_draft())
+                        if agent is None:
+                            await websocket.send_json({"type": "render_error", "data": {"error": "Project must be indexed first."}})
+                        else:
+                            agent._emit = emit
+                            asyncio.create_task(agent._render_ffmpeg_draft())
 
                     elif msg_type == "crop_clip":
                         clip_id = msg.get("clip_id", "")
-                        if clip_id:
+                        if clip_id and agent is not None:
                             asyncio.create_task(
                                 _handle_crop_clip(workspace, agent, emit, clip_id)
                             )
@@ -343,6 +398,83 @@ def register_websocket_routes(app: FastAPI):
             # Cancel running agent task if client disconnects
             if agent_task and not agent_task.done():
                 agent_task.cancel()
+            # Unregister this client from the indexing emitters
+            try:
+                services._indexing_emitters.get(project_name, []).remove(emit)
+            except (ValueError, KeyError):
+                pass
+
+    async def _broadcast_index_progress(project_name: str, payload: dict):
+        """Push an index_progress event to all connected clients for this project."""
+        services._indexing_progress[project_name] = payload
+        for em in list(services._indexing_emitters.get(project_name, [])):
+            try:
+                await em("index_progress", payload)
+            except Exception:
+                pass
+
+    async def _run_indexing(project_name: str, workspace: WorkspaceManager):
+        """Run LightweightComprehension on the project's footage and broadcast progress."""
+        from src.pipelines.v2.comprehension.lightweight_comprehension import LightweightComprehension
+
+        try:
+            footage_files = workspace.scan_footage() if workspace.get_footage_dir().is_dir() else []
+            total = len(footage_files)
+
+            if not services.memories_manager:
+                await _broadcast_index_progress(project_name, {
+                    "status": "error",
+                    "percent": 0,
+                    "message": "Memories.ai not configured. Set MEMORIES_API_KEY in config.json.",
+                })
+                return
+
+            await _broadcast_index_progress(project_name, {
+                "status": "running",
+                "percent": 1,
+                "message": f"Starting indexing for {total} file(s)...",
+                "videos_total": total,
+                "videos_done": 0,
+            })
+
+            async def _on_progress(percent: float, message: str):
+                await _broadcast_index_progress(project_name, {
+                    "status": "running",
+                    "percent": percent,
+                    "message": message,
+                    "videos_total": total,
+                })
+
+            pipeline = LightweightComprehension(
+                project_name=project_name,
+                source_dir=str(workspace.get_footage_dir()),
+                memories=services.memories_manager,
+                workspace=workspace,
+            )
+
+            session = await pipeline.run(
+                start_fresh=False,
+                progress_callback=_on_progress,
+            )
+
+            indexed = sum(1 for v in session.videos if v.video_no)
+            await _broadcast_index_progress(project_name, {
+                "status": "complete",
+                "percent": 100,
+                "message": f"Indexing complete: {indexed}/{total} videos.",
+                "videos_total": total,
+                "videos_done": indexed,
+            })
+            # Clear the in-memory progress after a few seconds so reconnects don't keep showing it
+            await asyncio.sleep(2)
+            services._indexing_progress.pop(project_name, None)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            await _broadcast_index_progress(project_name, {
+                "status": "error",
+                "percent": 0,
+                "message": f"Indexing failed: {e}",
+            })
 
     async def _handle_crop_clip(
         workspace: WorkspaceManager,

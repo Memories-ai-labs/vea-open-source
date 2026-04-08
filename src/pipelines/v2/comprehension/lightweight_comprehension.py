@@ -12,7 +12,9 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Awaitable, Callable, List, Optional
+
+ProgressCallback = Callable[[float, str], Awaitable[None]]
 
 from lib.llm.MemoriesAiManager import MemoriesAiManager
 from src.pipelines.v2.schemas import SessionData, VideoEntry
@@ -43,13 +45,27 @@ class LightweightComprehension:
         self.memories = memories
         self.workspace = workspace
 
-    async def run(self, start_fresh: bool = False) -> SessionData:
+    async def run(
+        self,
+        start_fresh: bool = False,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> SessionData:
         """
         Run comprehension. Returns SessionData with video_nos and gist.
 
         Args:
             start_fresh: If True, re-upload all videos even if session exists.
+            progress_callback: optional async fn(percent, message) for stage updates.
         """
+        async def _report(percent: float, message: str):
+            if progress_callback:
+                try:
+                    await progress_callback(percent, message)
+                except Exception:
+                    pass
+
+        await _report(2, "Checking for existing session...")
+
         # --- Check for existing valid session ---
         if not start_fresh and self.workspace.exists():
             try:
@@ -80,12 +96,14 @@ class LightweightComprehension:
         if not video_files:
             raise ValueError(f"No video files found in: {self.source_dir}")
         logger.info(f"[COMPREHENSION] Found {len(video_files)} video files in {self.source_dir}")
+        await _report(8, f"Found {len(video_files)} video file(s)")
 
         # --- Create workspace ---
         self.workspace.create()
 
         # --- Upload all videos in parallel ---
         logger.info("[COMPREHENSION] Uploading videos to Memories.ai...")
+        await _report(15, f"Uploading {len(video_files)} video(s) to Memories.ai...")
         upload_results = await asyncio.gather(*[
             self._upload_one(vf) for vf in video_files
         ], return_exceptions=True)
@@ -102,11 +120,13 @@ class LightweightComprehension:
 
         # --- Wait for all videos to be indexed ---
         logger.info("[COMPREHENSION] Waiting for Memories.ai indexing to complete...")
+        await _report(40, f"Waiting for Memories.ai to index {len(video_entries)} video(s)...")
         await asyncio.gather(*[
             self.memories.wait_for_ready(v.video_no, timeout=3600)
             for v in video_entries
         ])
         logger.info(f"[COMPREHENSION] All {len(video_entries)} videos indexed")
+        await _report(75, "Indexing complete, generating content gist...")
 
         # --- Save initial session (no gist yet) ---
         session = self.workspace.init_session(videos=video_entries)
@@ -149,6 +169,7 @@ class LightweightComprehension:
         self.workspace.append_context(f"# Video Gist\n\n{combined_gist}\n")
 
         logger.info(f"[COMPREHENSION] Session saved: {self.workspace.root / 'session.json'}")
+        await _report(98, "Saving session...")
         return session
 
     async def _upload_one(self, video_path: Path) -> VideoEntry:

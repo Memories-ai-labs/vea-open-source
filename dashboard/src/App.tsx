@@ -94,9 +94,12 @@ export default function App() {
         cropStatuses={agent.cropStatuses}
         connected={agent.connected}
         busy={agent.busy}
+        needsIndexing={agent.needsIndexing}
+        indexingState={agent.indexingState}
         onSend={agent.send}
         onRequestRender={agent.requestRender}
         onRequestDraftRender={agent.requestDraftRender}
+        onTriggerIndex={agent.triggerIndex}
         onBack={handleBack}
         onClearState={agent.clearAndReconnect}
         onEditDecisionChange={agent.updateEditDecision}

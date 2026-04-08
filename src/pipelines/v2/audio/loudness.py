@@ -153,17 +153,39 @@ def measure_edit_loudness(
         else:
             summary["clips"].append({"id": clip.id, "label": clip.label, "lufs": None})
 
+    workspace_root = footage_dir.parent
+
+    def _resolve_audio(rel_or_abs: str) -> Optional[Path]:
+        """Resolve an audio file path the same way the FFmpeg renderer does."""
+        if not rel_or_abs:
+            return None
+        p = Path(rel_or_abs)
+        if p.is_absolute() and p.exists():
+            return p
+        # Try relative to workspace root
+        p2 = workspace_root / rel_or_abs
+        if p2.exists():
+            return p2
+        # Try workspace subdirs (music/, narration/)
+        for subdir in ("narration", "music"):
+            p3 = workspace_root / subdir / Path(rel_or_abs).name
+            if p3.exists():
+                return p3
+        return None
+
     for seg in edit.narration:
-        p = Path(seg.file)
-        if p.exists():
+        p = _resolve_audio(seg.file)
+        if p is not None:
             lufs = measure_lufs(str(p), start=seg.start, end=seg.start + seg.duration)
             seg.measured_loudness_lufs = lufs
             summary["narration"].append({"lufs": lufs, "gain_db": seg.gain_db})
-            logger.info(f"[LOUDNESS] Narration segment: {lufs} LUFS")
+            logger.info(f"[LOUDNESS] Narration segment [{seg.start:.2f}-{seg.start + seg.duration:.2f}]: {lufs} LUFS")
+        else:
+            logger.warning(f"[LOUDNESS] Could not resolve narration file: {seg.file}")
 
     if edit.music and edit.music.file:
-        p = Path(edit.music.file)
-        if p.exists():
+        p = _resolve_audio(edit.music.file)
+        if p is not None:
             # Measure ONLY the slice that actually plays. If duration is 0, the renderer
             # uses the full timeline duration, so we should too — measuring the whole song
             # would give a misleading reading if the slice is a quieter intro/outro.

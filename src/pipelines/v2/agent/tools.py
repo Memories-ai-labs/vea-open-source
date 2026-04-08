@@ -291,6 +291,68 @@ class ToolExecutor:
                         clip.source_path = str(fp)
                         break
 
+        # Validate clip source ranges against actual file durations.
+        # Catches the agent fabricating timestamps past file end (a real bug we've seen).
+        # Probe each unique source file once via ffprobe and cache.
+        import subprocess
+        file_durations: Dict[str, float] = {}
+        def _probe_dur(path: str) -> float:
+            if path in file_durations:
+                return file_durations[path]
+            try:
+                out = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                     "-of", "csv=p=0", path],
+                    capture_output=True, text=True, timeout=10,
+                )
+                d = float(out.stdout.strip()) if out.stdout.strip() else 0.0
+            except Exception:
+                d = 0.0
+            file_durations[path] = d
+            return d
+
+        validation_errors: List[str] = []
+        valid_clips = []
+        for clip in edit.clips:
+            if not clip.source_path:
+                # Can't validate without a path; let it through and let the renderer fail
+                valid_clips.append(clip)
+                continue
+            actual_dur = _probe_dur(clip.source_path)
+            if actual_dur <= 0:
+                valid_clips.append(clip)
+                continue
+            if clip.source_start >= actual_dur:
+                validation_errors.append(
+                    f"❌ Clip `{clip.id}` source_start={clip.source_start}s is past the end of "
+                    f"`{clip.source_file}` (duration {actual_dur}s). Drop this clip or pick a "
+                    f"different timestamp from search_footage."
+                )
+                continue  # drop the clip — completely out of bounds
+            if clip.source_end > actual_dur:
+                # Clamp source_end to file duration; warn but allow
+                old_end = clip.source_end
+                clip.source_end = round(actual_dur, 3)
+                logger.warning(
+                    f"[AGENT] Clamped clip {clip.id} source_end {old_end} → {clip.source_end} "
+                    f"(file {clip.source_file} is only {actual_dur}s)"
+                )
+                validation_errors.append(
+                    f"⚠️ Clip `{clip.id}` source_end={old_end}s was clamped to {clip.source_end}s "
+                    f"(file `{clip.source_file}` is only {actual_dur}s)."
+                )
+            if clip.source_end <= clip.source_start:
+                validation_errors.append(
+                    f"❌ Clip `{clip.id}` has source_end ({clip.source_end}) <= source_start "
+                    f"({clip.source_start}) after clamping. Drop this clip."
+                )
+                continue
+            valid_clips.append(clip)
+
+        if validation_errors:
+            edit.clips = valid_clips
+            logger.warning(f"[AGENT] generate_fcpxml: {len(validation_errors)} validation issues")
+
         # Snap clips to music beats if music is present
         beat_metadata = None
         if edit.music and edit.music.file:
@@ -353,6 +415,9 @@ class ToolExecutor:
                 "clips_snapped": beat_metadata.get("snapped", 0),
                 "total_beats": beat_metadata.get("beats_detected", 0),
             }
+        if validation_errors:
+            result["validation_warnings"] = validation_errors
+            result["status"] = "compiled_with_warnings"
         return result
 
     async def _verify_preview(self, args: Dict) -> Dict:
@@ -853,35 +918,33 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
                 ),
             }
 
-        # Step 2: Build descriptions for Gemini to choose from
-        track_descriptions = []
+        # Step 2: Build a markdown table of candidates for Gemini
+        track_rows = ["| # | Title | Mood | Genre | BPM | Energy | Description |",
+                      "|---|---|---|---|---|---|---|"]
         for i, t in enumerate(tracks[:50]):  # Cap at 50 for context
             attrs = t.get("attributes", {})
-            name = attrs.get("title", f"Track {i+1}")
+            name = (attrs.get("title", f"Track {i+1}") or "").replace("|", "/")[:40]
             tags = attrs.get("tags", {})
-            mood = ", ".join(tags.get("mood", []))
-            genre = ", ".join(tags.get("genre", []))
-            energy = attrs.get("energy", "")
-            desc = attrs.get("description", "")
-            bpm = attrs.get("bpm", "")
-            track_descriptions.append(
-                f"[{i}] {name} | mood: {mood} | genre: {genre} | "
-                f"energy: {energy} | bpm: {bpm} | {desc[:100]}"
-            )
+            mood = ", ".join(tags.get("mood", []))[:30]
+            genre = ", ".join(tags.get("genre", []))[:30]
+            energy = str(attrs.get("energy", "") or "")[:15]
+            bpm = str(attrs.get("bpm", "") or "")
+            desc = (attrs.get("description", "") or "").replace("|", "/").replace("\n", " ")[:80]
+            track_rows.append(f"| {i} | {name} | {mood} | {genre} | {bpm} | {energy} | {desc} |")
 
         await self._emit("refine_progress", {
             "step": "selecting_track",
-            "message": f"Choosing best track from {len(track_descriptions)} candidates...",
+            "message": f"Choosing best track from {len(tracks[:50])} candidates...",
         })
 
         # Step 3: Ask Gemini to pick the best track
         selection_prompt = (
-            f"You are selecting background music for a video edit.\n\n"
+            "You are selecting background music for a video edit.\n\n"
             f"## What the editor wants\n{prompt}\n\n"
-            f"## Available tracks\n" + "\n".join(track_descriptions) + "\n\n"
-            f"## Instructions\n"
-            f"Return ONLY the index number (e.g. '3') of the single best matching track. "
-            f"Nothing else — just the number."
+            "## Available tracks\n" + "\n".join(track_rows) + "\n\n"
+            "## Instructions\n"
+            "Return ONLY the index number (e.g. '3') of the single best matching track. "
+            "Nothing else — just the number."
         )
 
         try:
@@ -1361,7 +1424,11 @@ is mid-sentence at 0:00), set `speech_truncated_start` to true.
 If you notice that a sentence or word is cut off at the very END of the video (the speaker
 is mid-sentence at {padded_duration:.1f}s), set `speech_truncated_end` to true.
 
-## Output
+## Output (all fields are REQUIRED)
 
-Return `new_start` and `new_end` as seconds from the beginning of this video (0 to {padded_duration:.1f}).
-Set `focus_type` to "dialogue", "visual", or "audio" based on what primarily drove your decision."""
+- `new_start` (number) — seconds from the beginning of this video (0 to {padded_duration:.1f})
+- `new_end` (number) — seconds from the beginning of this video (must be > new_start, ≤ {padded_duration:.1f})
+- `reasoning` (string) — brief explanation of why you chose these cut points
+- `focus_type` (string) — "dialogue" | "visual" | "audio" (what primarily drove your decision)
+- `speech_truncated_start` (boolean) — see Truncation detection above
+- `speech_truncated_end` (boolean) — see Truncation detection above"""

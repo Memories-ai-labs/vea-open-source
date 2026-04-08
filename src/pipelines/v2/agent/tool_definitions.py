@@ -2,6 +2,62 @@
 
 from google.genai.types import FunctionDeclaration, Tool
 
+# Schema string for generate_fcpxml — kept as a module-level constant so it's easy
+# to update when new fields are added to the schemas in src/pipelines/v2/schemas.py.
+_EDIT_DECISION_SCHEMA = (
+    "A JSON string representing the full edit decision. Schema:\n"
+    "{\n"
+    '  "timeline": {"name": str, "fps": number, "width": int, "height": int},\n'
+    '  "clips": [{  // REQUIRED: at least one clip; each clip requires id, source_file, source_start, source_end\n'
+    '    "id": str,\n'
+    '    "source_file": str,           // filename in footage/ directory\n'
+    '    "source_start": number,       // in-point in seconds (must be within file duration)\n'
+    '    "source_end": number,         // out-point in seconds (must be within file duration)\n'
+    '    "label": str,\n'
+    '    "description": str,\n'
+    '    "gain_db": number,            // literal dB adjustment for source clips (see system prompt)\n'
+    '    "measured_loudness_lufs": number,  // READ-ONLY: set by the renderer after measurement\n'
+    '    "speed": {"rate": number},\n'
+    '    "transform": {"scale_x": number, "scale_y": number, "position_x": number, "position_y": number, "rotation": number},\n'
+    '    "transform_mode": "fit" | "custom" | "saliency",\n'
+    '    "shot_transforms": [ShotCropResult, ...],  // set by Dynamic Crop tool\n'
+    '    "source_width": int,\n'
+    '    "source_height": int,\n'
+    '    "transition_after": {"type": "cross-dissolve" | "fade-in" | "fade-out", "duration_seconds": number},\n'
+    '    "track": int,                 // 1 = V1 spine (default, sequential), 2+ = overlay tracks\n'
+    '    "timeline_offset": number,    // absolute timeline position in seconds (REQUIRED for track 2+)\n'
+    '  }],\n'
+    '  "narration": [{\n'
+    '    "file": str,                  // usually "narration.mp3"\n'
+    '    "timeline_offset": number,    // where on the timeline the segment plays\n'
+    '    "start": number,              // in-point in the audio file (MUST be a word start from the words array)\n'
+    '    "duration": number,           // (start + duration) MUST equal a word end from the words array\n'
+    '    "gain_db": number,            // offset from -16 LUFS target (default 0)\n'
+    '    "measured_loudness_lufs": number,  // READ-ONLY\n'
+    '  }],\n'
+    '  "music": {\n'
+    '    "file": str,                  // usually "track.mp3"\n'
+    '    "start": number,              // in-point in the music file\n'
+    '    "duration": number,           // 0 = use full timeline length\n'
+    '    "gain_db": number,            // offset from -18 LUFS target (default 0 — do NOT write -18!)\n'
+    '    "measured_loudness_lufs": number,  // READ-ONLY\n'
+    '  },\n'
+    '  "titles": [{\n'
+    '    "text": str,\n'
+    '    "timeline_offset": number,\n'
+    '    "duration": number,\n'
+    '    "font_size": int,\n'
+    '    "lane": int,                  // positive = above spine (default 1)\n'
+    '    "style": "title" | "subtitle",  // title = centered graphic, subtitle = bottom caption\n'
+    '    "position": "center" | "bottom" | "top",\n'
+    '  }]\n'
+    "}\n"
+    "Only `clips` is required at the top level, and each clip requires id/source_file/"
+    "source_start/source_end. Timeline defaults to 24fps 1920x1080. See the system prompt "
+    "for audio levels, narration splits, and source-timestamp rules."
+)
+
+
 TOOL_DECLARATIONS = Tool(
     function_declarations=[
         FunctionDeclaration(
@@ -26,12 +82,11 @@ TOOL_DECLARATIONS = Tool(
         FunctionDeclaration(
             name="search_footage",
             description=(
-                "Search for specific video clips matching a query. "
-                "Returns clips with video_name, start/end timestamps, "
-                "relevance score, description, and dialogue transcript "
-                "for that time range. Read the transcripts to verify "
-                "whether a clip contains the moment you need before "
-                "committing to refine it."
+                "Search for specific video clips matching a query. Returns clips with "
+                "video_name, start/end timestamps (within each file's actual duration), "
+                "relevance score, description, and dialogue transcript for that time range. "
+                "Read the transcripts to verify whether a clip contains the moment you "
+                "need before committing to refine it."
             ),
             parameters={
                 "type": "object",
@@ -54,7 +109,8 @@ TOOL_DECLARATIONS = Tool(
                 "Modify one of your 4 persistent scratchpads. These survive the "
                 "sliding window — they are your ONLY durable memory. "
                 "Names: comprehension, creative_direction, planning, fcpxml. "
-                "Operations: replace (overwrite), append (add to end), prepend (add to start)."
+                "Operations: replace (overwrite), append (add to end), prepend (add to start). "
+                "See the system prompt 'Your scratchpads' section for formatting guidance."
             ),
             parameters={
                 "type": "object",
@@ -71,7 +127,11 @@ TOOL_DECLARATIONS = Tool(
                     },
                     "content": {
                         "type": "string",
-                        "description": "The text to write.",
+                        "description": (
+                            "The text to write. Prefer bullet-point format (`- item`) with "
+                            "`**bold**` emphasis and `## Heading` sections. Short prose is OK "
+                            "for nuanced explanations."
+                        ),
                     },
                 },
                 "required": ["name", "operation", "content"],
@@ -80,32 +140,18 @@ TOOL_DECLARATIONS = Tool(
         FunctionDeclaration(
             name="generate_fcpxml",
             description=(
-                "Generate a Final Cut Pro XML timeline from a complete edit decision. "
-                "Call this when the edit plan is finalized and clips are assigned. "
-                "Provide the edit as a JSON string. The system compiles it deterministically "
-                "to valid FCPXML 1.10."
+                "Compile a complete edit decision JSON into a Final Cut Pro XML timeline. "
+                "Call this whenever the plan is ready or you want to update an existing edit. "
+                "The system compiles deterministically to valid FCPXML 1.10, validates clip "
+                "source ranges against actual file durations, runs beat sync if music is "
+                "present, and auto-renders both a 480p draft and a native-resolution final."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "edit_decision_json": {
                         "type": "string",
-                        "description": (
-                            "A JSON string representing the full edit decision. Schema: "
-                            '{"timeline": {"name": str, "fps": number, "width": int, "height": int}, '
-                            '"clips": [{"id": str, "source_file": str, "source_start": number, '
-                            '"source_end": number, "label": str, "description": str, "gain_db": number, '
-                            '"measured_loudness_lufs": number (read-only, set by renderer), '
-                            '"speed": {"rate": number}, '
-                            '"transition_after": {"type": "cross-dissolve"|"fade-in"|"fade-out", "duration_seconds": number}, '
-                            '"track": number (default 1, use 2+ for overlay tracks), '
-                            '"timeline_offset": number (absolute position in seconds, required for track 2+)}], '
-                            '"narration": [{"file": str, "timeline_offset": number, "start": number, '
-                            '"duration": number, "gain_db": number}], '
-                            '"music": {"file": str, "start": number, "duration": number, "gain_db": number}, '
-                            '"titles": [{"text": str, "timeline_offset": number, "duration": number, "font_size": int}]}. '
-                            "Only clips is required. timeline defaults to 24fps 1920x1080."
-                        ),
+                        "description": _EDIT_DECISION_SCHEMA,
                     },
                 },
                 "required": ["edit_decision_json"],
@@ -114,14 +160,12 @@ TOOL_DECLARATIONS = Tool(
         FunctionDeclaration(
             name="refine_clip_timestamps",
             description=(
-                "Refine the in/out points of a clip to find precise cut points within a broader search range. "
-                "Extracts and downsamples the video segment, transcribes audio via ElevenLabs STT, "
-                "sends both to Gemini which watches the video and returns optimized start/end timestamps. "
-                "Works for dialogue (finds sentence boundaries), visual b-roll (peak moments), and "
-                "audio-driven clips (beats, applause). IMPORTANT: Only call this on clips you've "
-                "committed to using — do NOT refine immediately after searching. First read the "
-                "search transcripts, select your final clips, update the planning scratchpad, "
-                "then refine the selected clips."
+                "Refine the in/out points of a clip to find precise cut points within a broader "
+                "search range. Extracts and downsamples the video segment, transcribes audio via "
+                "ElevenLabs STT, and sends both to Gemini which watches the video and returns "
+                "optimized start/end timestamps. Works for dialogue (finds sentence boundaries), "
+                "visual b-roll (peak moments), and audio-driven clips (beats, applause). "
+                "Only call this on clips you've committed to using."
             ),
             parameters={
                 "type": "object",
@@ -160,14 +204,12 @@ TOOL_DECLARATIONS = Tool(
         FunctionDeclaration(
             name="generate_narration",
             description=(
-                "Generate narration voiceover audio from a script. Takes the narration script text "
-                "and produces a single narration.mp3 file in the workspace. Call this ONLY after "
-                "an edit plan exists (so you know clip durations). The user must have requested "
-                "narration — do NOT call this unprompted. Returns: file path, duration, a per-sentence "
-                "`transcript` array, and a per-word `words` array — both with REAL timestamps from "
-                "ElevenLabs character alignment (not estimates). When splitting narration around "
-                "dialogue clips, the start/end of every segment MUST equal a word boundary from the "
-                "words array — never invent timestamps or you will cut speech mid-word."
+                "Generate narration voiceover audio from a script. Produces narration.mp3 in the "
+                "workspace. Returns: file path, duration, a per-sentence `transcript` array, and "
+                "a per-word `words` array — both with REAL timestamps from ElevenLabs character "
+                "alignment. When splitting narration around dialogue clips, segment start/end "
+                "MUST equal word boundaries from the `words` array or speech will be cut mid-word. "
+                "Only call this when the user has explicitly requested narration."
             ),
             parameters={
                 "type": "object",
@@ -189,8 +231,8 @@ TOOL_DECLARATIONS = Tool(
             description=(
                 "Search for and download a background music track. Fetches candidate tracks from "
                 "the music library, uses an LLM to pick the best match based on your prompt, and "
-                "downloads it. Returns the file path, track name, and duration. Use this when the "
-                "user wants background music in their edit."
+                "downloads it. Returns the file path, track name, and duration. "
+                "Only call this when the user has explicitly requested music."
             ),
             parameters={
                 "type": "object",
@@ -207,8 +249,6 @@ TOOL_DECLARATIONS = Tool(
                 "required": ["prompt"],
             },
         ),
-        # verify_preview removed — Gemini's video understanding is too imprecise
-        # and the timeline view + LUFS measurements provide better signal.
         FunctionDeclaration(
             name="generate_subtitles",
             description=(
@@ -216,7 +256,7 @@ TOOL_DECLARATIONS = Tool(
                 "from each clip. Uses ElevenLabs speech-to-text to get word-level timestamps, "
                 "groups words into subtitle lines, and adds them to the edit decision as text "
                 "overlays. Must be called AFTER clips are finalized in the edit decision. "
-                "The user must explicitly request subtitles."
+                "Only call this when the user has explicitly requested subtitles."
             ),
             parameters={
                 "type": "object",
@@ -233,13 +273,12 @@ TOOL_DECLARATIONS = Tool(
                 "required": [],
             },
         ),
-        # generate_content (Veo video generation) — temporarily disabled
         FunctionDeclaration(
             name="message_user",
             description=(
-                "Send a visible message to the user in the chat interface. "
-                "Use this to share findings, propose plans, ask questions, or report progress "
-                "DURING work. This does NOT end your turn — you can keep calling tools after. "
+                "Send a visible message to the user in the chat interface. Use this to share "
+                "findings, propose plans, ask questions, or report progress DURING work. "
+                "This does NOT end your turn — you can keep calling tools after. "
                 "When you're completely done with the user's request, call finish_turn instead."
             ),
             parameters={
@@ -256,12 +295,11 @@ TOOL_DECLARATIONS = Tool(
         FunctionDeclaration(
             name="finish_turn",
             description=(
-                "Signal that you have finished all the work needed for the user's current request "
-                "and are ready to wait for their next message. This explicitly ENDS YOUR TURN. "
-                "Call this exactly once when you are completely done — after all tools have been "
-                "called, all audio issues in the timeline view are resolved, and you've delivered "
-                "the result. Pass an optional `final_message` to summarize what you did. "
-                "Do NOT call this if there is still work pending or unaddressed issues."
+                "Signal that you've finished the work for the user's current request and are "
+                "ready to wait for the next message. This explicitly ENDS YOUR TURN. Call at the "
+                "end of your work, after all tools have been called, audio issues in the timeline "
+                "view are resolved, and you've delivered the result. Pass an optional "
+                "`final_message` to summarize what you did. Do NOT call this if work is pending."
             ),
             parameters={
                 "type": "object",

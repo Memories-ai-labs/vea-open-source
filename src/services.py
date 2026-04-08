@@ -65,3 +65,9 @@ _planning_sessions: Dict[str, Dict] = {}
 
 # --- Active agent sessions (project_name -> AgentSession) ---
 _agent_sessions: Dict[str, AgentSession] = {}
+
+# --- Indexing broadcast state ---
+# project_name -> list of async emit callables (one per connected WS client)
+_indexing_emitters: Dict[str, list] = {}
+# project_name -> latest progress dict (status, percent, message, video_count, etc.)
+_indexing_progress: Dict[str, dict] = {}

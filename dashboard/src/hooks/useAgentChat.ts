@@ -149,6 +149,14 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
   const [cropStatuses, setCropStatuses] = useState<Record<string, CropStatus>>({});
   const [footageFiles, setFootageFiles] = useState<string[]>([]);
   const [indexedFiles, setIndexedFiles] = useState<string[]>([]);
+  const [needsIndexing, setNeedsIndexing] = useState<boolean>(false);
+  const [indexingState, setIndexingState] = useState<{
+    status: 'idle' | 'running' | 'complete' | 'error';
+    percent: number;
+    message: string;
+    videos_total?: number;
+    videos_done?: number;
+  }>({ status: 'idle', percent: 0, message: '' });
   const [connected, setConnected] = useState(false);
   const [busy, setBusy] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -187,6 +195,12 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
             setBusy(false);
             if (event.data.footage_files) setFootageFiles(event.data.footage_files as string[]);
             if (event.data.indexed_files) setIndexedFiles(event.data.indexed_files as string[]);
+            setNeedsIndexing(Boolean(event.data.needs_indexing));
+            if (event.data.indexing_state) {
+              setIndexingState(event.data.indexing_state as any);
+            } else {
+              setIndexingState({ status: 'idle', percent: 0, message: '' });
+            }
             if (event.data.scratchpads) {
               setScratchpads(event.data.scratchpads as ScratchpadState);
             }
@@ -240,6 +254,21 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
 
           case 'user_message':
             // Server echo of user message — already added locally
+            break;
+
+          case 'index_progress':
+            setIndexingState({
+              status: event.data.status || 'running',
+              percent: event.data.percent ?? 0,
+              message: event.data.message || '',
+              videos_total: event.data.videos_total,
+              videos_done: event.data.videos_done,
+            });
+            // Once complete, refresh footage/indexed lists from the data
+            if (event.data.status === 'complete') {
+              setNeedsIndexing(false);
+              if (event.data.indexed_files) setIndexedFiles(event.data.indexed_files as string[]);
+            }
             break;
 
           case 'scratchpad_update':
@@ -460,6 +489,13 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     }
   }, []);
 
+  const triggerIndex = useCallback(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      setIndexingState({ status: 'running', percent: 1, message: 'Requesting indexing...' });
+      wsRef.current.send(JSON.stringify({ type: 'index_now' }));
+    }
+  }, []);
+
   const clearAndReconnect = useCallback(() => {
     // Immediately wipe all local state
     setEvents([]);
@@ -487,5 +523,5 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     setTimeout(() => { if (mountedRef.current) connect(); }, 300);
   }, [connect]);
 
-  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, footageFiles, indexedFiles, connected, busy, send, requestRender, requestDraftRender, clearAndReconnect, updateEditDecision, requestCropClip };
+  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, footageFiles, indexedFiles, needsIndexing, indexingState, connected, busy, send, requestRender, requestDraftRender, clearAndReconnect, updateEditDecision, requestCropClip, triggerIndex };
 }

@@ -250,7 +250,7 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
       }}>
         {([
           { key: 'draft' as TabKey, label: 'Draft 480p', rs: draftRenderState },
-          { key: 'final' as TabKey, label: 'Final 1080p', rs: finalRenderState },
+          { key: 'final' as TabKey, label: 'Final (native)', rs: finalRenderState },
         ]).map(({ key, label, rs }) => (
           <button
             key={key}

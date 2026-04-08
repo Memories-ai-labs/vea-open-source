@@ -61,9 +61,32 @@ class AgentSession:
         # Build video info for system prompt and tools
         self.video_nos = [v.video_no for v in video_entries if v.video_no]
 
-        # Build video list with footage filenames for source_file mapping
+        # Build video list with footage filenames AND actual durations for source_file mapping
         footage_files = workspace.scan_footage() if workspace.get_footage_dir().is_dir() else []
         footage_names = [f.name for f in footage_files]
+
+        # Probe each footage file's actual duration via ffprobe so the agent
+        # never invents source_start/source_end values past the file end.
+        import subprocess
+        footage_durations: Dict[str, float] = {}
+        for fp in footage_files:
+            try:
+                out = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                     "-of", "csv=p=0", str(fp)],
+                    capture_output=True, text=True, timeout=10,
+                )
+                dur = float(out.stdout.strip()) if out.stdout.strip() else 0.0
+                footage_durations[fp.name] = round(dur, 2)
+            except Exception:
+                footage_durations[fp.name] = 0.0
+        # Cache for use elsewhere (e.g. _generate_fcpxml validation)
+        self.footage_durations = footage_durations
+
+        def _dur_label(name: str) -> str:
+            d = footage_durations.get(name, 0)
+            return f"DURATION: {d}s — clip source_start MUST be < {d}, source_end ≤ {d}" if d > 0 else "duration unknown"
+
         video_lines = []
         for v in video_entries:
             # Try to match video_name to a footage filename
@@ -76,13 +99,16 @@ class AgentSession:
                     matched_file = fn
                     break
             if matched_file:
-                video_lines.append(f"- {v.video_name} → filename: `{matched_file}` (video_no: {v.video_no})")
+                video_lines.append(
+                    f"- {v.video_name} → filename: `{matched_file}` "
+                    f"(video_no: {v.video_no}, {_dur_label(matched_file)})"
+                )
             else:
                 video_lines.append(f"- {v.video_name} (video_no: {v.video_no})")
         if footage_names:
             unmatched = [fn for fn in footage_names if not any(fn in line for line in video_lines)]
             for fn in unmatched:
-                video_lines.append(f"- (unmatched footage file: `{fn}`)")
+                video_lines.append(f"- (unmatched footage file: `{fn}`, {_dur_label(fn)})")
         self.video_list = "\n".join(video_lines)
 
         # Render state — persists across WebSocket reconnects
@@ -511,13 +537,13 @@ class AgentSession:
                 return
 
             media_dir = str(self.workspace.get_footage_dir())
-            output_path = str(self.workspace.get_render_path("preview"))
+            output_path = str(self.workspace.get_render_path("final"))
 
             self._render_state = {"status": "rendering", "progress": 0}
             try:
                 await self._emit("render_start", {
                     "renderer": "resolve",
-                    "quality": "preview",
+                    "quality": "final",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
             except Exception:
@@ -539,7 +565,7 @@ class AgentSession:
                 fcpxml_path=fcpxml_path,
                 media_dir=media_dir,
                 output_path=output_path,
-                quality="preview",
+                quality="final",
                 progress_callback=progress_cb,
             )
 

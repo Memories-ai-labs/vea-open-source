@@ -200,7 +200,13 @@ def _build_table(items: dict) -> list[str]:
 # ── Audio issue detection ──────────────────────────────────────────────────
 
 def _detect_audio_issues(items: dict) -> list[str]:
-    """Find concrete audio problems in the edit (narration overlap, wrong gain, etc.)."""
+    """Find concrete audio problems in the edit (narration overlap, wrong gain, etc.).
+
+    NOTE: The thresholds below (<10%, ≥90%) must match the "Audio ducking" rules in
+    the agent system prompt (src/pipelines/v2/agent/system_prompt.py). If you change
+    one, update the other so the agent's manual reasoning and the automatic detection
+    agree.
+    """
     v1_clips = items["v1_clips"]
     narr_items = items["narrations"]
     if not narr_items:
@@ -259,12 +265,9 @@ def build_timeline_view(edit_decision_str: str) -> str:
 
     lines = ["## Computed timeline view", ""]
     lines.append(
-        "This is a programmatically computed view of the timeline. Each row is a time "
-        "slice bounded by any clip/narration/music start or end. **Cells in the same row "
-        "are simultaneously active.** Use this for ANY temporal reasoning (audio ducking, "
-        "pacing, gaps, narration sync) — do NOT try to compute timeline positions from "
-        "the JSON yourself, and do NOT rely on visual analysis of the rendered preview "
-        "for timing decisions (Gemini's temporal accuracy on rendered video is approximate)."
+        "Programmatically computed from the current edit_decision. Each row is a time "
+        "slice bounded by a clip/narration/music boundary; each column is a track. "
+        "Cells in the same row are simultaneously active."
     )
     lines.append("")
     lines.extend(_build_table(items))

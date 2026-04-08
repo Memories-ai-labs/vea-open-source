@@ -26,9 +26,18 @@ interface AgentChatProps {
   cropStatuses: Record<string, { clip_id: string; status: string; step?: string }>;
   connected: boolean;
   busy: boolean;
+  needsIndexing?: boolean;
+  indexingState?: {
+    status: 'idle' | 'running' | 'complete' | 'error';
+    percent: number;
+    message: string;
+    videos_total?: number;
+    videos_done?: number;
+  };
   onSend: (text: string) => void;
   onRequestRender: () => void;
   onRequestDraftRender: () => void;
+  onTriggerIndex?: () => void;
   onBack: () => void;
   onClearState: () => void;
   onEditDecisionChange: (updated: EditDecision) => void;
@@ -101,7 +110,7 @@ function useHorizontalDivider(
 }
 
 export function AgentChat({
-  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, connected, busy, onSend, onRequestRender, onRequestDraftRender, onBack, onClearState, onEditDecisionChange, onRequestCropClip,
+  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, connected, busy, needsIndexing, indexingState, onSend, onRequestRender, onRequestDraftRender, onTriggerIndex, onBack, onClearState, onEditDecisionChange, onRequestCropClip,
 }: AgentChatProps) {
   const { toast } = useToast();
   const [project, setProject] = useState(initialProject);
@@ -166,6 +175,34 @@ export function AgentChat({
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [selectedClipId]);
+
+  // Toast popups when renders finish or fail (transition-aware so we only fire once per render)
+  const prevDraftStatusRef = useRef<RenderState['status']>('idle');
+  const prevFinalStatusRef = useRef<RenderState['status']>('idle');
+  useEffect(() => {
+    const prev = prevDraftStatusRef.current;
+    const curr = draftRenderState.status;
+    if (prev !== curr) {
+      if (curr === 'complete' && prev === 'rendering') {
+        toast('Draft render complete', 'success');
+      } else if (curr === 'error' && prev === 'rendering') {
+        toast(`Draft render failed${draftRenderState.error ? `: ${draftRenderState.error.slice(0, 100)}` : ''}`, 'error');
+      }
+      prevDraftStatusRef.current = curr;
+    }
+  }, [draftRenderState.status, draftRenderState.error, toast]);
+  useEffect(() => {
+    const prev = prevFinalStatusRef.current;
+    const curr = renderState.status;
+    if (prev !== curr) {
+      if (curr === 'complete' && prev === 'rendering') {
+        toast('Final render complete', 'success');
+      } else if (curr === 'error' && prev === 'rendering') {
+        toast(`Final render failed${renderState.error ? `: ${renderState.error.slice(0, 100)}` : ''}`, 'error');
+      }
+      prevFinalStatusRef.current = curr;
+    }
+  }, [renderState.status, renderState.error, toast]);
 
   // Horizontal column drag divider for timeline/chat split in lower row
   const lowerRowRef = useRef<HTMLDivElement>(null);
@@ -447,6 +484,14 @@ export function AgentChat({
   }, [editDecision, onEditDecisionChange]);
 
   async function handleIndex() {
+    // Use the WebSocket path so progress streams to the indexing banner.
+    // Falls back to REST if onTriggerIndex isn't wired (shouldn't happen).
+    if (onTriggerIndex) {
+      onTriggerIndex();
+      setManageOpen(false);
+      toast('Indexing started — watch progress in the chat panel', 'success');
+      return;
+    }
     setIndexing(true);
     try {
       await indexProject(project.project_name);
@@ -585,11 +630,21 @@ export function AgentChat({
               backdropFilter: 'blur(12px)',
             }}>
               {manageMsg && <div className="status-message info" style={{ fontSize: '11px', padding: '6px 10px' }}>{manageMsg}</div>}
-              {project.footage_files.length > 0 && (
-                <DropdownBtn color={isIndexed ? 'var(--text-secondary)' : 'var(--accent-blue)'} disabled={indexing} onClick={handleIndex}>
-                  {indexing ? 'Indexing...' : isIndexed ? 'Re-index footage' : 'Index footage'}
-                </DropdownBtn>
-              )}
+              {project.footage_files.length > 0 && (() => {
+                const wsRunning = indexingState?.status === 'running';
+                const isBusy = indexing || wsRunning;
+                return (
+                  <DropdownBtn
+                    color={isIndexed ? 'var(--text-secondary)' : 'var(--accent-blue)'}
+                    disabled={isBusy}
+                    onClick={handleIndex}
+                  >
+                    {isBusy
+                      ? `Indexing${wsRunning && indexingState?.percent != null ? ` ${Math.round(indexingState.percent)}%` : '...'}`
+                      : isIndexed ? 'Re-index footage' : 'Index footage'}
+                  </DropdownBtn>
+                );
+              })()}
               <DropdownBtn color="var(--text-secondary)" disabled={manageLoading === 'gists'} onClick={async () => { setManageLoading('gists'); try { await clearGists(project.project_name); setManageMsg('Gists cleared.'); toast('Gists cleared', 'success'); await refresh(); } catch (e: any) { setManageMsg(`Error: ${e.message}`); toast(`Failed to clear gists: ${e.message}`, 'error'); } finally { setManageLoading(null); } }}>
                 {manageLoading === 'gists' ? 'Clearing...' : 'Clear gists'}
               </DropdownBtn>
@@ -1102,6 +1157,80 @@ export function AgentChat({
                 </div>
               )}
 
+              {/* Indexing banner */}
+              {(needsIndexing || (indexingState && indexingState.status === 'running')) && (
+                <div style={{
+                  padding: '12px',
+                  borderBottom: '1px solid var(--border)',
+                  background: 'rgba(96,213,200,0.06)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px',
+                }}>
+                  <div style={{ fontSize: '11px', color: 'var(--text-bright)', fontWeight: 600 }}>
+                    {indexingState?.status === 'running'
+                      ? 'Indexing footage...'
+                      : 'Footage needs indexing'}
+                  </div>
+                  {indexingState?.status === 'running' ? (
+                    <>
+                      <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
+                        {indexingState.message || 'Working...'}
+                      </div>
+                      <div style={{
+                        width: '100%',
+                        height: '4px',
+                        background: 'rgba(255,255,255,0.06)',
+                        borderRadius: '2px',
+                        overflow: 'hidden',
+                      }}>
+                        <div style={{
+                          width: `${Math.max(2, indexingState.percent)}%`,
+                          height: '100%',
+                          background: 'var(--accent-blue)',
+                          borderRadius: '2px',
+                          transition: 'width 0.3s ease-out',
+                        }} />
+                      </div>
+                      {indexingState.videos_total != null && (
+                        <div style={{ fontSize: '10px', color: 'var(--text-muted)', textAlign: 'right' }}>
+                          {indexingState.videos_done ?? 0} / {indexingState.videos_total} videos
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ fontSize: '11px', color: 'var(--text-dim)', lineHeight: 1.5 }}>
+                        Your footage hasn't been indexed yet. Indexing uploads each file
+                        to Memories.ai for content understanding (~30-60s per video).
+                      </div>
+                      {indexingState?.status === 'error' && (
+                        <div style={{ fontSize: '11px', color: 'var(--accent-red)', lineHeight: 1.5 }}>
+                          {indexingState.message}
+                        </div>
+                      )}
+                      <button
+                        onClick={onTriggerIndex}
+                        disabled={!onTriggerIndex || !connected}
+                        style={{
+                          padding: '6px 12px',
+                          background: 'var(--accent-blue)',
+                          color: '#fff',
+                          border: 'none',
+                          borderRadius: 'var(--radius-md)',
+                          cursor: 'pointer',
+                          fontSize: '11px',
+                          fontWeight: 600,
+                          alignSelf: 'flex-start',
+                        }}
+                      >
+                        Index Now
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+
               {/* Messages */}
               <div style={{
                 flex: 1,
@@ -1112,7 +1241,7 @@ export function AgentChat({
                 flexDirection: 'column',
                 gap: '6px',
               }}>
-                {timeline.length === 0 && !busy && (
+                {timeline.length === 0 && !busy && !needsIndexing && (
                   <div style={{ color: 'var(--text-muted)', textAlign: 'center', marginTop: '40px', fontSize: '12px', lineHeight: 1.8 }}>
                     Start a conversation to begin editing.<br />
                     The agent has access to your indexed footage.

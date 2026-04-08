@@ -201,11 +201,15 @@ class NarrationSegment(BaseModel):
     measured_loudness_lufs: Optional[float] = None
 
 class MusicTrack(BaseModel):
-    """Background music spanning the timeline."""
+    """Background music spanning the timeline.
+
+    gain_db is interpreted by the renderer as an OFFSET from the target LUFS
+    (-18 LUFS for music). Default 0 means "play at target loudness."
+    """
     file: str
     start: float = 0.0         # in-point within the music file
     duration: float = 0.0      # 0 = use full timeline duration
-    gain_db: float = -12.0
+    gain_db: float = 0.0       # offset from -18 LUFS target
     measured_loudness_lufs: Optional[float] = None
 
 class TextOverlay(BaseModel):
