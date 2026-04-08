@@ -9,6 +9,7 @@ import { NLETimeline } from './NLETimeline';
 import { PreviewPanel } from './PreviewPanel';
 import type { PreviewPanelHandle } from './PreviewPanel';
 import ClipInspector from './ClipInspector';
+import AudioInspector from './AudioInspector';
 import TransformPreview from './TransformPreview';
 import TimelineSettingsBar from './TimelineSettingsBar';
 import { useToast } from './Toast';
@@ -339,6 +340,58 @@ export function AgentChat({
     if (!selectedClipId || !editDecision) return null;
     return editDecision.clips.find(c => c.id === selectedClipId) || null;
   }, [selectedClipId, editDecision]);
+
+  // Audio item selection (narration / music) — id format: "narr-N" or "music-0"
+  const selectedAudio = useMemo(() => {
+    if (!selectedClipId || !editDecision) return null;
+    if (selectedClipId.startsWith('narr-')) {
+      const idx = parseInt(selectedClipId.slice(5), 10);
+      const seg = editDecision.narration?.[idx];
+      if (!seg) return null;
+      return {
+        kind: 'narration' as const,
+        index: idx,
+        file: seg.file,
+        duration: seg.duration,
+        start: seg.start,
+        timelineOffset: seg.timeline_offset,
+        gainDb: seg.gain_db,
+        measuredLufs: seg.measured_loudness_lufs ?? null,
+      };
+    }
+    if (selectedClipId === 'music-0') {
+      const m = editDecision.music;
+      if (!m) return null;
+      return {
+        kind: 'music' as const,
+        index: 0,
+        file: m.file,
+        duration: m.duration,
+        start: m.start,
+        timelineOffset: 0,
+        gainDb: m.gain_db,
+        measuredLufs: m.measured_loudness_lufs ?? null,
+      };
+    }
+    return null;
+  }, [selectedClipId, editDecision]);
+
+  const handleAudioGainChange = useCallback((newGain: number) => {
+    if (!editDecision || !selectedAudio) return;
+    if (selectedAudio.kind === 'narration') {
+      const newNarration = [...(editDecision.narration ?? [])];
+      newNarration[selectedAudio.index] = {
+        ...newNarration[selectedAudio.index],
+        gain_db: newGain,
+      };
+      onEditDecisionChange({ ...editDecision, narration: newNarration });
+    } else if (selectedAudio.kind === 'music' && editDecision.music) {
+      onEditDecisionChange({
+        ...editDecision,
+        music: { ...editDecision.music, gain_db: newGain },
+      });
+    }
+  }, [editDecision, selectedAudio, onEditDecisionChange]);
 
   const tlWidth = editDecision?.timeline?.width ?? 1920;
   const tlHeight = editDecision?.timeline?.height ?? 1080;
@@ -845,7 +898,21 @@ export function AgentChat({
               </div>
 
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-                {selectedClip ? (
+                {selectedAudio ? (
+                  <div style={{ padding: '10px' }}>
+                    <AudioInspector
+                      kind={selectedAudio.kind}
+                      file={selectedAudio.file}
+                      duration={selectedAudio.duration}
+                      start={selectedAudio.start}
+                      timelineOffset={selectedAudio.timelineOffset}
+                      gainDb={selectedAudio.gainDb}
+                      measuredLufs={selectedAudio.measuredLufs}
+                      onGainChange={handleAudioGainChange}
+                      onClose={() => setSelectedClipId(null)}
+                    />
+                  </div>
+                ) : selectedClip ? (
                   <>
                     <ClipInspector
                       clip={selectedClip}

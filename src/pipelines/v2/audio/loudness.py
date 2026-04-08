@@ -30,7 +30,12 @@ def measure_lufs(
     sr: int = 48000,
 ) -> Optional[float]:
     """
-    Measure integrated loudness (LUFS) of an audio segment.
+    Measure integrated loudness (LUFS) of an audio segment per ITU-R BS.1770.
+
+    Always extracts as stereo to match how the audio will actually be perceived.
+    Mono sources are duplicated to L+R by ffmpeg automatically, which is correct
+    for BS.1770 (correlated channels). Forcing mono downmix for stereo content
+    underreports loudness by 1-2 dB because uncorrelated channels partially cancel.
 
     Args:
         file_path: Path to video or audio file.
@@ -49,7 +54,7 @@ def measure_lufs(
         return None
 
     try:
-        # Extract audio segment to raw PCM via FFmpeg
+        # Extract audio segment to raw stereo PCM via FFmpeg
         cmd = [
             "ffmpeg", "-y", "-loglevel", "error",
             "-i", str(path),
@@ -59,7 +64,7 @@ def measure_lufs(
             cmd += ["-t", str(end - start)]
         cmd += [
             "-vn",  # no video
-            "-ac", "1",  # mono (LUFS is channel-independent for integrated)
+            "-ac", "2",  # stereo — preserves L/R for correct BS.1770 measurement
             "-ar", str(sr),
             "-f", "f32le",  # raw 32-bit float PCM
             "pipe:1",
@@ -72,16 +77,17 @@ def measure_lufs(
             logger.warning(f"[LOUDNESS] FFmpeg failed for {path.name}: {proc.stderr.decode()[:200]}")
             return None
 
-        # Convert raw PCM to numpy array
+        # Convert raw PCM to numpy array shape (samples, 2)
         audio = np.frombuffer(proc.stdout, dtype=np.float32)
-        if len(audio) < sr * 0.1:  # less than 100ms of audio
+        if len(audio) < sr * 0.2:  # less than 100ms of stereo audio (200 samples interleaved)
             logger.warning(f"[LOUDNESS] Audio too short for {path.name} ({len(audio)} samples)")
             return None
+        # De-interleave to (samples, channels)
+        audio = audio.reshape(-1, 2)
 
-        # Measure integrated loudness
+        # Measure integrated loudness per ITU-R BS.1770
         meter = pyloudnorm.Meter(sr)
-        # pyloudnorm expects (samples, channels) shape
-        loudness = meter.integrated_loudness(audio.reshape(-1, 1))
+        loudness = meter.integrated_loudness(audio)
 
         if np.isinf(loudness) or np.isnan(loudness):
             logger.warning(f"[LOUDNESS] Invalid measurement for {path.name}: {loudness}")
@@ -158,11 +164,25 @@ def measure_edit_loudness(
     if edit.music and edit.music.file:
         p = Path(edit.music.file)
         if p.exists():
-            end = (edit.music.start + edit.music.duration) if edit.music.duration > 0 else None
-            lufs = measure_lufs(str(p), start=edit.music.start, end=end)
+            # Measure ONLY the slice that actually plays. If duration is 0, the renderer
+            # uses the full timeline duration, so we should too — measuring the whole song
+            # would give a misleading reading if the slice is a quieter intro/outro.
+            if edit.music.duration > 0:
+                slice_end = edit.music.start + edit.music.duration
+            else:
+                # Match renderer behavior: play from start through total V1 duration
+                total_v1_dur = sum(
+                    (c.source_end - c.source_start) / ((c.speed.rate if c.speed else 1.0) or 1.0)
+                    for c in edit.clips
+                    if c.track == 1
+                )
+                slice_end = edit.music.start + total_v1_dur if total_v1_dur > 0 else None
+            lufs = measure_lufs(str(p), start=edit.music.start, end=slice_end)
             edit.music.measured_loudness_lufs = lufs
             summary["music"] = {"lufs": lufs, "gain_db": edit.music.gain_db}
-            logger.info(f"[LOUDNESS] Music: {lufs} LUFS")
+            logger.info(
+                f"[LOUDNESS] Music slice [{edit.music.start:.1f}-{slice_end if slice_end else 'end'}]: {lufs} LUFS"
+            )
 
     return summary
 

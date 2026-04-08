@@ -266,6 +266,8 @@ class AgentSession:
 
             # Execute each function call
             function_response_parts = []
+            finish_after_batch = False
+            finish_final_message = ""
             for fc_part in function_calls:
                 fc = fc_part.function_call
                 tool_name = fc.name
@@ -280,6 +282,22 @@ class AgentSession:
                 await self._emit("tool_call", tool_call_data)
                 self._event_log.append({"type": "tool_call", "data": tool_call_data})
 
+                # Special handling for finish_turn — exit the loop after this batch
+                if tool_name == "finish_turn":
+                    finish_after_batch = True
+                    finish_final_message = tool_args.get("final_message", "") or ""
+                    logger.info(f"[AGENT] finish_turn called (final_message={len(finish_final_message)} chars)")
+                    # Synthesize a result so the model history stays consistent
+                    result = {"status": "turn_ended"}
+                    function_response_parts.append(
+                        Part(function_response=FunctionResponse(name=tool_name, response=result))
+                    )
+                    self._event_log.append({"type": "tool_result", "data": {
+                        "tool": tool_name, "result": result,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }})
+                    continue
+
                 # Execute the tool
                 result = await self.tools.execute(tool_name, tool_args)
 
@@ -287,10 +305,16 @@ class AgentSession:
                 if tool_name == "message_user":
                     last_message_user_text = tool_args.get("message", "")
                     message_user_this_round = True
+                    logger.info(f"[AGENT] message_user: {last_message_user_text[:120]}")
                     await self._emit("agent_message", {
                         "text": last_message_user_text,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     })
+                    self._chat_log.append(ChatMessage(
+                        role="model",
+                        text=last_message_user_text,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                    ))
 
                 # Special handling for generate_fcpxml — emit timeline data
                 if tool_name == "generate_fcpxml" and "error" not in result:
@@ -354,8 +378,21 @@ class AgentSession:
             # Add function responses to history
             fn_content = Content(role="tool", parts=function_response_parts)
             self._history.append(fn_content)
-            # Note: message_user_this_round stays True until the next text-only
-            # response is suppressed, then gets cleared on the next tool round
+
+            # Exit the loop if finish_turn was called in this batch
+            if finish_after_batch:
+                if finish_final_message.strip():
+                    await self._emit("agent_message", {
+                        "text": finish_final_message,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+                    self._chat_log.append(ChatMessage(
+                        role="model",
+                        text=finish_final_message,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                    ))
+                logger.info(f"[AGENT] Turn ended via finish_turn after {round_num + 1} rounds")
+                return
 
         # If we hit the max rounds, notify
         logger.warning(f"[AGENT] Hit max tool rounds ({MAX_TOOL_ROUNDS})")

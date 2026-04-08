@@ -12,10 +12,12 @@ from typing import Any, Dict, List, Optional
 from src.pipelines.v2.agent.scratchpad import ScratchpadManager
 from src.pipelines.v2.agent.tool_definitions import TOOL_DECLARATIONS  # noqa: F401 — re-exported
 from src.pipelines.v2.agent.tool_helpers import (
+    SoundstripeAPIError,
     download_soundstripe_track,
     fetch_soundstripe_tracks,
     stt_word_timestamps,
     tts_sync,
+    tts_with_timestamps,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,12 +79,8 @@ class ToolExecutor:
                 return await self._generate_narration(args)
             elif tool_name == "select_music":
                 return await self._select_music(args)
-            elif tool_name == "verify_preview":
-                return await self._verify_preview(args)
             elif tool_name == "generate_subtitles":
                 return await self._generate_subtitles(args)
-            elif tool_name == "generate_content":
-                return await self._generate_content(args)
             elif tool_name == "message_user":
                 return self._message_user(args)
             else:
@@ -722,39 +720,74 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
         script_path.parent.mkdir(parents=True, exist_ok=True)
         script_path.write_text(script, encoding="utf-8")
 
-        # Generate audio
+        # Generate audio + word-level timestamps in one call
         audio_path = self.workspace.root / "narration" / "narration.mp3"
         try:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
+            words = await loop.run_in_executor(
                 None,
-                lambda: tts_sync(script, str(audio_path), api_key),
+                lambda: tts_with_timestamps(script, str(audio_path), api_key),
             )
         except Exception as e:
-            return {"error": f"TTS generation failed: {e}"}
+            logger.warning(f"[AGENT] TTS-with-timestamps failed: {e}, falling back to plain TTS")
+            try:
+                await loop.run_in_executor(
+                    None, lambda: tts_sync(script, str(audio_path), api_key)
+                )
+                words = []
+            except Exception as e2:
+                return {"error": f"TTS generation failed: {e2}"}
 
-        # Get duration
+        # Get audio duration (from file, not from word timestamps which may have rounding)
         duration = await self._get_audio_duration(str(audio_path))
 
-        # Build per-sentence transcript with estimated timestamps.
-        # Pro-rate by word count so the agent can align clips to narration.
-        import re
-        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', script.strip()) if s.strip()]
-        word_counts = [len(s.split()) for s in sentences]
-        total_words = sum(word_counts) or 1
+        # Build per-sentence transcript from REAL word timestamps. Sentences are
+        # delimited by words ending in . ? ! (marked with is_sentence_end).
         transcript = []
-        cursor = 0.0
-        for sent, wc in zip(sentences, word_counts):
-            sent_dur = duration * (wc / total_words)
-            transcript.append({
-                "text": sent,
-                "start": round(cursor, 2),
-                "end": round(cursor + sent_dur, 2),
-                "word_count": wc,
-            })
-            cursor += sent_dur
+        if words:
+            sent_words = []
+            sent_start: Optional[float] = None
+            for w in words:
+                if sent_start is None:
+                    sent_start = w["start"]
+                sent_words.append(w["text"])
+                if w["is_sentence_end"]:
+                    transcript.append({
+                        "text": " ".join(sent_words),
+                        "start": round(sent_start, 3),
+                        "end": round(w["end"], 3),
+                        "word_count": len(sent_words),
+                    })
+                    sent_words = []
+                    sent_start = None
+            # Trailing sentence without terminal punctuation
+            if sent_words and sent_start is not None:
+                transcript.append({
+                    "text": " ".join(sent_words),
+                    "start": round(sent_start, 3),
+                    "end": round(words[-1]["end"], 3),
+                    "word_count": len(sent_words),
+                })
+        else:
+            # Fallback: if word timestamps unavailable, use proportional estimation
+            # (legacy behavior — agent should know these are estimates)
+            import re
+            sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', script.strip()) if s.strip()]
+            word_counts = [len(s.split()) for s in sentences]
+            total_words = sum(word_counts) or 1
+            cursor = 0.0
+            for sent, wc in zip(sentences, word_counts):
+                sent_dur = duration * (wc / total_words)
+                transcript.append({
+                    "text": sent,
+                    "start": round(cursor, 2),
+                    "end": round(cursor + sent_dur, 2),
+                    "word_count": wc,
+                    "_estimated": True,
+                })
+                cursor += sent_dur
 
-        return {
+        result = {
             "status": "generated",
             "narration_path": str(audio_path),
             "script_length": len(script),
@@ -762,6 +795,16 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
             "word_count": len(script.split()),
             "transcript": transcript,
         }
+        if words:
+            result["words"] = words  # full word-level timing available
+            result["timestamps_source"] = "elevenlabs_alignment"
+        else:
+            result["timestamps_source"] = "estimated_proportional"
+        logger.info(
+            f"[AGENT] Narration generated: {duration:.2f}s, {len(transcript)} sentences, "
+            f"{len(words)} words ({result['timestamps_source']})"
+        )
+        return result
 
     async def _select_music(self, args: Dict) -> Dict:
         """Fetch tracks from Soundstripe, use Gemini to pick best match, download it."""
@@ -784,12 +827,31 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
         })
 
         loop = asyncio.get_event_loop()
-        tracks = await loop.run_in_executor(
-            None, lambda: fetch_soundstripe_tracks(soundstripe_key)
-        )
+        try:
+            tracks = await loop.run_in_executor(
+                None, lambda: fetch_soundstripe_tracks(soundstripe_key)
+            )
+        except SoundstripeAPIError as e:
+            logger.warning(f"[AGENT] Soundstripe API failure: {e}")
+            return {
+                "error": f"Soundstripe API failure: {e}",
+                "user_facing_message": (
+                    "The Soundstripe music API is currently unavailable "
+                    "(authentication or quota issue). The library is NOT empty — "
+                    "this is an infrastructure problem on our side. "
+                    "Tell the user the music service is temporarily down and they may "
+                    "need to renew the API key."
+                ),
+            }
 
         if not tracks:
-            return {"error": "No tracks found from music library"}
+            return {
+                "error": "Soundstripe returned an empty result set",
+                "user_facing_message": (
+                    "The Soundstripe API responded successfully but returned zero tracks. "
+                    "This is unusual — the search query may have been too restrictive."
+                ),
+            }
 
         # Step 2: Build descriptions for Gemini to choose from
         track_descriptions = []

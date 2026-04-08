@@ -307,6 +307,8 @@ function ClipItem({
   const isAudioTrack = track.type === 'audio';
   const isTitleTrack = track.type === 'title';
   const canDrag = isVideoTrack && item.clipIndex >= 0;
+  // Audio items support click-to-select but not drag yet
+  const canSelect = canDrag || isAudioTrack;
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     if (!canDrag) return;
@@ -326,7 +328,10 @@ function ClipItem({
   const [cursor, setCursor] = useState<string>('default');
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     onMove(e);
-    if (!canDrag) return;
+    if (!canDrag) {
+      if (canSelect) setCursor('pointer');
+      return;
+    }
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const relX = e.clientX - rect.left;
     if (relX <= RETRIM_HANDLE_W || relX >= rect.width - RETRIM_HANDLE_W) {
@@ -334,14 +339,15 @@ function ClipItem({
     } else {
       setCursor('grab');
     }
-  }, [canDrag, onMove]);
+  }, [canDrag, canSelect, onMove]);
 
   const handleClick = useCallback((e: React.MouseEvent) => {
-    if (onSelect && isVideoTrack && item.clipIndex >= 0) {
+    if (!onSelect) return;
+    if (canSelect) {
       e.stopPropagation();
       onSelect(item.id);
     }
-  }, [onSelect, isVideoTrack, item.clipIndex, item.id]);
+  }, [onSelect, canSelect, item.id]);
 
   return (
     <div
@@ -359,7 +365,7 @@ function ClipItem({
         height: track.height - 4,
         borderRadius: '3px',
         overflow: 'hidden',
-        cursor: canDrag ? cursor : 'default',
+        cursor: canDrag || canSelect ? cursor : 'default',
         background: isTitleTrack
           ? `linear-gradient(180deg, ${item.color}44, ${item.color}22)`
           : `linear-gradient(180deg, ${item.color}38, ${item.color}18, ${item.color}08)`,

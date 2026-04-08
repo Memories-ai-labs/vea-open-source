@@ -163,10 +163,11 @@ TOOL_DECLARATIONS = Tool(
                 "Generate narration voiceover audio from a script. Takes the narration script text "
                 "and produces a single narration.mp3 file in the workspace. Call this ONLY after "
                 "an edit plan exists (so you know clip durations). The user must have requested "
-                "narration — do NOT call this unprompted. Returns the file path, duration, and a "
-                "transcript with per-sentence timestamps ({text, start, end}). Use the transcript "
-                "to align clips to the narration — adjust clip order and durations so visuals "
-                "match what's being narrated at each moment."
+                "narration — do NOT call this unprompted. Returns: file path, duration, a per-sentence "
+                "`transcript` array, and a per-word `words` array — both with REAL timestamps from "
+                "ElevenLabs character alignment (not estimates). When splitting narration around "
+                "dialogue clips, the start/end of every segment MUST equal a word boundary from the "
+                "words array — never invent timestamps or you will cut speech mid-word."
             ),
             parameters={
                 "type": "object",
@@ -206,30 +207,8 @@ TOOL_DECLARATIONS = Tool(
                 "required": ["prompt"],
             },
         ),
-        FunctionDeclaration(
-            name="verify_preview",
-            description=(
-                "Watch the latest rendered preview video and provide a professional critique. "
-                "Sends the render to a vision model that analyzes pacing, transitions, audio mix, "
-                "visual composition, and overall flow. Returns detailed feedback with specific "
-                "timestamps and actionable suggestions. Use this after rendering to quality-check "
-                "the edit before delivering to the user, or when the user asks you to review."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "focus": {
-                        "type": "string",
-                        "description": (
-                            "What to focus the review on — e.g. 'pacing and transitions', "
-                            "'does the narration sync with visuals', 'overall quality check', "
-                            "'are the clip selections compelling'. Leave empty for a general review."
-                        ),
-                    },
-                },
-                "required": [],
-            },
-        ),
+        # verify_preview removed — Gemini's video understanding is too imprecise
+        # and the timeline view + LUFS measurements provide better signal.
         FunctionDeclaration(
             name="generate_subtitles",
             description=(
@@ -254,52 +233,14 @@ TOOL_DECLARATIONS = Tool(
                 "required": [],
             },
         ),
-        FunctionDeclaration(
-            name="generate_content",
-            description=(
-                "Generate a short AI video clip from a text prompt using Veo (Google's video "
-                "generation model). Returns the file path to the generated MP4 which can then "
-                "be used as a clip in the edit decision. Generation takes 1-5 minutes. "
-                "The user MUST explicitly request AI-generated content — do NOT call this unprompted. "
-                "Generated clips are saved to the workspace and can be referenced by source_file "
-                "in the edit decision."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": (
-                            "Detailed description of the video to generate. Be specific about: "
-                            "visual content, camera movement, lighting, mood, action. "
-                            "Example: 'A slow aerial drone shot over a misty mountain range at sunrise, "
-                            "golden light breaking through clouds, cinematic 4K quality.'"
-                        ),
-                    },
-                    "duration": {
-                        "type": "integer",
-                        "description": "Video duration in seconds. Options: 4, 6, or 8. Default 8.",
-                    },
-                    "aspect_ratio": {
-                        "type": "string",
-                        "description": "Aspect ratio: '16:9' (landscape) or '9:16' (portrait). Default '16:9'.",
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": (
-                            "Short name for the generated clip (used as filename). "
-                            "Example: 'mountain_sunrise'. Default 'generated'."
-                        ),
-                    },
-                },
-                "required": ["prompt"],
-            },
-        ),
+        # generate_content (Veo video generation) — temporarily disabled
         FunctionDeclaration(
             name="message_user",
             description=(
                 "Send a visible message to the user in the chat interface. "
-                "Use this to share findings, propose plans, ask questions, or report progress."
+                "Use this to share findings, propose plans, ask questions, or report progress "
+                "DURING work. This does NOT end your turn — you can keep calling tools after. "
+                "When you're completely done with the user's request, call finish_turn instead."
             ),
             parameters={
                 "type": "object",
@@ -310,6 +251,30 @@ TOOL_DECLARATIONS = Tool(
                     },
                 },
                 "required": ["message"],
+            },
+        ),
+        FunctionDeclaration(
+            name="finish_turn",
+            description=(
+                "Signal that you have finished all the work needed for the user's current request "
+                "and are ready to wait for their next message. This explicitly ENDS YOUR TURN. "
+                "Call this exactly once when you are completely done — after all tools have been "
+                "called, all audio issues in the timeline view are resolved, and you've delivered "
+                "the result. Pass an optional `final_message` to summarize what you did. "
+                "Do NOT call this if there is still work pending or unaddressed issues."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "final_message": {
+                        "type": "string",
+                        "description": (
+                            "Optional final summary message to show the user. If provided, this "
+                            "is sent as a regular agent message before the turn ends."
+                        ),
+                    },
+                },
+                "required": [],
             },
         ),
     ]

@@ -496,6 +496,20 @@ async def _mix_audio_and_titles(
     filter_parts = []
     audio_streams = ["[0:a]"]
 
+    # Auto-target loudness for music/narration. The agent has been bad at writing
+    # gain_db math, so we hardcode targets and compute the actual dB at render time.
+    # The agent's gain_db is treated as an OFFSET from the target (so gain_db=0 means
+    # "play at target", gain_db=-3 means "3 dB below target", etc.).
+    TARGET_NARRATION_LUFS = -16.0
+    TARGET_MUSIC_LUFS = -18.0
+
+    def _compute_auto_gain(measured_lufs: Optional[float], target_lufs: float, agent_offset_db: float) -> float:
+        if measured_lufs is None:
+            return agent_offset_db  # no measurement yet — use literal
+        gain = (target_lufs + agent_offset_db) - measured_lufs
+        # Clamp to sane range to avoid extreme adjustments
+        return max(-30.0, min(20.0, round(gain, 1)))
+
     # Narration segments
     if has_narration:
         for seg in edit.narration:
@@ -505,7 +519,16 @@ async def _mix_audio_and_titles(
                 continue
             inputs.extend(["-i", str(nar_path)])
             delay_ms = int(seg.timeline_offset * 1000)
-            gain = f"volume={seg.gain_db}dB," if seg.gain_db != 0 else ""
+            actual_gain = _compute_auto_gain(
+                getattr(seg, "measured_loudness_lufs", None),
+                TARGET_NARRATION_LUFS,
+                seg.gain_db,
+            )
+            logger.info(
+                f"[PREVIEW] Narration auto-gain: agent_offset={seg.gain_db:+g}dB "
+                f"measured={getattr(seg, 'measured_loudness_lufs', '?')} → applied={actual_gain:+g}dB"
+            )
+            gain = f"volume={actual_gain}dB," if actual_gain != 0 else ""
             filter_parts.append(
                 f"[{input_idx}:a]atrim={seg.start:.3f}:duration={seg.duration:.3f},"
                 f"asetpts=PTS-STARTPTS,{gain}"
@@ -523,7 +546,16 @@ async def _mix_audio_and_titles(
         if mus_path.exists():
             inputs.extend(["-i", str(mus_path)])
             mus_dur = mus.duration if mus.duration > 0 else total_dur
-            gain = f"volume={mus.gain_db}dB," if mus.gain_db != 0 else ""
+            actual_gain = _compute_auto_gain(
+                getattr(mus, "measured_loudness_lufs", None),
+                TARGET_MUSIC_LUFS,
+                mus.gain_db,
+            )
+            logger.info(
+                f"[PREVIEW] Music auto-gain: agent_offset={mus.gain_db:+g}dB "
+                f"measured={getattr(mus, 'measured_loudness_lufs', '?')} → applied={actual_gain:+g}dB"
+            )
+            gain = f"volume={actual_gain}dB," if actual_gain != 0 else ""
             filter_parts.append(
                 f"[{input_idx}:a]atrim={mus.start:.3f}:duration={mus_dur:.3f},"
                 f"asetpts=PTS-STARTPTS,{gain}"
