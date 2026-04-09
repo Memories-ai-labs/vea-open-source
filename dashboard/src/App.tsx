@@ -96,6 +96,8 @@ export default function App() {
         busy={agent.busy}
         needsIndexing={agent.needsIndexing}
         indexingState={agent.indexingState}
+        videoMeta={agent.videoMeta}
+        reindexingFiles={agent.reindexingFiles}
         onSend={agent.send}
         onRequestRender={agent.requestRender}
         onRequestDraftRender={agent.requestDraftRender}

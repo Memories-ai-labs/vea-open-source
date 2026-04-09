@@ -219,6 +219,14 @@ def register_websocket_routes(app: FastAPI):
         try:
             footage_files = [f.name for f in workspace.scan_footage()] if workspace.get_footage_dir().is_dir() else []
             indexed_files = [v.video_name for v in session_data.videos if v.video_no]
+            video_meta = {
+                v.video_name: {
+                    "video_no": v.video_no,
+                    "indexed_at": v.indexed_at,
+                    "duration_seconds": v.duration_seconds,
+                }
+                for v in session_data.videos if v.video_no
+            }
 
             # Detect if indexing is currently in progress
             indexing_state = services._indexing_progress.get(project_name)
@@ -228,6 +236,7 @@ def register_websocket_routes(app: FastAPI):
                 "video_count": len(footage_files),
                 "footage_files": footage_files,
                 "indexed_files": indexed_files,
+                "video_meta": video_meta,
                 "needs_indexing": needs_indexing,
             }
             if agent is not None:
@@ -318,10 +327,13 @@ def register_websocket_routes(app: FastAPI):
                     elif msg_type == "index_now":
                         # Trigger indexing for this project. Runs in the background and
                         # broadcasts index_progress events through the project's emitter list.
+                        # Optional `files: [filename, ...]` re-indexes only those files
+                        # (deletes the existing memories.ai upload first).
+                        only_files = msg.get("files") or None
                         if services._indexing_progress.get(project_name, {}).get("status") == "running":
                             await emit("index_progress", services._indexing_progress[project_name])
                         else:
-                            asyncio.create_task(_run_indexing(project_name, workspace))
+                            asyncio.create_task(_run_indexing(project_name, workspace, only_files=only_files))
 
                     elif msg_type == "render":
                         if agent is None:
@@ -413,13 +425,21 @@ def register_websocket_routes(app: FastAPI):
             except Exception:
                 pass
 
-    async def _run_indexing(project_name: str, workspace: WorkspaceManager):
-        """Run LightweightComprehension on the project's footage and broadcast progress."""
+    async def _run_indexing(
+        project_name: str,
+        workspace: WorkspaceManager,
+        only_files: Optional[list] = None,
+    ):
+        """Run LightweightComprehension on the project's footage and broadcast progress.
+
+        If only_files is provided, only those filenames are re-indexed and merged
+        back into the existing session.
+        """
         from src.pipelines.v2.comprehension.lightweight_comprehension import LightweightComprehension
 
         try:
             footage_files = workspace.scan_footage() if workspace.get_footage_dir().is_dir() else []
-            total = len(footage_files)
+            total = len(only_files) if only_files else len(footage_files)
 
             if not services.memories_manager:
                 await _broadcast_index_progress(project_name, {
@@ -455,15 +475,26 @@ def register_websocket_routes(app: FastAPI):
             session = await pipeline.run(
                 start_fresh=False,
                 progress_callback=_on_progress,
+                only_files=only_files,
             )
 
             indexed = sum(1 for v in session.videos if v.video_no)
+            video_meta = {
+                v.video_name: {
+                    "video_no": v.video_no,
+                    "indexed_at": v.indexed_at,
+                    "duration_seconds": v.duration_seconds,
+                }
+                for v in session.videos if v.video_no
+            }
             await _broadcast_index_progress(project_name, {
                 "status": "complete",
                 "percent": 100,
-                "message": f"Indexing complete: {indexed}/{total} videos.",
+                "message": f"Indexing complete: {indexed} video(s).",
                 "videos_total": total,
                 "videos_done": indexed,
+                "video_meta": video_meta,
+                "indexed_files": [v.video_name for v in session.videos if v.video_no],
             })
             # Clear the in-memory progress after a few seconds so reconnects don't keep showing it
             await asyncio.sleep(2)

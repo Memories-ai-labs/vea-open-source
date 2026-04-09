@@ -22,9 +22,9 @@ This document describes the technical architecture of VEA's V2 agentic editing s
 +------------------+            |     +-- ScratchpadManager   |
                                 |     +-- ToolExecutor        |
 +------------------+            |     +-- WorkspaceManager    |
-|  Gemini          |<---------->|                             |
-|  (Vertex AI)     |            +----+---+---+---+---+-------+
-|  (structured out,|                 |   |   |   |   |
+|  LLM provider    |<---------->|                             |
+|  (OpenRouter or  |            +----+---+---+---+---+-------+
+|   Vertex Gemini, |                 |   |   |   |   |
 |   function call) |                 |   |   |   |   +-- DaVinci Resolve
 +------------------+                 |   |   |   +------ Soundstripe
                                      |   |   +---------- ElevenLabs TTS
@@ -114,18 +114,20 @@ handle_user_message(text)
 
 ## Tool System
 
-The agent has 7 tools, declared as Gemini `FunctionDeclaration` objects in `tools.py`:
+The agent has 10 tools, declared as Gemini `FunctionDeclaration` objects in `tool_definitions.py` and executed by `ToolExecutor` in `tools.py`:
 
 | Tool | Purpose | Calls |
 |------|---------|-------|
 | `ask_memories` | Ask natural-language questions about footage | Memories.ai Chat API |
-| `search_footage` | Find clips by query, returns timestamps + scores | Memories.ai Search API (BY_CLIP) |
+| `search_footage` | Find clips by query, returns timestamps + transcripts | Memories.ai Search API (BY_CLIP) |
 | `refine_clip_timestamps` | Precise in/out point selection using video + audio analysis | ffmpeg extract + downsample, then Gemini structured output |
 | `update_scratchpad` | Write to one of 4 persistent scratchpads | Local filesystem |
-| `generate_fcpxml` | Compile EditDecision JSON to FCPXML 1.10 | Deterministic compiler |
-| `generate_narration` | Convert script to voiceover audio | ElevenLabs TTS API |
-| `select_music` | Search music library, LLM picks best match, download | Soundstripe API + Gemini selection |
-| `message_user` | Send visible message to user in chat | WebSocket event |
+| `generate_fcpxml` | Validate clips against ffprobe durations, compile EditDecision JSON to FCPXML 1.10, kick off draft render | Deterministic compiler + FFmpeg |
+| `generate_narration` | Convert script to voiceover audio with real word-level timestamps | ElevenLabs TTS (`convert_with_timestamps`) |
+| `select_music` | Search music library, LLM picks best match, download | Soundstripe API + LLM selection |
+| `generate_subtitles` | Transcribe original audio, add subtitle text overlays to the edit | ElevenLabs Scribe STT |
+| `message_user` | Send visible message to user mid-flow (does NOT end the turn) | WebSocket event |
+| `finish_turn` | Explicit signal that the agent's turn is complete (with optional final summary) | WebSocket event |
 
 ### refine_clip_timestamps Detail
 
@@ -216,24 +218,46 @@ EditDecision
   +-- timeline: TimelineSettings
   |     name, fps (24.0), width (1920), height (1080)
   |
-  +-- clips: List[ClipDecision]        # ordered, sequential on spine
+  +-- clips: List[ClipDecision]        # V1 spine clips are sequential; track 2+ clips are overlays
   |     id, source_file, source_path
-  |     source_start, source_end        # seconds
+  |     source_start, source_end        # seconds (validated against ffprobe duration)
+  |     source_width, source_height
   |     label, description
-  |     gain_db                         # audio level adjustment
+  |     gain_db                         # LITERAL dB adjustment (0 = original, -96 = mute)
+  |     measured_loudness_lufs          # READ-ONLY, set by renderer after measurement
   |     speed: SpeedChange              # rate (0.5 = slow-mo, 2.0 = fast)
-  |     transform: TransformSettings    # crop/reframe
-  |     transition_after: TransitionSpec # cross-dissolve, fade-in, fade-out
+  |     transform: TransformSettings    # static crop/reframe (scale, position, rotation)
+  |     transform_mode                  # "fit" | "custom" | "saliency"
+  |     shot_transforms                 # per-shot crop results from dynamic crop tool
+  |     transition_after: TransitionSpec
+  |     track                           # 1 = V1 spine, 2+ = overlay tracks
+  |     timeline_offset                 # absolute timeline position (required for track 2+)
   |
   +-- narration: List[NarrationSegment]
-  |     file, timeline_offset, start, duration, gain_db
+  |     file, timeline_offset
+  |     start, duration                 # MUST land on word boundaries from generate_narration
+  |     gain_db                         # OFFSET from -16 LUFS target (default 0)
+  |     measured_loudness_lufs          # READ-ONLY
   |
   +-- music: MusicTrack (optional)
-  |     file, start, duration, gain_db (-12 default)
+  |     file
+  |     start, duration                 # duration=0 means "match timeline length"
+  |     gain_db                         # OFFSET from -18 LUFS target (default 0 — NOT -18!)
+  |     measured_loudness_lufs          # READ-ONLY
   |
   +-- titles: List[TextOverlay]
-        text, timeline_offset, duration, font_size, lane
+        text, timeline_offset, duration
+        font_size, lane                 # positive lane = above spine
+        style                           # "title" (centered) | "subtitle" (bottom caption)
+        position                        # "center" | "bottom" | "top"
 ```
+
+### Audio gain semantics
+
+The two `gain_db` rules are easy to confuse:
+
+* **Source clips** — `gain_db` is a literal dB adjustment. `0` = play at original level, `-96` = mute. The agent computes the exact value from `measured_loudness_lufs` after the first render: `gain_db = target_lufs - measured_lufs` where dialogue target is -16 and b-roll target is -18.
+* **Narration / music** — `gain_db` is an **offset from the target**, not literal. The renderer measures the actual loudness and applies `(target + agent_offset) - measured`. Default `0` means "play at default target". Writing `gain_db = -18` for music makes it inaudible — that's the most common LLM mistake. The system prompt warns about it explicitly.
 
 ---
 
@@ -281,10 +305,7 @@ Each project lives in `data/workspaces/{project_name}/`:
 |   +-- keynote.mp4
 |   +-- interview.mov
 |
-+-- session.json                # SessionData: video entries, status, planning state
-+-- context.md                  # Accumulated context (gist + planning notes)
-+-- storyboard.json             # Storyboard model (v1 planning loop output)
-+-- clips.json                  # RetrievedClip list from planning loop
++-- session.json                # SessionData: video entries, indexing status
 +-- chat_history.json           # Persisted chat messages for session reload
 +-- event_log.json              # Persisted tool call/result events (last 200)
 |
@@ -294,10 +315,6 @@ Each project lives in `data/workspaces/{project_name}/`:
 |   +-- planning.md
 |   +-- fcpxml.md
 |   +-- timestamps.json
-|
-+-- iterations/                 # Planning loop snapshots
-|   +-- iter_0_tool_plan.json
-|   +-- iter_0_storyboard.json
 |
 +-- narration/                  # Generated voiceover
 |   +-- narration_script.txt
@@ -310,12 +327,14 @@ Each project lives in `data/workspaces/{project_name}/`:
 |   +-- edit_decision.json      # Raw EditDecision JSON (dashboard reads this)
 |   +-- edit_v1.fcpxml          # Compiled FCPXML 1.10
 |
-+-- renders/                    # DaVinci Resolve output
-|   +-- preview.mp4
++-- renders/
+|   +-- draft.mp4               # Auto-rendered FFmpeg draft (always available)
+|   +-- final.mp4               # DaVinci Resolve final render (optional)
 |
-+-- logs/                       # Run logs
-    +-- run.log
++-- logs/run.log
 ```
+
+> **Note:** The legacy V1 planning loop wrote additional files (`storyboard.json`, `clips.json`, `iterations/`, `context.md`). The V2 agent flow does not produce these. You may see them in older workspaces; they are safe to ignore or delete.
 
 ### Session States
 
@@ -438,9 +457,14 @@ This is much faster than V1 indexing (no scene-by-scene analysis). Detailed unde
 
 ---
 
-## Gemini Integration
+## LLM Provider Integration
 
-`GeminiGenaiManager` (`lib/llm/GeminiGenaiManager.py`) wraps Google's Vertex AI Gemini API.
+V2 supports two LLM backends, both exposing the same `gemini_manager` interface so call sites are identical. The selection happens in `src/services.py` at startup:
+
+* **OpenRouter** (`lib/llm/OpenRouterManager.py`) — used when `OPENROUTER_API_KEY` is set and `LLM_PROVIDER` is not `vertex`. Default model: `google/gemini-2.5-flash` (override via `OPENROUTER_MODEL`).
+* **Vertex AI Gemini** (`lib/llm/GeminiGenaiManager.py`) — used when OpenRouter is not configured, or forced via `LLM_PROVIDER=vertex`. Requires `GOOGLE_CLOUD_PROJECT` and `gcloud auth application-default login`.
+
+Both wrap function calling, structured output, and multimodal (video/image) inputs. The remainder of this section uses "Gemini" generically.
 
 ### Agent Loop Usage
 
@@ -512,11 +536,12 @@ DaVinci Resolve support is implemented but optional. It provides rendering of FC
 
 ### Auto-Render
 
-After FCPXML generation, the agent session kicks off a background preview render:
-- `_auto_render_preview()` creates an asyncio task
-- Emits `render_start`, `render_progress`, `render_complete` events
-- Output written to `{workspace}/renders/preview.mp4`
-- Non-fatal if Resolve is unavailable
+After FCPXML generation, the agent session kicks off two renders:
+
+- **Draft** (always): `src/pipelines/v2/preview/ffmpeg_renderer.py` runs an FFmpeg-based render to `{workspace}/renders/draft.mp4`. Fast, low-resolution (480p shorter dimension, aspect-aware), no Resolve needed.
+- **Final** (optional): If DaVinci Resolve is available, `lib/utils/resolve_render.py` produces `{workspace}/renders/final.mp4` at the timeline's native resolution.
+
+Both emit `render_start`, `render_progress`, and `render_complete` (or `render_error`) events. The dashboard preview tabs default to the draft and switch to final when ready.
 
 ### API Endpoints
 

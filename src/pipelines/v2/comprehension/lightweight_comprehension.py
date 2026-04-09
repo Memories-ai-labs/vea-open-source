@@ -49,6 +49,7 @@ class LightweightComprehension:
         self,
         start_fresh: bool = False,
         progress_callback: Optional[ProgressCallback] = None,
+        only_files: Optional[List[str]] = None,
     ) -> SessionData:
         """
         Run comprehension. Returns SessionData with video_nos and gist.
@@ -56,6 +57,9 @@ class LightweightComprehension:
         Args:
             start_fresh: If True, re-upload all videos even if session exists.
             progress_callback: optional async fn(percent, message) for stage updates.
+            only_files: If provided, only re-index these specific filenames and merge
+                the results back into the existing session (other videos are kept).
+                The matching memories.ai videos are deleted first to force a fresh upload.
         """
         async def _report(percent: float, message: str):
             if progress_callback:
@@ -65,6 +69,10 @@ class LightweightComprehension:
                     pass
 
         await _report(2, "Checking for existing session...")
+
+        # --- Per-file re-index path ---
+        if only_files:
+            return await self._reindex_files(only_files, _report)
 
         # --- Check for existing valid session ---
         if not start_fresh and self.workspace.exists():
@@ -172,8 +180,99 @@ class LightweightComprehension:
         await _report(98, "Saving session...")
         return session
 
+    async def _reindex_files(
+        self,
+        filenames: List[str],
+        report: Callable[[float, str], Awaitable[None]],
+    ) -> SessionData:
+        """Re-index a specific subset of files. Deletes existing memories.ai uploads
+        for those names first so the upload actually re-runs, then merges the new
+        VideoEntry objects back into the existing session."""
+        # Load existing session (must exist — per-file re-index only makes sense after initial index)
+        try:
+            session = self.workspace.load_session()
+        except Exception:
+            session = self.workspace.init_session(videos=[])
+
+        all_video_files = self._find_videos()
+        targets = [vf for vf in all_video_files if vf.name in set(filenames)]
+        if not targets:
+            raise ValueError(f"No matching footage files found for: {filenames}")
+
+        await report(8, f"Re-indexing {len(targets)} file(s)...")
+
+        # Delete existing entries for these files from memories.ai so upload re-runs fresh
+        existing_by_name = {v.video_name: v for v in session.videos}
+        for vf in targets:
+            old = existing_by_name.get(vf.name)
+            if old and old.video_no:
+                try:
+                    await self.memories.delete_video(old.video_no)
+                    logger.info(f"[COMPREHENSION] Deleted old memories.ai entry for {vf.name} ({old.video_no})")
+                except Exception as e:
+                    logger.warning(f"[COMPREHENSION] Could not delete old entry for {vf.name}: {e}")
+
+        await report(15, f"Uploading {len(targets)} file(s) to Memories.ai...")
+        upload_results = await asyncio.gather(*[
+            self._upload_one(vf) for vf in targets
+        ], return_exceptions=True)
+
+        new_entries: List[VideoEntry] = []
+        for vf, result in zip(targets, upload_results):
+            if isinstance(result, Exception):
+                logger.error(f"[COMPREHENSION] Re-index upload failed for {vf.name}: {result}")
+                continue
+            new_entries.append(result)
+
+        if not new_entries:
+            raise RuntimeError("All re-index uploads failed")
+
+        await report(40, f"Waiting for indexing to complete...")
+        await asyncio.gather(*[
+            self.memories.wait_for_ready(v.video_no, timeout=3600)
+            for v in new_entries
+        ])
+
+        await report(75, "Generating updated content gists...")
+        async def _gist_one(entry: VideoEntry) -> str:
+            try:
+                resp = await self.memories.chat([entry.video_no], GIST_PROMPT)
+                return resp.text
+            except Exception as e:
+                logger.warning(f"[COMPREHENSION] Gist failed for {entry.video_name}: {e}")
+                return ""
+
+        gists = await asyncio.gather(*[_gist_one(v) for v in new_entries])
+        for entry, gist_text in zip(new_entries, gists):
+            entry.gist = gist_text
+
+        # Merge new entries back into session, replacing matching ones
+        new_by_name = {v.video_name: v for v in new_entries}
+        merged = [new_by_name.get(v.video_name, v) for v in session.videos]
+        # Add any entries that weren't already in the session (rare)
+        existing_names = {v.video_name for v in session.videos}
+        for v in new_entries:
+            if v.video_name not in existing_names:
+                merged.append(v)
+        session.videos = merged
+
+        # Rebuild combined gist
+        if len(session.videos) == 1:
+            session.gist = session.videos[0].gist
+        else:
+            session.gist = "\n\n---\n\n".join(
+                f"**{v.video_name}**\n\n{v.gist}" for v in session.videos if v.gist
+            )
+
+        session.status = "indexed"
+        self.workspace.save_session(session)
+        logger.info(f"[COMPREHENSION] Re-indexed {len(new_entries)} file(s); session saved")
+        await report(98, "Saving session...")
+        return session
+
     async def _upload_one(self, video_path: Path) -> VideoEntry:
         """Upload a single video file and return a VideoEntry."""
+        now = datetime.now(timezone.utc).isoformat()
         # Check if already uploaded under this name
         existing = await self.memories.find_video_by_name(video_path.name)
         if existing and existing.status == "PARSE":
@@ -183,6 +282,7 @@ class LightweightComprehension:
                 video_name=video_path.name,
                 source_path=str(video_path.resolve()),
                 duration_seconds=existing.duration,
+                indexed_at=now,
             )
 
         video_no = await self.memories.upload_video_file(str(video_path))
@@ -190,6 +290,7 @@ class LightweightComprehension:
             video_no=video_no,
             video_name=video_path.name,
             source_path=str(video_path.resolve()),
+            indexed_at=now,
         )
 
     def _find_videos(self) -> List[Path]:

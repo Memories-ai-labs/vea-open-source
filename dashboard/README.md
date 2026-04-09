@@ -1,73 +1,39 @@
-# React + TypeScript + Vite
+# VEA Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + Vite + TypeScript frontend for the VEA agentic video editor. This is **not** a standalone app — it talks to the VEA FastAPI backend (`src/app.py`) over REST and WebSocket.
 
-Currently, two official plugins are available:
+For the full project README, setup instructions, and architecture docs, see the repo root:
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- [`../README.md`](../README.md) — quick start and product overview
+- [`../docs/onboarding.md`](../docs/onboarding.md) — step-by-step developer setup
+- [`../docs/architecture.md`](../docs/architecture.md) — system architecture, including the dashboard section
 
-## React Compiler
+## Running
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+The dashboard is normally built once and served by FastAPI at **http://localhost:8000/app**:
 
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+# From the repo root
+cd dashboard && npm install && npm run build && cd ..
+./dev.sh up
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+For UI development with hot reload, run the Vite dev server alongside the backend:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+./dev.sh up --frontend-dev
+# Backend on http://localhost:8000
+# Vite dev server on http://localhost:5173 (proxies API + WebSocket to :8000)
 ```
+
+The proxy is configured in `vite.config.ts`; both REST (`/video-edit/*`) and WebSocket upgrades are forwarded to the backend.
+
+## Key files
+
+- `src/App.tsx` — root component, project routing
+- `src/hooks/useAgentChat.ts` — single WebSocket hook that owns all real-time state (chat, scratchpads, edit decision, render status, indexing progress)
+- `src/components/AgentChat.tsx` — main editing workspace UI
+- `src/components/NLETimeline.tsx` — multi-track timeline visualization (V1 video, T1 titles, A1 narration, A2 music)
+- `src/components/AudioInspector.tsx` — gain / LUFS panel for selected audio clips
+- `src/components/PreviewPanel.tsx` — draft / final render preview tabs
+- `src/api.ts` — REST helpers

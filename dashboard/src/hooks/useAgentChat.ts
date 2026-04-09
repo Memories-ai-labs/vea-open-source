@@ -114,11 +114,26 @@ interface UseAgentChatResult {
   cropStatuses: Record<string, CropStatus>;
   footageFiles: string[];
   indexedFiles: string[];
+  videoMeta: Record<string, {
+    video_no: string | null;
+    indexed_at: string | null;
+    duration_seconds: number | null;
+  }>;
+  reindexingFiles: Set<string>;
+  needsIndexing: boolean;
+  indexingState: {
+    status: 'idle' | 'running' | 'complete' | 'error';
+    percent: number;
+    message: string;
+    videos_total?: number;
+    videos_done?: number;
+  };
   connected: boolean;
   busy: boolean;
   send: (text: string) => void;
   requestRender: () => void;
   requestDraftRender: () => void;
+  triggerIndex: (files?: string[]) => void;
   clearAndReconnect: () => void;
   updateEditDecision: (updated: EditDecision) => void;
   requestCropClip: (clipId: string) => void;
@@ -149,6 +164,12 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
   const [cropStatuses, setCropStatuses] = useState<Record<string, CropStatus>>({});
   const [footageFiles, setFootageFiles] = useState<string[]>([]);
   const [indexedFiles, setIndexedFiles] = useState<string[]>([]);
+  const [videoMeta, setVideoMeta] = useState<Record<string, {
+    video_no: string | null;
+    indexed_at: string | null;
+    duration_seconds: number | null;
+  }>>({});
+  const [reindexingFiles, setReindexingFiles] = useState<Set<string>>(new Set());
   const [needsIndexing, setNeedsIndexing] = useState<boolean>(false);
   const [indexingState, setIndexingState] = useState<{
     status: 'idle' | 'running' | 'complete' | 'error';
@@ -195,6 +216,8 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
             setBusy(false);
             if (event.data.footage_files) setFootageFiles(event.data.footage_files as string[]);
             if (event.data.indexed_files) setIndexedFiles(event.data.indexed_files as string[]);
+            if (event.data.video_meta) setVideoMeta(event.data.video_meta as any);
+            setReindexingFiles(new Set());
             setNeedsIndexing(Boolean(event.data.needs_indexing));
             if (event.data.indexing_state) {
               setIndexingState(event.data.indexing_state as any);
@@ -268,6 +291,10 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
             if (event.data.status === 'complete') {
               setNeedsIndexing(false);
               if (event.data.indexed_files) setIndexedFiles(event.data.indexed_files as string[]);
+              if (event.data.video_meta) setVideoMeta(event.data.video_meta as any);
+              setReindexingFiles(new Set());
+            } else if (event.data.status === 'error') {
+              setReindexingFiles(new Set());
             }
             break;
 
@@ -489,10 +516,19 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     }
   }, []);
 
-  const triggerIndex = useCallback(() => {
+  const triggerIndex = useCallback((files?: string[]) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      setIndexingState({ status: 'running', percent: 1, message: 'Requesting indexing...' });
-      wsRef.current.send(JSON.stringify({ type: 'index_now' }));
+      setIndexingState({
+        status: 'running',
+        percent: 1,
+        message: files && files.length
+          ? `Re-indexing ${files.length} file(s)...`
+          : 'Requesting indexing...',
+      });
+      if (files && files.length) {
+        setReindexingFiles(new Set(files));
+      }
+      wsRef.current.send(JSON.stringify({ type: 'index_now', files: files || null }));
     }
   }, []);
 
@@ -523,5 +559,5 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     setTimeout(() => { if (mountedRef.current) connect(); }, 300);
   }, [connect]);
 
-  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, footageFiles, indexedFiles, needsIndexing, indexingState, connected, busy, send, requestRender, requestDraftRender, clearAndReconnect, updateEditDecision, requestCropClip, triggerIndex };
+  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, footageFiles, indexedFiles, videoMeta, reindexingFiles, needsIndexing, indexingState, connected, busy, send, requestRender, requestDraftRender, clearAndReconnect, updateEditDecision, requestCropClip, triggerIndex };
 }

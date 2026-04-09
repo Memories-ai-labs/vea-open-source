@@ -34,10 +34,16 @@ interface AgentChatProps {
     videos_total?: number;
     videos_done?: number;
   };
+  videoMeta?: Record<string, {
+    video_no: string | null;
+    indexed_at: string | null;
+    duration_seconds: number | null;
+  }>;
+  reindexingFiles?: Set<string>;
   onSend: (text: string) => void;
   onRequestRender: () => void;
   onRequestDraftRender: () => void;
-  onTriggerIndex?: () => void;
+  onTriggerIndex?: (files?: string[]) => void;
   onBack: () => void;
   onClearState: () => void;
   onEditDecisionChange: (updated: EditDecision) => void;
@@ -110,7 +116,7 @@ function useHorizontalDivider(
 }
 
 export function AgentChat({
-  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, connected, busy, needsIndexing, indexingState, onSend, onRequestRender, onRequestDraftRender, onTriggerIndex, onBack, onClearState, onEditDecisionChange, onRequestCropClip,
+  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, connected, busy, needsIndexing, indexingState, videoMeta, reindexingFiles, onSend, onRequestRender, onRequestDraftRender, onTriggerIndex, onBack, onClearState, onEditDecisionChange, onRequestCropClip,
 }: AgentChatProps) {
   const { toast } = useToast();
   const [project, setProject] = useState(initialProject);
@@ -131,10 +137,6 @@ export function AgentChat({
   const [dropdownPos, setDropdownPos] = useState<{ top: number; right: number } | null>(null);
   const isTablet = useBreakpoint(1080);
   const isMobile = useBreakpoint(720);
-
-  // Panel visibility toggles
-  const [showMediaPool, setShowMediaPool] = useState(true);
-  const [showInspector, setShowInspector] = useState(true);
 
   // Layout: upper row pct (of the main content area), lower gets the rest
   const [upperPct, setUpperPct] = useState(55);
@@ -483,13 +485,18 @@ export function AgentChat({
     onEditDecisionChange(updated);
   }, [editDecision, onEditDecisionChange]);
 
-  async function handleIndex() {
+  async function handleIndex(files?: string[]) {
     // Use the WebSocket path so progress streams to the indexing banner.
     // Falls back to REST if onTriggerIndex isn't wired (shouldn't happen).
     if (onTriggerIndex) {
-      onTriggerIndex();
+      onTriggerIndex(files);
       setManageOpen(false);
-      toast('Indexing started — watch progress in the chat panel', 'success');
+      toast(
+        files && files.length
+          ? `Re-indexing ${files[0]}${files.length > 1 ? ` (+${files.length - 1} more)` : ''}...`
+          : 'Indexing started — watch progress in the Media Pool',
+        'success',
+      );
       return;
     }
     setIndexing(true);
@@ -555,31 +562,6 @@ export function AgentChat({
           workspace
         </span>
 
-        {/* Center cluster: panel toggle buttons */}
-        <div style={{ flex: 1 }} />
-
-        <button
-          onClick={() => setShowMediaPool(v => !v)}
-          style={{
-            ...toolbarToggleBtnStyle,
-            background: showMediaPool ? 'rgba(255,255,255,0.1)' : 'transparent',
-            color: showMediaPool ? 'var(--text-primary)' : 'var(--text-muted)',
-          }}
-        >
-          Media Pool
-        </button>
-
-        <button
-          onClick={() => setShowInspector(v => !v)}
-          style={{
-            ...toolbarToggleBtnStyle,
-            background: showInspector ? 'rgba(255,255,255,0.1)' : 'transparent',
-            color: showInspector ? 'var(--text-primary)' : 'var(--text-muted)',
-          }}
-        >
-          Inspector
-        </button>
-
         <div style={{ flex: 1 }} />
 
         {/* Right cluster: status pills + manage */}
@@ -594,6 +576,7 @@ export function AgentChat({
         <div style={{ position: 'relative' }}>
           <button
             ref={manageBtnRef}
+            title="Settings"
             onClick={() => {
               setManageOpen(o => {
                 if (!o && manageBtnRef.current) {
@@ -606,10 +589,15 @@ export function AgentChat({
             }}
             style={{
               ...toolbarBtnStyle,
-              display: 'flex', alignItems: 'center', gap: '4px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              width: '28px', height: '28px', padding: 0,
+              fontSize: '14px',
+              borderRadius: '6px',
+              border: '1px solid rgba(255,255,255,0.08)',
+              background: manageOpen ? 'rgba(255,255,255,0.08)' : 'transparent',
             }}
           >
-            <span style={{ fontSize: '8px' }}>{manageOpen ? '▾' : '▸'}</span> Manage
+            &#x2699;
           </button>
 
           {/* Dropdown rendered via portal */}
@@ -630,21 +618,6 @@ export function AgentChat({
               backdropFilter: 'blur(12px)',
             }}>
               {manageMsg && <div className="status-message info" style={{ fontSize: '11px', padding: '6px 10px' }}>{manageMsg}</div>}
-              {project.footage_files.length > 0 && (() => {
-                const wsRunning = indexingState?.status === 'running';
-                const isBusy = indexing || wsRunning;
-                return (
-                  <DropdownBtn
-                    color={isIndexed ? 'var(--text-secondary)' : 'var(--accent-blue)'}
-                    disabled={isBusy}
-                    onClick={handleIndex}
-                  >
-                    {isBusy
-                      ? `Indexing${wsRunning && indexingState?.percent != null ? ` ${Math.round(indexingState.percent)}%` : '...'}`
-                      : isIndexed ? 'Re-index footage' : 'Index footage'}
-                  </DropdownBtn>
-                );
-              })()}
               <DropdownBtn color="var(--text-secondary)" disabled={manageLoading === 'gists'} onClick={async () => { setManageLoading('gists'); try { await clearGists(project.project_name); setManageMsg('Gists cleared.'); toast('Gists cleared', 'success'); await refresh(); } catch (e: any) { setManageMsg(`Error: ${e.message}`); toast(`Failed to clear gists: ${e.message}`, 'error'); } finally { setManageLoading(null); } }}>
                 {manageLoading === 'gists' ? 'Clearing...' : 'Clear gists'}
               </DropdownBtn>
@@ -702,29 +675,38 @@ export function AgentChat({
         }}>
 
           {/* LEFT PANEL: Media Pool + Scratchpads */}
-          {showMediaPool && !isTablet && (
+          {!isTablet && (
             <div style={{
-              width: '20%',
-              minWidth: '180px',
-              maxWidth: '320px',
+              width: '22%',
+              minWidth: '220px',
+              maxWidth: '360px',
               borderRight: '1px solid var(--border)',
               display: 'flex',
               flexDirection: 'column',
               overflow: 'hidden',
             }}>
-              {/* Media Pool header */}
-              <div style={{
-                padding: '6px 10px',
-                borderBottom: '1px solid var(--border)',
-                fontSize: '9px',
-                fontFamily: 'var(--font-mono)',
-                textTransform: 'uppercase',
-                letterSpacing: '0.08em',
-                color: 'var(--text-muted)',
-                flexShrink: 0,
-              }}>
-                Media Pool
-              </div>
+              {/* Media Pool header — with index button + progress */}
+              <MediaPoolHeader
+                hasFootage={project.footage_files.length > 0}
+                allIndexed={project.footage_files.length > 0 && project.footage_files.every(f => project.indexed_files?.includes(f))}
+                anyIndexed={(project.indexed_files?.length ?? 0) > 0}
+                indexingState={indexingState}
+                connected={connected}
+                reindexingFiles={reindexingFiles}
+                onIndex={() => handleIndex()}
+              />
+              {indexingState?.status === 'error' && !indexingState.message?.includes('progress') && (
+                <div style={{
+                  padding: '6px 10px',
+                  fontSize: '10px',
+                  color: 'var(--accent-red)',
+                  background: 'rgba(255,80,80,0.06)',
+                  borderBottom: '1px solid var(--border)',
+                  lineHeight: 1.5,
+                }}>
+                  {indexingState.message}
+                </div>
+              )}
 
               {/* Footage files list */}
               <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
@@ -736,6 +718,8 @@ export function AgentChat({
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '1px' }}>
                     {project.footage_files.map((f) => {
                       const indexed = project.indexed_files?.includes(f);
+                      const meta = videoMeta?.[f];
+                      const isReindexing = reindexingFiles?.has(f) ?? false;
                       const fileGist = project.video_gists?.[f] ?? '';
                       const thumbUrl = `/video-edit/v2/projects/${encodeURIComponent(project.project_name)}/footage/${encodeURIComponent(f)}/thumbnail`;
                       const isExpanded = expandedFile === f;
@@ -767,9 +751,15 @@ export function AgentChat({
                               }}
                               onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                             />
-                            <span style={{ fontSize: '9px', color: indexed ? 'var(--accent-green)' : 'var(--text-muted)', flexShrink: 0 }}>
-                              {indexed ? '\u2713' : '\u25CB'}
-                            </span>
+                            <FileIndexStatus
+                              filename={f}
+                              indexed={!!indexed}
+                              isReindexing={isReindexing}
+                              indexedAt={meta?.indexed_at ?? null}
+                              connected={connected}
+                              indexingRunning={indexingState?.status === 'running'}
+                              onReindex={() => handleIndex([f])}
+                            />
                             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{f}</span>
                             {fileGist && <span style={{ fontSize: '8px', color: 'var(--text-muted)', flexShrink: 0 }}>{isExpanded ? '\u25BE' : '\u25B8'}</span>}
                           </button>
@@ -928,11 +918,11 @@ export function AgentChat({
           </div>
 
           {/* RIGHT PANEL: Inspector */}
-          {showInspector && !isTablet && (
+          {!isTablet && (
             <div style={{
-              width: '30%',
-              minWidth: '200px',
-              maxWidth: '360px',
+              width: '22%',
+              minWidth: '240px',
+              maxWidth: '400px',
               borderLeft: '1px solid var(--border)',
               display: 'flex',
               flexDirection: 'column',
@@ -1087,13 +1077,6 @@ export function AgentChat({
             flexDirection: 'column',
             overflow: 'hidden',
           }}>
-            {editDecision && editDecision.clips.length > 0 && !showInspector && (
-              <TimelineSettingsBar
-                width={tlWidth}
-                height={tlHeight}
-                onChange={handleResolutionChange}
-              />
-            )}
             <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
               <NLETimeline
                 editDecision={editDecision}
@@ -1154,80 +1137,6 @@ export function AgentChat({
                 <div className="reconnect-banner">
                   <span className="activity-spinner" style={{ width: '10px', height: '10px', borderWidth: '1.5px' }} />
                   Reconnecting...
-                </div>
-              )}
-
-              {/* Indexing banner */}
-              {(needsIndexing || (indexingState && indexingState.status === 'running')) && (
-                <div style={{
-                  padding: '12px',
-                  borderBottom: '1px solid var(--border)',
-                  background: 'rgba(96,213,200,0.06)',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '8px',
-                }}>
-                  <div style={{ fontSize: '11px', color: 'var(--text-bright)', fontWeight: 600 }}>
-                    {indexingState?.status === 'running'
-                      ? 'Indexing footage...'
-                      : 'Footage needs indexing'}
-                  </div>
-                  {indexingState?.status === 'running' ? (
-                    <>
-                      <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
-                        {indexingState.message || 'Working...'}
-                      </div>
-                      <div style={{
-                        width: '100%',
-                        height: '4px',
-                        background: 'rgba(255,255,255,0.06)',
-                        borderRadius: '2px',
-                        overflow: 'hidden',
-                      }}>
-                        <div style={{
-                          width: `${Math.max(2, indexingState.percent)}%`,
-                          height: '100%',
-                          background: 'var(--accent-blue)',
-                          borderRadius: '2px',
-                          transition: 'width 0.3s ease-out',
-                        }} />
-                      </div>
-                      {indexingState.videos_total != null && (
-                        <div style={{ fontSize: '10px', color: 'var(--text-muted)', textAlign: 'right' }}>
-                          {indexingState.videos_done ?? 0} / {indexingState.videos_total} videos
-                        </div>
-                      )}
-                    </>
-                  ) : (
-                    <>
-                      <div style={{ fontSize: '11px', color: 'var(--text-dim)', lineHeight: 1.5 }}>
-                        Your footage hasn't been indexed yet. Indexing uploads each file
-                        to Memories.ai for content understanding (~30-60s per video).
-                      </div>
-                      {indexingState?.status === 'error' && (
-                        <div style={{ fontSize: '11px', color: 'var(--accent-red)', lineHeight: 1.5 }}>
-                          {indexingState.message}
-                        </div>
-                      )}
-                      <button
-                        onClick={onTriggerIndex}
-                        disabled={!onTriggerIndex || !connected}
-                        style={{
-                          padding: '6px 12px',
-                          background: 'var(--accent-blue)',
-                          color: '#fff',
-                          border: 'none',
-                          borderRadius: 'var(--radius-md)',
-                          cursor: 'pointer',
-                          fontSize: '11px',
-                          fontWeight: 600,
-                          alignSelf: 'flex-start',
-                        }}
-                      >
-                        Index Now
-                      </button>
-                    </>
-                  )}
                 </div>
               )}
 
@@ -1516,6 +1425,255 @@ function timeAgo(iso: string | null | undefined): string {
   return `${days}d ago`;
 }
 
+// ── Media Pool header (with index button + progress) ──
+
+interface MediaPoolHeaderProps {
+  hasFootage: boolean;
+  allIndexed: boolean;
+  anyIndexed: boolean;
+  indexingState?: {
+    status: 'idle' | 'running' | 'complete' | 'error';
+    percent: number;
+    message: string;
+    videos_total?: number;
+    videos_done?: number;
+  };
+  connected: boolean;
+  reindexingFiles?: Set<string>;
+  onIndex: () => void;
+}
+
+function MediaPoolHeader({ hasFootage, allIndexed, anyIndexed, indexingState, connected, reindexingFiles, onIndex }: MediaPoolHeaderProps) {
+  const running = indexingState?.status === 'running';
+  // A "global" run is when reindexingFiles is empty — i.e. we're indexing everything,
+  // not just one file. Per-file re-indexes are visualized inline on the row instead.
+  const globalRunning = running && (!reindexingFiles || reindexingFiles.size === 0);
+  let buttonLabel = 'Index footage';
+  if (allIndexed) buttonLabel = 'Re-index all';
+  else if (anyIndexed) buttonLabel = 'Index missing';
+
+  return (
+    <div style={{
+      borderBottom: '1px solid var(--border)',
+      flexShrink: 0,
+    }}>
+      <div style={{
+        padding: '6px 10px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: '8px',
+      }}>
+        <span style={{
+          fontSize: '9px',
+          fontFamily: 'var(--font-mono)',
+          textTransform: 'uppercase',
+          letterSpacing: '0.08em',
+          color: 'var(--text-muted)',
+        }}>
+          Media Pool
+        </span>
+        {hasFootage && (
+          <button
+            onClick={onIndex}
+            disabled={!connected || running}
+            title={running ? indexingState?.message || 'Indexing...' : buttonLabel}
+            style={{
+              border: '1px solid rgba(255,255,255,0.12)',
+              background: globalRunning ? 'rgba(96,165,250,0.12)' : (anyIndexed ? 'transparent' : 'rgba(96,165,250,0.18)'),
+              color: anyIndexed ? 'var(--text-secondary)' : 'var(--accent-blue)',
+              fontSize: '9px',
+              fontFamily: 'var(--font-mono)',
+              fontWeight: 600,
+              letterSpacing: '0.04em',
+              textTransform: 'uppercase',
+              padding: '3px 8px',
+              borderRadius: '4px',
+              cursor: (!connected || running) ? 'not-allowed' : 'pointer',
+              opacity: (!connected || running) ? 0.6 : 1,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {globalRunning
+              ? `Indexing ${Math.round(indexingState?.percent ?? 0)}%`
+              : running
+                ? 'Working...'
+                : buttonLabel}
+          </button>
+        )}
+      </div>
+      {globalRunning && (
+        <div style={{ padding: '0 10px 6px' }}>
+          <div style={{
+            width: '100%',
+            height: '3px',
+            background: 'rgba(255,255,255,0.06)',
+            borderRadius: '2px',
+            overflow: 'hidden',
+          }}>
+            <div style={{
+              width: `${Math.max(2, indexingState?.percent ?? 0)}%`,
+              height: '100%',
+              background: 'var(--accent-blue)',
+              borderRadius: '2px',
+              transition: 'width 0.3s ease-out',
+            }} />
+          </div>
+          {indexingState?.videos_total != null && (
+            <div style={{ fontSize: '9px', color: 'var(--text-muted)', marginTop: '3px', textAlign: 'right' }}>
+              {indexingState.videos_done ?? 0} / {indexingState.videos_total} videos
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Per-file index status icon with click popover ──
+
+interface FileIndexStatusProps {
+  filename: string;
+  indexed: boolean;
+  isReindexing: boolean;
+  indexedAt: string | null;
+  connected: boolean;
+  indexingRunning: boolean;
+  onReindex: () => void;
+}
+
+function FileIndexStatus({ filename, indexed, isReindexing, indexedAt, connected, indexingRunning, onReindex }: FileIndexStatusProps) {
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLSpanElement>(null);
+  const [popPos, setPopPos] = useState<{ top: number; left: number } | null>(null);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    function onDocClick(e: MouseEvent) {
+      const t = e.target as Node;
+      if (btnRef.current && !btnRef.current.contains(t)) {
+        // Check the popover element too via the data attribute
+        const popEl = document.querySelector(`[data-fileidx-pop="${filename}"]`);
+        if (popEl && popEl.contains(t)) return;
+        setOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [open, filename]);
+
+  const togglePopover = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!open && btnRef.current) {
+      const rect = btnRef.current.getBoundingClientRect();
+      setPopPos({ top: rect.bottom + 4, left: rect.left });
+    }
+    setOpen(o => !o);
+  };
+
+  // Visual states
+  let glyph: React.ReactNode = '\u25CB';      // ○ not indexed
+  let color = 'var(--text-muted)';
+  let title = 'Not indexed yet — click to index';
+  if (isReindexing) {
+    glyph = <span className="activity-spinner" style={{ width: '8px', height: '8px', borderWidth: '1.5px' }} />;
+    color = 'var(--accent-blue)';
+    title = 'Re-indexing...';
+  } else if (indexed) {
+    glyph = '\u2713';                          // ✓ indexed
+    color = 'var(--accent-green)';
+    title = indexedAt ? `Indexed ${timeAgo(indexedAt)} — click for options` : 'Indexed — click for options';
+  }
+
+  return (
+    <>
+      <span
+        ref={btnRef}
+        onClick={togglePopover}
+        title={title}
+        style={{
+          fontSize: '9px',
+          color,
+          flexShrink: 0,
+          width: '14px',
+          height: '14px',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          borderRadius: '3px',
+          cursor: connected && !indexingRunning ? 'pointer' : 'default',
+          background: open ? 'rgba(255,255,255,0.08)' : 'transparent',
+        }}
+      >
+        {glyph}
+      </span>
+      {open && popPos && createPortal(
+        <div
+          data-fileidx-pop={filename}
+          style={{
+            position: 'fixed',
+            top: popPos.top,
+            left: popPos.left,
+            zIndex: 1100,
+            background: 'rgba(28,25,23,0.97)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)',
+            padding: '8px 10px',
+            minWidth: '180px',
+            display: 'grid',
+            gap: '6px',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+            backdropFilter: 'blur(12px)',
+            fontSize: '10px',
+            fontFamily: 'var(--font-mono)',
+          }}
+        >
+          <div style={{ color: 'var(--text-bright)', fontWeight: 600, wordBreak: 'break-all' }}>
+            {filename}
+          </div>
+          <div style={{ color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+            {indexed ? (
+              <>
+                Status: <span style={{ color: 'var(--accent-green)' }}>indexed</span>
+                <br />
+                {indexedAt ? `Indexed ${timeAgo(indexedAt)}` : 'No timestamp recorded'}
+              </>
+            ) : (
+              <>Status: <span style={{ color: 'var(--text-muted)' }}>not indexed</span></>
+            )}
+          </div>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen(false);
+              onReindex();
+            }}
+            disabled={!connected || indexingRunning}
+            style={{
+              border: '1px solid rgba(255,255,255,0.12)',
+              background: 'rgba(96,165,250,0.18)',
+              color: 'var(--accent-blue)',
+              fontSize: '9px',
+              fontFamily: 'var(--font-mono)',
+              fontWeight: 600,
+              letterSpacing: '0.04em',
+              textTransform: 'uppercase',
+              padding: '4px 8px',
+              borderRadius: '4px',
+              cursor: (!connected || indexingRunning) ? 'not-allowed' : 'pointer',
+              opacity: (!connected || indexingRunning) ? 0.6 : 1,
+            }}
+          >
+            {indexed ? 'Re-index this file' : 'Index this file'}
+          </button>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 type TimelineItem = {
   kind: 'message' | 'tool_call' | 'tool_result' | 'refine_progress' | 'scratchpad_update';
   message?: ChatMessage;
@@ -1608,18 +1766,6 @@ const toolbarBtnStyle: React.CSSProperties = {
   borderRadius: '4px',
 };
 
-const toolbarToggleBtnStyle: React.CSSProperties = {
-  border: '1px solid rgba(255,255,255,0.08)',
-  fontSize: '9px',
-  fontFamily: 'var(--font-mono)',
-  fontWeight: 600,
-  letterSpacing: '0.06em',
-  textTransform: 'uppercase',
-  cursor: 'pointer',
-  padding: '3px 8px',
-  borderRadius: '4px',
-  transition: 'background 0.15s, color 0.15s',
-};
 
 const inspectorRowStyle: React.CSSProperties = {
   display: 'flex',

@@ -1,234 +1,228 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Orientation for AI coding assistants (Codex, Claude Code, etc.) working in this repository. For end-user docs, see `README.md`. For deeper technical detail, see `docs/architecture.md` and `docs/onboarding.md`.
 
-## Project Overview
+## What this project is
 
-VEA Playground is a video editing automation service that uses LLMs to understand video content and generate edited video responses. The system indexes long-form videos, comprehends their content, and responds to user prompts by extracting relevant clips, adding narration, music, and dynamic cropping to create polished short-form content.
+VEA is a video editing automation service. The current product is a **conversational editing agent** that runs in a React dashboard. A user drops video files into a workspace, the system indexes them via Memories.ai, and an LLM-driven agent collaborates with the user in chat to plan, refine, and compile a Final Cut Pro XML edit. Drafts auto-render via FFmpeg; high-quality finals can render via DaVinci Resolve.
 
-**LLM Architecture (Hybrid):**
-- **Memories.ai** - Video understanding (upload, indexing, chat with timestamped references)
-- **Gemini (Vertex AI)** - Structured JSON output (schemas, formatting)
+There is also a legacy V1 pipeline (videoComprehension → flexibleResponse → ...) at `src/pipelines/` that is kept for reproducibility of the paper. **Most active development happens in V2.** Don't conflate the two.
 
-## Development Commands
+## Key directories
 
-### Environment Setup
-```bash
-# Install dependencies using uv
-uv sync
-
-# Activate virtual environment
-source .venv/bin/activate
+```
+src/
+├── app.py                          # FastAPI entrypoint (port 8000)
+├── services.py                     # Shared singletons (LLM, Memories.ai, agent sessions)
+├── routes/                         # FastAPI routers
+│   ├── v2_endpoints.py             # REST endpoints for the V2 API
+│   └── v2_websockets.py            # WebSocket: agent chat + indexing progress
+├── pipelines/
+│   ├── v2/                         # ★ Current architecture
+│   │   ├── agent/
+│   │   │   ├── agent_session.py    # Agent loop, history, persistence
+│   │   │   ├── tools.py            # Tool executor (functions invoked by LLM)
+│   │   │   ├── tool_definitions.py # Gemini FunctionDeclarations (10 tools)
+│   │   │   ├── tool_helpers.py     # ElevenLabs / Soundstripe / ffmpeg helpers
+│   │   │   ├── system_prompt.py    # System prompt template + builder
+│   │   │   ├── scratchpad.py       # ScratchpadManager (4 persistent .md files)
+│   │   │   └── timeline_view.py    # Programmatic timeline diagram for the prompt
+│   │   ├── comprehension/
+│   │   │   └── lightweight_comprehension.py   # Upload + gist (V2 indexing)
+│   │   ├── fcpxml/
+│   │   │   └── edit_compiler.py    # Deterministic EditDecision → FCPXML 1.10
+│   │   ├── preview/
+│   │   │   └── ffmpeg_renderer.py  # Auto draft renderer (no DaVinci needed)
+│   │   ├── audio/
+│   │   │   └── loudness.py         # ITU-R BS.1770 LUFS measurement (pyloudnorm)
+│   │   ├── workspace.py            # WorkspaceManager (file I/O for projects)
+│   │   └── schemas.py              # SessionData, EditDecision, ClipDecision, etc.
+│   ├── common/                     # Shared (V1+V2): TimelineConstructor, dynamic crop
+│   └── flexibleResponse/, videoComprehension/, ...   # V1 legacy pipelines
+├── schema.py                       # FastAPI request/response models
+└── config.py                       # Config loading, paths, env var population
+lib/
+├── llm/
+│   ├── MemoriesAiManager.py        # Memories.ai client (upload, chat, search)
+│   ├── GeminiGenaiManager.py       # Vertex AI Gemini client
+│   └── OpenRouterManager.py        # OpenRouter (drop-in replacement for Gemini)
+└── utils/
+    ├── media.py                    # ffmpeg/ffprobe helpers
+    ├── resolve_setup.py            # DaVinci Resolve health check / pythonpath
+    └── resolve_render.py           # DaVinci Resolve render entrypoint
+dashboard/                          # React + Vite + TypeScript frontend
+└── src/
+    ├── App.tsx
+    ├── hooks/useAgentChat.ts       # WebSocket hook, manages all real-time state
+    └── components/                 # AgentChat, NLETimeline, AudioInspector, ...
+data/
+└── workspaces/{project}/           # Per-project storage (footage, edits, renders)
+docs/                               # architecture.md, onboarding.md
 ```
 
-**Required system dependencies:**
-- `ffmpeg` must be installed on the system for video processing
-
-**Configuration files needed:**
-- `config.json` - Copy from `config.example.json` and fill in your API keys:
-  - `MEMORIES_API_KEY` - Memories.ai API key (required for video understanding)
-  - `GOOGLE_CLOUD_PROJECT` - GCP project ID (required for Gemini structured output)
-  - `ELEVENLABS_API_KEY` - ElevenLabs API key (required for narration TTS)
-  - `SOUNDSTRIPE_KEY` - Soundstripe API key (optional, for background music)
-
-**Google Cloud authentication:**
-- Run `gcloud auth application-default login` for Gemini access via Vertex AI
-
-### Running the Service
+## Setup commands
 
 ```bash
-# Run locally (without Docker)
+# Install everything (Python deps via uv, dashboard deps + build)
+uv sync
+cd dashboard && npm install && npm run build && cd ..
+
+# Configure
+cp config.example.json config.json   # then fill in api_keys
+
+# Start backend (also handles setup if missing)
+./dev.sh up
+
+# Or run by hand:
 source .venv/bin/activate
 python -m src.app
-
-# Build Docker container
-sudo docker build -t vea-recap .
-
-# Run Docker container
-sudo docker run -p 8000:8000 vea-recap
 ```
 
-The service runs a FastAPI server on port 8000.
+The dashboard is served at **http://localhost:8000/app**. API docs at **http://localhost:8000/docs**.
 
-## Architecture Overview
+System dependency: `ffmpeg` must be installed (`brew install ffmpeg` or distro equivalent).
 
-### Pipeline-Based Processing
+## LLM provider
 
-The system is organized around **5 main pipelines** that handle different video processing workflows:
+V2 supports two backends, controlled by env vars (loaded from `config.json` at startup):
 
-1. **ComprehensionPipeline** (`src/pipelines/videoComprehension/`) - Indexes videos by generating comprehensive metadata:
-   - Preprocesses videos into segments at different time scales (15min and 5min intervals)
-   - Performs rough comprehension to understand overall narrative
-   - Scene-by-scene analysis to capture detailed visual content
-   - Refines the story into structured JSON and text summaries
-   - Outputs: `story.txt`, `story.json`, `scenes.json`, `people.txt`
+* **OpenRouter** — set `OPENROUTER_API_KEY`. Model defaults to `google/gemini-2.5-flash`, override with `OPENROUTER_MODEL`. This is the default if both are configured.
+* **Vertex AI Gemini** — set `GOOGLE_CLOUD_PROJECT` and run `gcloud auth application-default login`. Force this path by setting `LLM_PROVIDER=vertex`.
 
-2. **FlexibleResponsePipeline** (`src/pipelines/flexibleResponse/`) - Generates responses to user prompts:
-   - Three response types: text-only, text with evidence clips, or full video response
-   - For video responses: generates narration scripts, selects relevant clips, adds music
-   - Runs `edit_video_response.py` as subprocess to assemble final video
-   - Uses evidence retrieval to find relevant timestamps in indexed content
+The selection happens in `src/services.py`. Both providers expose the same interface (`gemini_manager`), so call sites are identical.
 
-3. **MovieToShortsPipeline** (`src/pipelines/movieToShort/`) - Converts long-form content to short-form clips
+## V2 agent architecture (the important part)
 
-4. **ScreenplayPipeline** (`src/pipelines/screenplay/`) - Generates screenplay-style text from video content
+### Agent loop
 
-5. **QualityAssessmentPipeline** (`src/pipelines/qualityAnalysis/`) - Evaluates generated video quality using quizzing
+`AgentSession.handle_user_message()` → `_agent_loop()` (max 40 rounds per user message). Each round:
 
-### Key Architectural Patterns
+1. Rebuild system prompt with current scratchpad state
+2. Call LLM with `_history` + `TOOL_DECLARATIONS` (function calling)
+3. If response has function calls: execute via `ToolExecutor`, append `FunctionResponse` parts, loop again
+4. If response is text only or `finish_turn` is called: emit `agent_message`, end the turn
 
-**Two-phase video processing:**
-- Phase 1: Indexing (ComprehensionPipeline) - run once per video, stores metadata in GCS at `indexing/{video_name}/media_indexing.json`
-- Phase 2: Response generation - uses cached indexing data to quickly respond to prompts
+History is capped at `MAX_HISTORY_TURNS = 80` and persisted to `chat_history.json`.
 
-**Subprocess isolation for video editing:**
-The `FlexibleResponsePipeline` calls `edit_video_response.py` as a subprocess (not imported) to free memory. The subprocess uses `TimelineConstructor` for video assembly.
+### Tools (10)
 
-**Caching strategy:**
-- Videos are cached in `.cache/comprehension_media/` and `.cache/gcs_videos/`
-- Indexing JSON files are cached in `.cache/media_indexing/`
-- Temporary directories created with `tempfile.mkdtemp()` are cleaned via `clean_stale_tempdirs()`
+Declared in `src/pipelines/v2/agent/tool_definitions.py`, executed by `ToolExecutor` in `tools.py`:
 
-**Cloud storage organization:**
-- Source videos: `gs://{BUCKET_NAME}/movie_library/`
-- Indexing data: `gs://{BUCKET_NAME}/indexing/{video_name}/media_indexing.json`
-- Output videos: `gs://{BUCKET_NAME}/outputs/{video_name}/{run_id}/`
+| Tool | Purpose |
+|------|---------|
+| `ask_memories` | Memories.ai chat (Q&A about footage) |
+| `search_footage` | Memories.ai BY_CLIP search (returns clips + transcripts) |
+| `refine_clip_timestamps` | ffmpeg extract → downsample → Gemini structured output for in/out points |
+| `update_scratchpad` | Write to `comprehension` / `creative_direction` / `planning` / `fcpxml` |
+| `generate_fcpxml` | Validate clips against ffprobe durations, compile EditDecision → FCPXML, kick off draft render |
+| `generate_narration` | ElevenLabs TTS with `convert_with_timestamps` (real word boundaries) |
+| `select_music` | Soundstripe search → LLM picks track → download |
+| `generate_subtitles` | STT via ElevenLabs Scribe → subtitle text overlays |
+| `message_user` | Mid-flow message to dashboard (does NOT end the turn) |
+| `finish_turn` | Explicit turn-end signal with optional final message |
 
-### Common Utilities
+### Scratchpads
 
-**`lib/utils/media.py`** - Core video processing functions:
-- `get_video_info(video_path)` - Extract video metadata using ffprobe
-- `get_video_duration(video_path)` - Get duration in seconds
-- `downsample_video()` - Reduce resolution/fps for LLM processing
-- `preprocess_long_video()` - Split video into time-based segments
-- `extract_video_segment()` - Extract clip by timestamp (HH:MM:SS format)
-- `download_and_cache_video()` - Download from GCS with local caching
-- `parse_time_to_seconds()` - Convert HH:MM:SS[,mmm] to float seconds
-- `seconds_to_hhmmss()` - Convert float seconds to HH:MM:SS,mmm
+Four markdown files in `{workspace}/scratchpads/` give the agent durable memory across the sliding context window. They're injected into the system prompt on every call by `system_prompt.build_system_prompt()`. Operations: `replace`, `append`, `prepend`. Cap: 6000 chars per pad.
 
-**`lib/llm/MemoriesAiManager.py`** - Memories.ai video understanding:
-- `upload_video_url(video_url)` - Upload video by URL, returns `videoNo`
-- `upload_video_file(file_path)` - Upload local video file
-- `wait_for_ready(video_no)` - Poll until video indexing completes
-- `chat(video_nos, prompt)` - Query indexed videos, returns text + timestamped references
-- `search(query, search_type)` - Search indexed videos (BY_VIDEO, BY_AUDIO, BY_CLIP)
-- All methods include `[MEMORIES]` prefixed logging for debugging
-- Set `debug=True` for full raw API response logging
+### EditDecision schema
 
-**`lib/llm/GeminiGenaiManager.py`** - Gemini LLM interaction (for structured output):
-- `LLM_request(prompt_contents, schema=None)` - Call Gemini with structured output
-- Accepts mixed inputs: local file paths (Path), GCS URIs (`gs://...`), or text strings
-- Supports Pydantic schema for structured JSON responses
-- Automatic retries with exponential backoff
-- Uses Vertex AI (not direct Genai API)
+`src/pipelines/v2/schemas.py` defines the contract between the LLM and the FCPXML compiler. Top-level: `timeline`, `clips[]`, `narration[]`, `music`, `titles[]`. Each clip has `source_file`, `source_start`, `source_end`, `gain_db`, `speed`, `transform`, `transform_mode`, `shot_transforms`, optional `track`/`timeline_offset` for overlays, and a read-only `measured_loudness_lufs` set after rendering.
 
-**`lib/oss/gcp_oss.py`** - Google Cloud Storage operations via `GoogleCloudStorage` class
+### Audio gain semantics (easy to get wrong)
 
-### FCPXML Export
+* **Source clips** (`clips[].gain_db`) — literal dB adjustment. `0` = original. After a render, the agent reads `measured_loudness_lufs` and computes `gain_db = target_lufs - measured`.
+* **Music / narration** (`gain_db` on `MusicTrack` / `NarrationSegment`) — **offset from target**, not literal. Default `0` means "play at target loudness" (-18 LUFS for music, -16 for narration). The renderer computes `(target + offset) - measured` automatically. Writing `gain_db = -18` for music makes it inaudible — that's the most common LLM mistake; the system prompt warns about it explicitly.
 
-The system can export edits as Final Cut Pro XML (FCPXML 1.10) for professional editing software:
-- `src/pipelines/common/fcpxml_exporter.py` - Generates valid FCPXML with precise frame timing
-- `context/fcpxml_formatting_guide.md` - Comprehensive guide for FCPXML format
-- Supports multi-shot dynamic cropping, time mapping, audio roles, and narration lanes
-- Uses rational number fractions (`1/24s`) for frame-accurate positioning
+### FCPXML compilation
 
-### Video Assembly and Compositing
+`src/pipelines/v2/fcpxml/edit_compiler.py` is fully deterministic — no LLM in this step. It uses `Fraction` for exact rational frame timing, registers assets for unique source files, and emits FCPXML 1.10. Source paths are absolute filesystem paths inside the workspace `footage/` directory.
 
-**`TimelineConstructor`** (`src/pipelines/common/timeline_constructor.py`) - Assembles final videos:
-- Handles multi-round editing with LLM feedback
-- Dynamic cropping using ViNet saliency detection
-- Audio mixing (original audio, narration, music)
-- Subtitle generation and overlay
-- Snap-to-beat synchronization with music
-- Exports both MP4 and FCPXML
+### Renders
 
-**Dynamic Cropping** (`src/pipelines/common/dynamic_cropping.py`):
-- Uses ViNet model to detect salient regions
-- Reframes 16:9 video to 9:16 vertical format
-- Multi-shot support: splits clips based on saliency changes
+* **Draft** — `src/pipelines/v2/preview/ffmpeg_renderer.py` runs synchronously after `generate_fcpxml`. Outputs `{workspace}/renders/draft.mp4`. Always available.
+* **Final** — DaVinci Resolve via `lib/utils/resolve_render.py`. Outputs `{workspace}/renders/final.mp4`. Optional; requires DaVinci Resolve Studio.
 
-## API Endpoints
+The dashboard's preview tabs default to draft, with Final shown when available.
 
-All endpoints use prefix: `/video-edit/v1`
+## Conventions
 
-- `GET /movies` - List available videos in GCS
-- `POST /index` - Index a video (runs ComprehensionPipeline)
-- `POST /flexible_respond` - Generate response to user prompt
-- `POST /movie_to_shorts` - Convert movie to shorts
-- `POST /screenplay` - Generate screenplay from video
-- `POST /quality_assessment` - Assess video quality
+### File / path
 
-**Webhook endpoints** (for Memories.ai async callbacks):
-- `POST /webhooks/memories/caption` - Callback for Video Caption API completion
-- `POST /webhooks/memories/upload` - Callback for video upload/indexing completion
+* All workspace I/O goes through `WorkspaceManager` — don't hardcode paths.
+* Workspaces live under `data/workspaces/{project_name}/`. Footage in `footage/`, generated audio in `narration/` and `music/`, FCPXML in `fcpxml/`, MP4s in `renders/`.
+* Timestamps inside the agent and EditDecision are **float seconds**. SRT/subtitle code uses `HH:MM:SS,mmm`. FCPXML uses rational fractions like `1001/30000s`.
 
-## Cloud Deployment
+### Logging
 
-**GCP Kubernetes Setup:**
-- Cluster: `video-edit-cluster`
-- Deployment: `video-edit` workload
-- Docker registry: `us-docker.pkg.dev/gen-lang-client-0057517563/vea-service/video-edit:latest`
+Tagged prefixes make backend logs easy to grep:
 
-**Deploy commands:**
+* `[AGENT]` — agent loop, tool execution
+* `[AGENT WS]` — WebSocket lifecycle
+* `[MEMORIES]` — Memories.ai API calls
+* `[COMPREHENSION]` — V2 indexing
+* `[COMPILER]` — FCPXML compiler
+* `[LOUDNESS]` — LUFS measurement
+* `[RENDER]` — draft/final rendering
+* `[MUSIC]` — Soundstripe selection
+
+### Tool result protocol
+
+Tool executors return a `dict` that gets serialized into the LLM `FunctionResponse`. Always include either `success`/`result` or `error`. Side effects that the dashboard should react to are emitted as separate WebSocket events from `agent_session.py` (e.g. `timeline_update`, `scratchpad_update`, `render_start/progress/complete`).
+
+### Don't
+
+* Don't add try/except around tool executor logic to "make it more robust" — failures should surface to the LLM as `error` fields so it can recover or message the user.
+* Don't hardcode `gs://` paths or assume GCS. V2 is local-storage only. The legacy V1 pipelines have GCS code; leave it alone unless touching V1 explicitly.
+* Don't add new sections to the agent system prompt without checking if the existing one already covers it. The prompt has been carefully deduplicated.
+* Don't reach into `_agent_sessions` or `_indexing_emitters` from random places — these are private to `services.py` / `v2_websockets.py`.
+
+## Common tasks
+
+### Add a new agent tool
+
+1. Add a `FunctionDeclaration` to `tool_definitions.py`.
+2. Add an executor method `_my_tool(args: Dict) -> Dict` on `ToolExecutor` in `tools.py` and dispatch from `execute()`.
+3. If the tool produces user-facing side effects, emit a WebSocket event from `agent_session.py` after the tool call.
+4. If it touches the workspace, add the file ops to `workspace.py`.
+5. Update the system prompt only if the tool's behavior isn't obvious from its declaration.
+
+### Modify the EditDecision schema
+
+1. Update `src/pipelines/v2/schemas.py`.
+2. Update `_EDIT_DECISION_SCHEMA` constant in `tool_definitions.py` so the LLM sees the new field.
+3. Update `edit_compiler.py` to honor the new field in compilation.
+4. Update `timeline_view.py` if the field is timeline-relevant.
+5. If the field affects rendering, update `preview/ffmpeg_renderer.py` and `lib/utils/resolve_render.py`.
+6. If the field is editable in the UI, wire it through `dashboard/src/hooks/useAgentChat.ts` and the relevant component.
+
+### Run the dashboard with hot-reload
+
 ```bash
-# Apply deployment
-kubectl apply -f deployment.yaml
-
-# Delete deployment
-kubectl delete -f deployment.yaml
-
-# Push image to GCP
-docker tag <local-image> us-docker.pkg.dev/gen-lang-client-0057517563/vea-service/video-edit:latest
-docker push us-docker.pkg.dev/gen-lang-client-0057517563/vea-service/video-edit:latest
+./dev.sh up --frontend-dev
+# Backend on :8000, Vite dev on :5173 (proxies API + WS to :8000)
 ```
 
-## Important Conventions
+The Vite proxy is in `dashboard/vite.config.ts`; it forwards both REST (`/video-edit/*`) and WebSocket upgrades.
 
-**Pipeline task structure:**
-- Each pipeline has a main class (e.g., `ComprehensionPipeline`) with async `run()` method
-- Complex pipelines split work into `tasks/` subdirectory with focused task classes
-- Tasks are composable async functions/classes that return structured data
+## Testing notes
 
-**Media indexing JSON format:**
-The `media_indexing.json` file contains:
-- `media_files[]` - Array of file-level metadata with:
-  - `name`, `cloud_storage_path` - File identification
-  - `story.txt` - Linear narrative summary
-  - `story.json` - Structured story with segments
-  - `scenes.json` - Scene metadata with timestamps and visual content
-  - `people.txt` - Character descriptions and relationships
-- `manifest` - Description of each field's purpose
+There's no formal test suite yet. The standard sanity check is:
 
-**Timestamp formats:**
-- Internal processing uses float seconds
-- User-facing/subtitle formats use `HH:MM:SS,mmm` (SRT standard)
-- FCPXML uses rational fractions like `1/24s` or `1001/30000s`
+1. `./dev.sh up`
+2. Open dashboard, pick a small project (a few short clips)
+3. Click Index, wait for completion
+4. Send a brief like "make a 30 second highlight reel with narration and music"
+5. Watch the chat, scratchpads, timeline, and draft preview update live
+6. Verify `data/workspaces/{project}/fcpxml/edit_v1.fcpxml` and `renders/draft.mp4` exist
 
-**Video preprocessing for LLM:**
-- Videos are downsampled to 480p height, low FPS (0.5-1fps), CRF 30-40
-- This drastically reduces token count while preserving visual information
-- Use `downsample_video()` before sending to Gemini
+For end-to-end testing, the Playwright MCP server can drive the dashboard.
 
-**Config management:**
-- Static config in `src/config.py`: API_PREFIX, VIDEO_EXTS, BUCKET_NAME
-- Environment-specific config via env vars: ENV (development/production)
-- Secrets in `config/apiKeys.json` loaded into environment variables
+## Things not to be confused by
 
-## ViNet Saliency Model
-
-The `vinet_v2/` directory contains a PyTorch-based visual saliency detection model used for intelligent cropping:
-- **ViNet_A** - Audio-visual saliency (considers both video and audio)
-- **ViNet_S** - Visual-only saliency
-- Model setup via `lib/utils/vinet_setup.py`
-- Used by dynamic cropping to identify important regions when reframing video
-
-## Testing Tools
-
-**Postman** is recommended for API testing (mentioned in README).
-
-## Notes on Code Quality
-
-- Pipelines run with commented-out try/except blocks in `src/app.py` for easier debugging
-- Subprocess pattern prevents memory leaks during video processing
-- GCS client initialized once at app startup with credentials from file
-- All video processing should clean up temp files via `clean_stale_tempdirs()`
+* **Two README files in `dashboard/`** — the one at `dashboard/README.md` is a Vite template stub, the real docs are at the repo root.
+* **`run.sh` vs `dev.sh`** — `run.sh` is the legacy V1 launcher (sets up ngrok for the V1 webhook indexer). For V2 work, always use `dev.sh`.
+* **`vinet_v2/` directory** — V1 dynamic cropping uses ViNet saliency. V2 doesn't use ViNet; the agent uses LLM-based saliency analysis instead. You can ignore this directory unless touching V1.
+* **`config/apiKeys.json`** — does not exist in V2. Keys live in `config.json` under `api_keys`.
+* **`gs://` GCS paths** in v1 code — irrelevant to V2. Don't propagate them.
+* **`docs/architecture-v2.md` and `docs/implementation-plan.md`** — historical planning docs. The authoritative architecture doc is `docs/architecture.md`.

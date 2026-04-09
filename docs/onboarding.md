@@ -11,16 +11,16 @@ This guide walks through setting up and running VEA's V2 agentic editing system 
 | Python | 3.12+ | Backend runtime |
 | Node.js | 18+ | Dashboard build |
 | npm | (bundled with Node) | Dashboard dependencies |
-| ffmpeg | any recent | Video processing (extract, downsample, probe) |
+| ffmpeg | any recent | Video processing (extract, downsample, probe, render) |
 | uv | latest | Python package management |
-| gcloud CLI | latest | Google Cloud auth for Gemini |
+| gcloud CLI | latest | **Optional** — only needed if you use Vertex AI instead of OpenRouter |
 
 Install on macOS:
 
 ```bash
 brew install python@3.12 node ffmpeg
 brew install astral-sh/tap/uv
-brew install --cask google-cloud-sdk
+brew install --cask google-cloud-sdk   # optional
 ```
 
 ---
@@ -51,18 +51,24 @@ Edit `config.json` and fill in the `api_keys` section:
 | Key | Required | Where to get it |
 |-----|----------|-----------------|
 | `MEMORIES_API_KEY` | Yes | https://memories.ai/app/service/key |
-| `GOOGLE_CLOUD_PROJECT` | Yes | Your GCP project ID |
-| `GOOGLE_CLOUD_LOCATION` | No | Defaults to `us-central1` |
+| `OPENROUTER_API_KEY` | One of these two | https://openrouter.ai |
+| `GOOGLE_CLOUD_PROJECT` | One of these two | Your GCP project ID (Vertex AI enabled) |
+| `GOOGLE_CLOUD_LOCATION` | No | Defaults to `us-central1` (Vertex only) |
 | `ELEVENLABS_API_KEY` | No | https://elevenlabs.io -- needed for narration |
 | `SOUNDSTRIPE_KEY` | No | https://soundstripe.com -- needed for music |
 
-### 3. Authenticate Google Cloud
+VEA needs one LLM provider for the agent loop. Pick **one**:
+
+- **OpenRouter (simplest):** set `OPENROUTER_API_KEY`. Default model is `google/gemini-2.5-flash`; override with `OPENROUTER_MODEL`. No further auth needed.
+- **Vertex AI Gemini:** set `GOOGLE_CLOUD_PROJECT` and run the gcloud step below. If both are configured, OpenRouter wins; force Vertex with `LLM_PROVIDER=vertex`.
+
+### 3. Authenticate Google Cloud (Vertex AI users only)
 
 ```bash
 gcloud auth application-default login
 ```
 
-This creates credentials that the Gemini (Vertex AI) client uses.
+Skip this step if you're using OpenRouter.
 
 ### 4. Build the dashboard
 
@@ -148,7 +154,7 @@ You should see your project in the project browser. Click on it to open the work
 
 ### 4. Index footage
 
-In the workspace view, click **Manage** (top-right) and then **Index footage**. This uploads the video files to Memories.ai and generates a gist.
+If the footage hasn't been indexed yet, the dashboard shows an **"Index footage"** banner with a button — click it. (You can also re-index at any time from the **Manage** dropdown.) Indexing uploads the video files to Memories.ai and generates a content gist; progress streams live to the banner.
 
 Alternatively, use the API:
 

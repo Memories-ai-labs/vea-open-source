@@ -18,6 +18,7 @@ class VideoEntry:
     source_path: str
     duration_seconds: Optional[float] = None
     gist: str = ""  # multi-paragraph editorial overview for this specific video
+    indexed_at: Optional[str] = None  # ISO 8601 UTC timestamp of when this video was indexed
 
 @dataclass
 class PlanningState:
@@ -48,6 +49,7 @@ class SessionData:
             source_path=v["source_path"],
             duration_seconds=v.get("duration_seconds"),
             gist=v.get("gist", ""),
+            indexed_at=v.get("indexed_at"),
         ) for v in d.get("videos", [])]
         planning_raw = d.get("planning", {})
         planning = PlanningState(
