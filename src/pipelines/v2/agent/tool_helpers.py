@@ -133,6 +133,61 @@ def stt_word_timestamps(audio_path: str, api_key: str) -> List[Dict]:
     return words
 
 
+def generate_music_track_elevenlabs(
+    api_key: str,
+    prompt: str,
+    output_path: str,
+    duration_ms: int = 120_000,
+) -> dict:
+    """Generate a music track using ElevenLabs Eleven Music API.
+
+    NOT currently wired into the agent loop (Lyria 3 via OpenRouter is used
+    instead). Kept here for future use if the ElevenLabs plan is upgraded.
+
+    Requires a paid ElevenLabs subscription — free tier returns HTTP 402.
+
+    Args:
+        api_key: ElevenLabs API key.
+        prompt: Natural language description of desired music.
+        output_path: Where to save the MP3.
+        duration_ms: Desired track length in milliseconds (3000–300000).
+
+    Returns:
+        dict with ``success`` bool, ``path``, and ``error`` on failure.
+    """
+    from elevenlabs.client import ElevenLabs
+
+    client = ElevenLabs(api_key=api_key)
+    duration_ms = max(3_000, min(300_000, duration_ms))
+    logger.info(f"[MUSIC] Generating track via ElevenLabs: {prompt[:80]}... ({duration_ms}ms)")
+
+    try:
+        audio_iter = client.music.compose(
+            prompt=prompt,
+            music_length_ms=duration_ms,
+            force_instrumental=True,
+            output_format="mp3_44100_128",
+        )
+        with open(output_path, "wb") as f:
+            for chunk in audio_iter:
+                f.write(chunk)
+        logger.info(f"[MUSIC] Track saved to {output_path}")
+        return {"success": True, "path": output_path}
+    except Exception as e:
+        err_msg = str(e)
+        if "bad_prompt" in err_msg.lower():
+            logger.warning(f"[MUSIC] ElevenLabs rejected prompt: {err_msg}")
+            return {
+                "success": False,
+                "error": (
+                    f"ElevenLabs rejected the music prompt (copyrighted references "
+                    f"are not allowed). Detail: {err_msg[:200]}"
+                ),
+            }
+        logger.error(f"[MUSIC] ElevenLabs music generation failed: {err_msg}")
+        return {"success": False, "error": f"Music generation failed: {err_msg[:300]}"}
+
+
 def generate_music_track(
     api_key: str,
     prompt: str,
