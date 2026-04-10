@@ -12,9 +12,7 @@ from typing import Any, Dict, List, Optional
 from src.pipelines.v2.agent.scratchpad import ScratchpadManager
 from src.pipelines.v2.agent.tool_definitions import TOOL_DECLARATIONS  # noqa: F401 — re-exported
 from src.pipelines.v2.agent.tool_helpers import (
-    SoundstripeAPIError,
-    download_soundstripe_track,
-    fetch_soundstripe_tracks,
+    generate_music_track,
     stt_word_timestamps,
     tts_sync,
     tts_with_timestamps,
@@ -872,127 +870,57 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
         return result
 
     async def _select_music(self, args: Dict) -> Dict:
-        """Fetch tracks from Soundstripe, use Gemini to pick best match, download it."""
+        """Generate a background music track using ElevenLabs Eleven Music."""
         import os
 
         prompt = args.get("prompt", "")
         if not prompt.strip():
             return {"error": "Prompt is empty"}
 
-        soundstripe_key = os.environ.get("SOUNDSTRIPE_KEY")
-        if not soundstripe_key:
-            return {"error": "SOUNDSTRIPE_KEY not set — music selection unavailable"}
+        elevenlabs_key = os.environ.get("ELEVENLABS_API_KEY")
+        if not elevenlabs_key:
+            return {"error": "ELEVENLABS_API_KEY not set — music generation unavailable"}
 
         logger.info(f"[AGENT] select_music: {prompt[:100]}")
 
-        # Step 1: Fetch tracks from Soundstripe
         await self._emit("refine_progress", {
-            "step": "fetching_tracks",
-            "message": "Fetching tracks from music library...",
-        })
-
-        loop = asyncio.get_event_loop()
-        try:
-            tracks = await loop.run_in_executor(
-                None, lambda: fetch_soundstripe_tracks(soundstripe_key)
-            )
-        except SoundstripeAPIError as e:
-            logger.warning(f"[AGENT] Soundstripe API failure: {e}")
-            return {
-                "error": f"Soundstripe API failure: {e}",
-                "user_facing_message": (
-                    "The Soundstripe music API is currently unavailable "
-                    "(authentication or quota issue). The library is NOT empty — "
-                    "this is an infrastructure problem on our side. "
-                    "Tell the user the music service is temporarily down and they may "
-                    "need to renew the API key."
-                ),
-            }
-
-        if not tracks:
-            return {
-                "error": "Soundstripe returned an empty result set",
-                "user_facing_message": (
-                    "The Soundstripe API responded successfully but returned zero tracks. "
-                    "This is unusual — the search query may have been too restrictive."
-                ),
-            }
-
-        # Step 2: Build a markdown table of candidates for Gemini
-        track_rows = ["| # | Title | Mood | Genre | BPM | Energy | Description |",
-                      "|---|---|---|---|---|---|---|"]
-        for i, t in enumerate(tracks[:50]):  # Cap at 50 for context
-            attrs = t.get("attributes", {})
-            name = (attrs.get("title", f"Track {i+1}") or "").replace("|", "/")[:40]
-            tags = attrs.get("tags", {})
-            mood = ", ".join(tags.get("mood", []))[:30]
-            genre = ", ".join(tags.get("genre", []))[:30]
-            energy = str(attrs.get("energy", "") or "")[:15]
-            bpm = str(attrs.get("bpm", "") or "")
-            desc = (attrs.get("description", "") or "").replace("|", "/").replace("\n", " ")[:80]
-            track_rows.append(f"| {i} | {name} | {mood} | {genre} | {bpm} | {energy} | {desc} |")
-
-        await self._emit("refine_progress", {
-            "step": "selecting_track",
-            "message": f"Choosing best track from {len(tracks[:50])} candidates...",
-        })
-
-        # Step 3: Ask Gemini to pick the best track
-        selection_prompt = (
-            "You are selecting background music for a video edit.\n\n"
-            f"## What the editor wants\n{prompt}\n\n"
-            "## Available tracks\n" + "\n".join(track_rows) + "\n\n"
-            "## Instructions\n"
-            "Return ONLY the index number (e.g. '3') of the single best matching track. "
-            "Nothing else — just the number."
-        )
-
-        try:
-            result = await loop.run_in_executor(
-                None,
-                lambda: self.gemini.LLM_request([selection_prompt], schema=None),
-            )
-            selected_idx = int(str(result).strip())
-        except (ValueError, TypeError):
-            # Fallback: pick first track
-            logger.warning("[AGENT] Could not parse Gemini track selection, using first track")
-            selected_idx = 0
-
-        if selected_idx < 0 or selected_idx >= len(tracks[:50]):
-            selected_idx = 0
-
-        selected_track = tracks[selected_idx]
-        track_attrs = selected_track.get("attributes", {})
-        track_name = track_attrs.get("title", track_attrs.get("name", "Unknown"))
-
-        # Step 4: Download the track
-        await self._emit("refine_progress", {
-            "step": "downloading_track",
-            "message": f"Downloading: {track_name}...",
+            "step": "generating_music",
+            "message": "Generating music with ElevenLabs...",
         })
 
         music_path = self.workspace.root / "music" / "track.mp3"
         music_path.parent.mkdir(parents=True, exist_ok=True)
 
-        downloaded = await loop.run_in_executor(
+        # Default to ~2 minutes; the agent can request a specific duration
+        # via the prompt text, and the model interprets it, but we also
+        # accept an explicit duration_seconds parameter.
+        duration_seconds = args.get("duration_seconds", 120)
+        duration_ms = int(float(duration_seconds) * 1000)
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
             None,
-            lambda: download_soundstripe_track(selected_track, str(music_path)),
+            lambda: generate_music_track(
+                api_key=elevenlabs_key,
+                prompt=prompt,
+                output_path=str(music_path),
+                duration_ms=duration_ms,
+            ),
         )
 
-        if not downloaded:
-            return {"error": f"Failed to download track: {track_name}"}
+        if not result.get("success"):
+            return {
+                "error": result.get("error", "Music generation failed"),
+            }
 
-        # Get duration
+        # Get actual duration via ffprobe
         duration = await self._get_audio_duration(str(music_path))
 
-        tags = track_attrs.get("tags", {})
         return {
-            "status": "downloaded",
+            "status": "generated",
             "music_path": str(music_path),
-            "track_name": track_name,
-            "mood": ", ".join(tags.get("mood", [])),
-            "genre": ", ".join(tags.get("genre", [])),
             "duration_seconds": duration,
+            "prompt_used": prompt,
         }
 
     async def _get_audio_duration(self, path: str) -> Optional[float]:

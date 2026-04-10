@@ -23,7 +23,7 @@ src/
 │   │   │   ├── agent_session.py    # Agent loop, history, persistence
 │   │   │   ├── tools.py            # Tool executor (functions invoked by LLM)
 │   │   │   ├── tool_definitions.py # Gemini FunctionDeclarations (10 tools)
-│   │   │   ├── tool_helpers.py     # ElevenLabs / Soundstripe / ffmpeg helpers
+│   │   │   ├── tool_helpers.py     # ElevenLabs / ffmpeg helpers
 │   │   │   ├── system_prompt.py    # System prompt template + builder
 │   │   │   ├── scratchpad.py       # ScratchpadManager (4 persistent .md files)
 │   │   │   └── timeline_view.py    # Programmatic timeline diagram for the prompt
@@ -116,7 +116,7 @@ Declared in `src/pipelines/v2/agent/tool_definitions.py`, executed by `ToolExecu
 | `update_scratchpad` | Write to `comprehension` / `creative_direction` / `planning` / `fcpxml` |
 | `generate_fcpxml` | Validate clips against ffprobe durations, compile EditDecision → FCPXML, kick off draft render |
 | `generate_narration` | ElevenLabs TTS with `convert_with_timestamps` (real word boundaries) |
-| `select_music` | Soundstripe search → LLM picks track → download |
+| `select_music` | ElevenLabs Eleven Music AI generation → save track |
 | `generate_subtitles` | STT via ElevenLabs Scribe → subtitle text overlays |
 | `message_user` | Mid-flow message to dashboard (does NOT end the turn) |
 | `finish_turn` | Explicit turn-end signal with optional final message |
@@ -164,7 +164,7 @@ Tagged prefixes make backend logs easy to grep:
 * `[COMPILER]` — FCPXML compiler
 * `[LOUDNESS]` — LUFS measurement
 * `[RENDER]` — draft/final rendering
-* `[MUSIC]` — Soundstripe selection
+* `[MUSIC]` — ElevenLabs music generation
 
 ### Tool result protocol
 

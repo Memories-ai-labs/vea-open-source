@@ -133,99 +133,56 @@ def stt_word_timestamps(audio_path: str, api_key: str) -> List[Dict]:
     return words
 
 
-class SoundstripeAPIError(Exception):
-    """Raised when the Soundstripe API returns an unexpected status."""
-    pass
+def generate_music_track(
+    api_key: str,
+    prompt: str,
+    output_path: str,
+    duration_ms: int = 120_000,
+) -> dict:
+    """Generate a music track using ElevenLabs Eleven Music API.
 
+    Args:
+        api_key: ElevenLabs API key.
+        prompt: Natural language description of desired music
+            (mood, genre, tempo, instruments, energy).
+        output_path: Where to save the MP3.
+        duration_ms: Desired track length in milliseconds (3000–300000).
 
-def fetch_soundstripe_tracks(api_key: str, page_count: int = 3) -> list:
-    """Fetch tracks from Soundstripe API with audio_files sideloaded.
-
-    Raises SoundstripeAPIError on auth/quota failures so the agent gets a
-    distinguishable error rather than an empty list.
+    Returns:
+        dict with ``success`` bool, ``path``, and ``error`` on failure.
     """
-    import requests
-    headers = {
-        "Authorization": f"Token {api_key}",
-        "Accept": "application/vnd.api+json",
-    }
-    all_tracks = []
-    # Map audio_file id -> mp3 URL from sideloaded includes
-    audio_urls: dict = {}
-    for page in range(1, page_count + 1):
-        try:
-            resp = requests.get(
-                "https://api.soundstripe.com/v1/songs",
-                headers=headers,
-                params={
-                    "page[size]": 50,
-                    "page[number]": page,
-                    "include": "audio_files",
-                },
-                timeout=15,
-            )
-            if resp.status_code != 200:
-                # Surface auth/quota errors instead of silently returning empty
-                detail = resp.text[:300]
-                if resp.status_code in (401, 403):
-                    raise SoundstripeAPIError(
-                        f"Soundstripe authentication failed (HTTP {resp.status_code}): {detail}. "
-                        f"The SOUNDSTRIPE_KEY may have expired or is invalid."
-                    )
-                if resp.status_code == 429:
-                    raise SoundstripeAPIError(
-                        f"Soundstripe rate limit exceeded (HTTP 429): {detail}"
-                    )
-                raise SoundstripeAPIError(
-                    f"Soundstripe API error (HTTP {resp.status_code}): {detail}"
-                )
-            body = resp.json()
-            # Collect audio_file URLs from the `included` sideload
-            for inc in body.get("included", []):
-                if inc.get("type") == "audio_files":
-                    versions = inc.get("attributes", {}).get("versions", {})
-                    mp3_url = versions.get("mp3")
-                    if mp3_url:
-                        audio_urls[inc["id"]] = mp3_url
-            all_tracks.extend(body.get("data", []))
-        except SoundstripeAPIError:
-            raise  # bubble up — agent needs to know
-        except Exception as e:
-            logger.warning(f"[MUSIC] Soundstripe fetch error: {e}")
-            # Network/parse errors stop pagination but don't fail the whole call
-            # if we already have some tracks
-            if not all_tracks:
-                raise SoundstripeAPIError(f"Soundstripe network/parse error: {e}")
-            break
+    from elevenlabs.client import ElevenLabs
 
-    # Attach the resolved mp3 URL to each track for easy download later
-    for track in all_tracks:
-        audio_rels = track.get("relationships", {}).get("audio_files", {}).get("data", [])
-        for af in audio_rels:
-            url = audio_urls.get(af.get("id"))
-            if url:
-                track["_mp3_url"] = url
-                break
-
-    return all_tracks
-
-
-def download_soundstripe_track(track: dict, output_path: str) -> bool:
-    """Download the mp3 for the selected track."""
-    import requests
-    url = track.get("_mp3_url")
-    if not url:
-        logger.warning(f"[MUSIC] No download URL found for track {track.get('id')}")
-        return False
+    client = ElevenLabs(api_key=api_key)
+    # Clamp duration to API limits
+    duration_ms = max(3_000, min(300_000, duration_ms))
+    logger.info(f"[MUSIC] Generating track via ElevenLabs: {prompt[:80]}... ({duration_ms}ms)")
 
     try:
-        resp = requests.get(url, timeout=60, stream=True)
-        resp.raise_for_status()
+        audio_iter = client.music.compose(
+            prompt=prompt,
+            music_length_ms=duration_ms,
+            force_instrumental=True,
+            output_format="mp3_44100_128",
+        )
         with open(output_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-        return True
+            for chunk in audio_iter:
+                f.write(chunk)
+        logger.info(f"[MUSIC] Track saved to {output_path}")
+        return {"success": True, "path": output_path}
     except Exception as e:
-        logger.error(f"[MUSIC] Download failed: {e}")
-        return False
+        err_msg = str(e)
+        # Surface prompt-rejection errors clearly
+        if "bad_prompt" in err_msg.lower():
+            logger.warning(f"[MUSIC] ElevenLabs rejected prompt: {err_msg}")
+            return {
+                "success": False,
+                "error": (
+                    f"ElevenLabs rejected the music prompt (likely contains copyrighted "
+                    f"references — artist names, song titles, or copyrighted lyrics are "
+                    f"not allowed). Try rephrasing without naming specific artists or songs. "
+                    f"Detail: {err_msg[:200]}"
+                ),
+            }
+        logger.error(f"[MUSIC] ElevenLabs music generation failed: {err_msg}")
+        return {"success": False, "error": f"Music generation failed: {err_msg[:300]}"}

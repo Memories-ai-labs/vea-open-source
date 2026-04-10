@@ -40,7 +40,7 @@ You drop video files into a project folder, then chat with an agent that:
 * 🧠 **Understands** your footage via [Memories.ai](https://memories.ai) (uploads, indexes, answers questions about visuals and dialogue).
 * 🎬 **Plans and selects clips** based on your creative brief, refining cut points using LLM video analysis.
 * 🗣️ **Narrates** with [ElevenLabs](https://elevenlabs.io) text-to-speech (optional, on request).
-* 🎵 **Adds music** from [Soundstripe](https://www.soundstripe.com) with automatic loudness balancing (optional).
+* 🎵 **Adds music** via [ElevenLabs](https://elevenlabs.io) AI music generation with automatic loudness balancing (optional).
 * 📦 **Exports** as both rendered MP4 (via FFmpeg or DaVinci Resolve) and Final Cut Pro XML (importable into FCP, Resolve, Premiere).
 * 💬 **Iterates** on your feedback in real time — "make the intro shorter", "add more b-roll", "use a different song".
 
@@ -98,7 +98,6 @@ Edit `config.json` and fill in the `api_keys` section:
 | `OPENROUTER_API_KEY` | **One of these two** | https://openrouter.ai |
 | `GOOGLE_CLOUD_PROJECT` | **One of these two** | A GCP project with Vertex AI enabled |
 | `ELEVENLABS_API_KEY` | Optional | https://elevenlabs.io — needed for narration |
-| `SOUNDSTRIPE_KEY` | Optional | https://www.soundstripe.com — needed for music |
 
 VEA needs an LLM provider for the agent loop. You can use **either**:
 
@@ -212,7 +211,7 @@ Each project is self-contained under `data/workspaces/{project_name}/`:
 │   └── fcpxml.md
 ├── narration/               # ElevenLabs voiceover (when requested)
 │   └── narration.mp3
-├── music/                   # Soundstripe track (when requested)
+├── music/                   # AI-generated music track (when requested)
 │   └── track.mp3
 ├── fcpxml/
 │   ├── edit_decision.json   # Structured edit (LLM output)
@@ -237,7 +236,7 @@ The agent has 10 tools, all declared in `src/pipelines/v2/agent/tool_definitions
 | `update_scratchpad` | Write to one of the 4 persistent scratchpads |
 | `generate_fcpxml` | Compile edit decision JSON → FCPXML, validate clips, auto-render draft |
 | `generate_narration` | ElevenLabs TTS with word-level timestamps (only if user asks) |
-| `select_music` | Soundstripe search + LLM track selection (only if user asks) |
+| `select_music` | ElevenLabs AI music generation (only if user asks) |
 | `generate_subtitles` | STT-based subtitles for the current edit |
 | `message_user` | Send a message to the dashboard mid-flow |
 | `finish_turn` | Explicitly end the agent's turn with an optional summary |

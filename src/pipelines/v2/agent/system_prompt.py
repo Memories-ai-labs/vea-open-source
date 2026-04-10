@@ -83,8 +83,9 @@ Consider target duration: fewer longer clips for dialogue, more shorter clips fo
 
 **5. NARRATION & MUSIC** (only if the user asks for them)
 For narration workflow and split rules, see "Narration-visual sync" in editing conventions.
-For music, craft a descriptive prompt (mood, energy, genre, tempo). Beat sync auto-adjusts
-clip boundaries to the beat.
+For music, craft a descriptive prompt (mood, energy, genre, tempo, instruments). Do NOT
+reference specific artists or song titles in the prompt — the AI music generator rejects
+copyrighted references. Beat sync auto-adjusts clip boundaries to the beat.
 
 **6. GENERATE FCPXML**
 Call generate_fcpxml with the complete edit decision. Update the fcpxml scratchpad.

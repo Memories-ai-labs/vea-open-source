@@ -55,7 +55,6 @@ Edit `config.json` and fill in the `api_keys` section:
 | `GOOGLE_CLOUD_PROJECT` | One of these two | Your GCP project ID (Vertex AI enabled) |
 | `GOOGLE_CLOUD_LOCATION` | No | Defaults to `us-central1` (Vertex only) |
 | `ELEVENLABS_API_KEY` | No | https://elevenlabs.io -- needed for narration |
-| `SOUNDSTRIPE_KEY` | No | https://soundstripe.com -- needed for music |
 
 VEA needs one LLM provider for the agent loop. Pick **one**:
 
@@ -211,7 +210,7 @@ The agent will call `generate_narration`, then include the narration segments in
 
 > "Add some upbeat electronic background music, medium energy."
 
-The agent will search Soundstripe, download a track, and include it in the FCPXML.
+The agent will generate an original track via ElevenLabs Eleven Music and include it in the FCPXML.
 
 ### Export and use the FCPXML
 
@@ -240,7 +239,7 @@ The backend prints structured log lines prefixed with tags:
 - `[MEMORIES]` -- Memories.ai API calls
 - `[COMPREHENSION]` -- Indexing pipeline
 - `[COMPILER]` -- FCPXML compilation
-- `[MUSIC]` -- Soundstripe integration
+- `[MUSIC]` -- ElevenLabs music generation
 
 ### WebSocket connection issues
 

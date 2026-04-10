@@ -26,7 +26,7 @@ This document describes the technical architecture of VEA's V2 agentic editing s
 |  (OpenRouter or  |            +----+---+---+---+---+-------+
 |   Vertex Gemini, |                 |   |   |   |   |
 |   function call) |                 |   |   |   |   +-- DaVinci Resolve
-+------------------+                 |   |   |   +------ Soundstripe
++------------------+                 |   |   |   +------ ElevenLabs Music
                                      |   |   +---------- ElevenLabs TTS
 +------------------+                 |   +-------------- FCPXML Compiler
 |  Local Filesystem|<----------------|
@@ -124,7 +124,7 @@ The agent has 10 tools, declared as Gemini `FunctionDeclaration` objects in `too
 | `update_scratchpad` | Write to one of 4 persistent scratchpads | Local filesystem |
 | `generate_fcpxml` | Validate clips against ffprobe durations, compile EditDecision JSON to FCPXML 1.10, kick off draft render | Deterministic compiler + FFmpeg |
 | `generate_narration` | Convert script to voiceover audio with real word-level timestamps | ElevenLabs TTS (`convert_with_timestamps`) |
-| `select_music` | Search music library, LLM picks best match, download | Soundstripe API + LLM selection |
+| `select_music` | Generate background music from text prompt | ElevenLabs Eleven Music API |
 | `generate_subtitles` | Transcribe original audio, add subtitle text overlays to the edit | ElevenLabs Scribe STT |
 | `message_user` | Send visible message to user mid-flow (does NOT end the turn) | WebSocket event |
 | `finish_turn` | Explicit signal that the agent's turn is complete (with optional final summary) | WebSocket event |
@@ -501,16 +501,15 @@ Used by the `generate_narration` tool:
 
 ---
 
-## Soundstripe Music Integration
+## ElevenLabs Music Integration
 
 Used by the `select_music` tool:
 
-1. Fetches tracks from Soundstripe API (3 pages of 50 tracks, with `audio_files` sideloaded)
-2. Formats track metadata (title, mood, genre, energy, BPM, description)
-3. Sends track list to Gemini, asks it to pick the best index number
-4. Downloads the selected track's MP3 via the resolved `_mp3_url`
-5. Saves to `{workspace}/music/track.mp3`
-6. Requires `SOUNDSTRIPE_KEY` environment variable
+1. Calls `client.music.compose()` with the agent's text prompt, `force_instrumental=True`, and `output_format="mp3_44100_128"`
+2. Duration defaults to ~2 minutes; the agent can pass `duration_seconds` to match the timeline
+3. Writes the generated MP3 to `{workspace}/music/track.mp3`
+4. Uses the same `ELEVENLABS_API_KEY` as narration — no separate key needed
+5. Copyrighted references (artist names, song titles, lyrics) in the prompt cause a `bad_prompt` error — the system prompt and tool declaration warn the agent about this
 
 ---
 
@@ -568,7 +567,6 @@ Both emit `render_start`, `render_progress`, and `render_complete` (or `render_e
     "GOOGLE_CLOUD_PROJECT": "...",
     "GOOGLE_CLOUD_LOCATION": "us-central1",
     "ELEVENLABS_API_KEY": "...",
-    "SOUNDSTRIPE_KEY": "..."
   },
   "optional_features": {
     "enable_music": true,

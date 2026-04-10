@@ -229,9 +229,10 @@ TOOL_DECLARATIONS = Tool(
         FunctionDeclaration(
             name="select_music",
             description=(
-                "Search for and download a background music track. Fetches candidate tracks from "
-                "the music library, uses an LLM to pick the best match based on your prompt, and "
-                "downloads it. Returns the file path, track name, and duration. "
+                "Generate a background music track using AI. Produces an original instrumental "
+                "track matching your description via ElevenLabs Eleven Music. Returns the file "
+                "path and duration. Do NOT reference specific artists, song titles, or copyrighted "
+                "lyrics in the prompt — this will cause an error. "
                 "Only call this when the user has explicitly requested music."
             ),
             parameters={
@@ -242,7 +243,14 @@ TOOL_DECLARATIONS = Tool(
                         "description": (
                             "Describe the ideal music — mood, energy, genre, instruments, tempo. "
                             "Be specific: 'upbeat electronic with synths, 120bpm, energetic but not aggressive' "
-                            "is better than just 'upbeat'."
+                            "is better than just 'upbeat'. Do NOT name artists or songs."
+                        ),
+                    },
+                    "duration_seconds": {
+                        "type": "number",
+                        "description": (
+                            "Desired track length in seconds. Default 120. Max 300 (5 minutes). "
+                            "Should roughly match the timeline duration."
                         ),
                     },
                 },
