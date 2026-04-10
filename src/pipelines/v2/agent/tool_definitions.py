@@ -229,10 +229,10 @@ TOOL_DECLARATIONS = Tool(
         FunctionDeclaration(
             name="select_music",
             description=(
-                "Generate a background music track using AI. Produces an original instrumental "
-                "track matching your description via ElevenLabs Eleven Music. Returns the file "
-                "path and duration. Do NOT reference specific artists, song titles, or copyrighted "
-                "lyrics in the prompt — this will cause an error. "
+                "Generate a background music track using AI (Google Lyria 3). Produces an "
+                "original instrumental track matching your description. Returns the file "
+                "path and duration. The prompt should describe mood, energy, genre, "
+                "instruments, and tempo — be specific. Generates up to ~3 minutes. "
                 "Only call this when the user has explicitly requested music."
             ),
             parameters={

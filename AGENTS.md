@@ -116,7 +116,7 @@ Declared in `src/pipelines/v2/agent/tool_definitions.py`, executed by `ToolExecu
 | `update_scratchpad` | Write to `comprehension` / `creative_direction` / `planning` / `fcpxml` |
 | `generate_fcpxml` | Validate clips against ffprobe durations, compile EditDecision → FCPXML, kick off draft render |
 | `generate_narration` | ElevenLabs TTS with `convert_with_timestamps` (real word boundaries) |
-| `select_music` | ElevenLabs Eleven Music AI generation → save track |
+| `select_music` | Google Lyria 3 Pro music generation via OpenRouter → save track |
 | `generate_subtitles` | STT via ElevenLabs Scribe → subtitle text overlays |
 | `message_user` | Mid-flow message to dashboard (does NOT end the turn) |
 | `finish_turn` | Explicit turn-end signal with optional final message |
@@ -164,7 +164,7 @@ Tagged prefixes make backend logs easy to grep:
 * `[COMPILER]` — FCPXML compiler
 * `[LOUDNESS]` — LUFS measurement
 * `[RENDER]` — draft/final rendering
-* `[MUSIC]` — ElevenLabs music generation
+* `[MUSIC]` — Lyria 3 music generation (via OpenRouter)
 
 ### Tool result protocol
 

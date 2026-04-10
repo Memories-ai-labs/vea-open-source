@@ -870,41 +870,37 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
         return result
 
     async def _select_music(self, args: Dict) -> Dict:
-        """Generate a background music track using ElevenLabs Eleven Music."""
+        """Generate a background music track using Google Lyria 3 Pro via OpenRouter."""
         import os
 
         prompt = args.get("prompt", "")
         if not prompt.strip():
             return {"error": "Prompt is empty"}
 
-        elevenlabs_key = os.environ.get("ELEVENLABS_API_KEY")
-        if not elevenlabs_key:
-            return {"error": "ELEVENLABS_API_KEY not set — music generation unavailable"}
+        openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+        if not openrouter_key:
+            return {"error": "OPENROUTER_API_KEY not set — music generation unavailable"}
 
         logger.info(f"[AGENT] select_music: {prompt[:100]}")
 
         await self._emit("refine_progress", {
             "step": "generating_music",
-            "message": "Generating music with ElevenLabs...",
+            "message": "Generating music with Lyria 3...",
         })
 
         music_path = self.workspace.root / "music" / "track.mp3"
         music_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Default to ~2 minutes; the agent can request a specific duration
-        # via the prompt text, and the model interprets it, but we also
-        # accept an explicit duration_seconds parameter.
         duration_seconds = args.get("duration_seconds", 120)
-        duration_ms = int(float(duration_seconds) * 1000)
 
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             None,
             lambda: generate_music_track(
-                api_key=elevenlabs_key,
+                api_key=openrouter_key,
                 prompt=prompt,
                 output_path=str(music_path),
-                duration_ms=duration_ms,
+                duration_seconds=int(float(duration_seconds)),
             ),
         )
 

@@ -26,7 +26,7 @@ This document describes the technical architecture of VEA's V2 agentic editing s
 |  (OpenRouter or  |            +----+---+---+---+---+-------+
 |   Vertex Gemini, |                 |   |   |   |   |
 |   function call) |                 |   |   |   |   +-- DaVinci Resolve
-+------------------+                 |   |   |   +------ ElevenLabs Music
++------------------+                 |   |   |   +------ Lyria 3 (OpenRouter)
                                      |   |   +---------- ElevenLabs TTS
 +------------------+                 |   +-------------- FCPXML Compiler
 |  Local Filesystem|<----------------|
@@ -124,7 +124,7 @@ The agent has 10 tools, declared as Gemini `FunctionDeclaration` objects in `too
 | `update_scratchpad` | Write to one of 4 persistent scratchpads | Local filesystem |
 | `generate_fcpxml` | Validate clips against ffprobe durations, compile EditDecision JSON to FCPXML 1.10, kick off draft render | Deterministic compiler + FFmpeg |
 | `generate_narration` | Convert script to voiceover audio with real word-level timestamps | ElevenLabs TTS (`convert_with_timestamps`) |
-| `select_music` | Generate background music from text prompt | ElevenLabs Eleven Music API |
+| `select_music` | Generate background music from text prompt | Google Lyria 3 Pro via OpenRouter |
 | `generate_subtitles` | Transcribe original audio, add subtitle text overlays to the edit | ElevenLabs Scribe STT |
 | `message_user` | Send visible message to user mid-flow (does NOT end the turn) | WebSocket event |
 | `finish_turn` | Explicit signal that the agent's turn is complete (with optional final summary) | WebSocket event |
@@ -501,15 +501,15 @@ Used by the `generate_narration` tool:
 
 ---
 
-## ElevenLabs Music Integration
+## Music Generation (Google Lyria 3)
 
 Used by the `select_music` tool:
 
-1. Calls `client.music.compose()` with the agent's text prompt, `force_instrumental=True`, and `output_format="mp3_44100_128"`
-2. Duration defaults to ~2 minutes; the agent can pass `duration_seconds` to match the timeline
-3. Writes the generated MP3 to `{workspace}/music/track.mp3`
-4. Uses the same `ELEVENLABS_API_KEY` as narration — no separate key needed
-5. Copyrighted references (artist names, song titles, lyrics) in the prompt cause a `bad_prompt` error — the system prompt and tool declaration warn the agent about this
+1. Calls Google Lyria 3 Pro (`google/lyria-3-pro-preview`) via the OpenRouter API
+2. Sends the agent's text prompt with duration hint, requests `["audio", "text"]` modalities
+3. Parses the audio bytes from the response and writes to `{workspace}/music/track.mp3`
+4. Uses `OPENROUTER_API_KEY` — the same key used for the LLM agent loop. Cost: ~$0.08/song
+5. Duration: up to ~3 minutes. The agent passes `duration_seconds` to match the timeline
 
 ---
 

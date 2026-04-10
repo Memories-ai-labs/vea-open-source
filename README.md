@@ -40,7 +40,7 @@ You drop video files into a project folder, then chat with an agent that:
 * 🧠 **Understands** your footage via [Memories.ai](https://memories.ai) (uploads, indexes, answers questions about visuals and dialogue).
 * 🎬 **Plans and selects clips** based on your creative brief, refining cut points using LLM video analysis.
 * 🗣️ **Narrates** with [ElevenLabs](https://elevenlabs.io) text-to-speech (optional, on request).
-* 🎵 **Adds music** via [ElevenLabs](https://elevenlabs.io) AI music generation with automatic loudness balancing (optional).
+* 🎵 **Adds music** via Google Lyria 3 AI music generation with automatic loudness balancing (optional).
 * 📦 **Exports** as both rendered MP4 (via FFmpeg or DaVinci Resolve) and Final Cut Pro XML (importable into FCP, Resolve, Premiere).
 * 💬 **Iterates** on your feedback in real time — "make the intro shorter", "add more b-roll", "use a different song".
 
@@ -236,7 +236,7 @@ The agent has 10 tools, all declared in `src/pipelines/v2/agent/tool_definitions
 | `update_scratchpad` | Write to one of the 4 persistent scratchpads |
 | `generate_fcpxml` | Compile edit decision JSON → FCPXML, validate clips, auto-render draft |
 | `generate_narration` | ElevenLabs TTS with word-level timestamps (only if user asks) |
-| `select_music` | ElevenLabs AI music generation (only if user asks) |
+| `select_music` | Google Lyria 3 AI music generation via OpenRouter (only if user asks) |
 | `generate_subtitles` | STT-based subtitles for the current edit |
 | `message_user` | Send a message to the dashboard mid-flow |
 | `finish_turn` | Explicitly end the agent's turn with an optional summary |

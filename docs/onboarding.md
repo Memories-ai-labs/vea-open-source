@@ -210,7 +210,7 @@ The agent will call `generate_narration`, then include the narration segments in
 
 > "Add some upbeat electronic background music, medium energy."
 
-The agent will generate an original track via ElevenLabs Eleven Music and include it in the FCPXML.
+The agent will generate an original track via Google Lyria 3 and include it in the FCPXML.
 
 ### Export and use the FCPXML
 
@@ -239,7 +239,7 @@ The backend prints structured log lines prefixed with tags:
 - `[MEMORIES]` -- Memories.ai API calls
 - `[COMPREHENSION]` -- Indexing pipeline
 - `[COMPILER]` -- FCPXML compilation
-- `[MUSIC]` -- ElevenLabs music generation
+- `[MUSIC]` -- Lyria 3 music generation (via OpenRouter)
 
 ### WebSocket connection issues
 
