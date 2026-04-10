@@ -258,7 +258,7 @@ V2 (current, agent-driven) is at `/video-edit/v2`. The most useful endpoints:
 | `POST` | `/v2/projects/{project}/clear/planning` | Clear chat + scratchpads + edit |
 | `POST` | `/v2/projects/{project}/clear/memories` | Delete uploaded videos from Memories.ai |
 
-A legacy V1 pipeline-style API still lives at `/video-edit/v1` (index → flexible_respond). It's the original system from the paper and is kept for reproducibility, but the dashboard and agent flow only use V2.
+A legacy V1 pipeline-style API still lives at `/video-edit/v1` (index → flexible_respond). It's the original system from the paper and is kept for reproducibility, but the dashboard and agent flow only use V2. The original V1-only codebase is preserved on the [`legacy/v1-main`](https://github.com/Memories-ai-labs/vea-open-source/tree/legacy/v1-main) branch.
 
 ---
 

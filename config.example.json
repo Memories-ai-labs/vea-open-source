@@ -16,11 +16,14 @@
     "MEMORIES_API_KEY": "your-memories-ai-api-key",
     "_memories_comment": "Get your API key from https://memories.ai/app/service/key (required for video understanding)",
 
+    "OPENROUTER_API_KEY": "your-openrouter-api-key",
+    "_openrouter_comment": "Get your API key from https://openrouter.ai (LLM agent + music generation)",
+
     "ELEVENLABS_API_KEY": "your-elevenlabs-api-key",
-    "_elevenlabs_comment": "Get your API key from https://elevenlabs.io/ (used for narration TTS and music generation)",
+    "_elevenlabs_comment": "Get your API key from https://elevenlabs.io/ (narration TTS + clip refinement STT)",
 
     "GOOGLE_CLOUD_PROJECT": "your-gcp-project-id",
-    "_google_project_comment": "Your Google Cloud Project ID for Vertex AI (required for Gemini structured output)",
+    "_google_project_comment": "Google Cloud Project ID (optional — only needed if using Vertex AI instead of OpenRouter)",
 
     "GOOGLE_CLOUD_LOCATION": "us-central1",
     "_google_location_comment": "Google Cloud region for Vertex AI (default: us-central1)",
@@ -30,7 +33,7 @@
 
   "optional_features": {
     "enable_music": true,
-    "_enable_music_comment": "Enable AI music generation (uses ELEVENLABS_API_KEY)",
+    "_enable_music_comment": "Enable AI music generation (uses OPENROUTER_API_KEY with Lyria 3)",
 
     "enable_dynamic_cropping": true,
     "_enable_dynamic_cropping_comment": "Enable AI-powered dynamic cropping with ViNet",

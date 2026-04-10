@@ -360,10 +360,10 @@ check_config_keys() {
   fi
 
   local key val placeholder
-  local -a keys=("MEMORIES_API_KEY" "GOOGLE_CLOUD_PROJECT" "ELEVENLABS_API_KEY" "SOUNDSTRIPE_KEY")
-  local -a placeholders=("your-memories-ai-api-key" "your-gcp-project-id" "your-elevenlabs-api-key" "your-soundstripe-api-key")
-  local -a labels=("Memories.ai (video understanding)" "Google Cloud Project (Gemini)" "ElevenLabs (TTS + STT)" "Soundstripe (music)")
-  local -a required=("true" "true" "true" "false")
+  local -a keys=("MEMORIES_API_KEY" "OPENROUTER_API_KEY" "ELEVENLABS_API_KEY")
+  local -a placeholders=("your-memories-ai-api-key" "" "your-elevenlabs-api-key")
+  local -a labels=("Memories.ai (video understanding)" "OpenRouter (LLM + music generation)" "ElevenLabs (TTS + STT)")
+  local -a required=("true" "true" "true")
 
   for i in "${!keys[@]}"; do
     key="${keys[$i]}"
@@ -469,10 +469,24 @@ prompt_for_config() {
     "true"
 
   prompt_for_config_key \
-    "GOOGLE_CLOUD_PROJECT" \
-    "Google Cloud Project ID (for Gemini / Vertex AI):" \
-    "your-gcp-project-id" \
+    "OPENROUTER_API_KEY" \
+    "OpenRouter API key (https://openrouter.ai — LLM agent + music generation):" \
+    "" \
     "true" \
+    "true"
+
+  prompt_for_config_key \
+    "ELEVENLABS_API_KEY" \
+    "ElevenLabs API key (https://elevenlabs.io — narration TTS + STT):" \
+    "your-elevenlabs-api-key" \
+    "true" \
+    "true"
+
+  prompt_for_config_key \
+    "GOOGLE_CLOUD_PROJECT" \
+    "Google Cloud Project ID (optional — only if using Vertex AI instead of OpenRouter):" \
+    "your-gcp-project-id" \
+    "false" \
     "false"
 
   prompt_for_config_key \
@@ -481,20 +495,6 @@ prompt_for_config() {
     "us-central1" \
     "false" \
     "false"
-
-  prompt_for_config_key \
-    "ELEVENLABS_API_KEY" \
-    "ElevenLabs API key (https://elevenlabs.io — needed for TTS + STT):" \
-    "your-elevenlabs-api-key" \
-    "true" \
-    "true"
-
-  prompt_for_config_key \
-    "SOUNDSTRIPE_KEY" \
-    "Soundstripe API key (optional — for background music):" \
-    "your-soundstripe-api-key" \
-    "false" \
-    "true"
 }
 
 # ── Up / Down ───────────────────────────────────────────────────────────
@@ -581,8 +581,6 @@ run_setup() {
   echo
   check_resolve
   echo
-  check_vinet_model
-  echo
   ensure_dashboard_deps
   build_dashboard_if_needed
   echo
@@ -621,8 +619,6 @@ run_doctor() {
   echo
   check_resolve
   echo
-  check_vinet_model
-  echo
 
   echo -e "  ${DIM}Doctor complete.${NC}"
   echo
@@ -660,16 +656,22 @@ run_up() {
     exit 1
   fi
 
-  local gcp_project
-  gcp_project="$(read_config_value "GOOGLE_CLOUD_PROJECT")"
-  if is_placeholder_value "$gcp_project" "your-gcp-project-id"; then
-    warn "GOOGLE_CLOUD_PROJECT not configured — Gemini features may fail"
+  local or_key
+  or_key="$(read_config_value "OPENROUTER_API_KEY")"
+  if [[ -z "$or_key" ]]; then
+    local gcp_project
+    gcp_project="$(read_config_value "GOOGLE_CLOUD_PROJECT")"
+    if is_placeholder_value "$gcp_project" "your-gcp-project-id"; then
+      fail "Neither OPENROUTER_API_KEY nor GOOGLE_CLOUD_PROJECT is configured — need at least one LLM provider"
+      echo "    Run: ./dev.sh setup"
+      exit 1
+    fi
   fi
 
   local el_key
   el_key="$(read_config_value "ELEVENLABS_API_KEY")"
   if is_placeholder_value "$el_key" "your-elevenlabs-api-key"; then
-    warn "ELEVENLABS_API_KEY not configured — narration and clip refinement will be limited"
+    warn "ELEVENLABS_API_KEY not configured — narration TTS and clip refinement STT will be unavailable"
   fi
 
   build_dashboard_if_needed
