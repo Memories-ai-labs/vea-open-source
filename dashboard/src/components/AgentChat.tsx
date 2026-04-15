@@ -1215,7 +1215,7 @@ export function AgentChat({
                       measuredLufs={selectedAudio.measuredLufs}
                       targetLufsOverride={
                         selectedAudio.kind === 'music' && (editDecision?.narration?.length ?? 0) > 0
-                          ? -28
+                          ? -35
                           : null
                       }
                       onGainChange={handleAudioGainChange}
