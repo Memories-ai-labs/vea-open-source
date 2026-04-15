@@ -52,10 +52,15 @@ class AgentSession:
         video_entries: list,
         emit: Callable[..., Coroutine],
         video_llm=None,
+        autonomous: bool = False,
     ):
         self.project_name = project_name
         self.workspace = workspace
         self.memories = memories_manager
+        # When True, the system prompt instructs the agent to run
+        # non-interactively (no message_user clarifying questions, commit to a
+        # plan in one turn). Used by the one-shot CLI and MCP entrypoints.
+        self.autonomous = autonomous
         # ``gemini`` is the main text + tool-calling LLM (may be Claude/GPT via
         # OpenRouter despite the historical name). ``video_llm`` is the
         # Gemini-family manager used for tasks that need native video input
@@ -253,6 +258,7 @@ class AgentSession:
                 video_list=self.video_list,
                 scratchpads_text=self.scratchpads.render_all(),
                 current_edit_decision=current_edit_json,
+                autonomous=self.autonomous,
             )
 
             config = GenerateContentConfig(

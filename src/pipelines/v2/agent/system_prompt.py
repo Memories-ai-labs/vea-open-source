@@ -351,11 +351,30 @@ in refine_clip_timestamps and generate_fcpxml.
 """
 
 
+_AUTONOMOUS_RIDER = """
+
+## Autonomous mode
+
+You are running non-interactively as part of an orchestrator pipeline. There is NO
+human reviewer between turns. Do NOT call `message_user` to ask clarifying questions
+or wait for approval — commit to the best interpretation of the brief and build the
+edit in a single turn. Call `finish_turn` with a one-line `final_message` describing
+what you shipped when complete.
+
+If the brief is genuinely ambiguous, pick a reasonable default:
+- duration: "short" = 30-60s, "medium" = 90-120s, "long" = 180s+
+- style: default to script-driven with narration + music
+- music: only generate if the brief asks for it; silent otherwise
+Don't stop to ask. Ship it.
+"""
+
+
 def build_system_prompt(
     project_name: str,
     video_list: str,
     scratchpads_text: str,
     current_edit_decision: str = "",
+    autonomous: bool = False,
 ) -> str:
     edit_block = ""
     if current_edit_decision:
@@ -368,9 +387,12 @@ def build_system_prompt(
             f"```json\n{current_edit_decision}\n```\n\n"
             f"{timeline_view}"
         )
-    return SYSTEM_PROMPT_TEMPLATE.format(
+    prompt = SYSTEM_PROMPT_TEMPLATE.format(
         project_name=project_name,
         video_list=video_list,
         scratchpads=scratchpads_text,
         current_edit_decision=edit_block,
     )
+    if autonomous:
+        prompt += _AUTONOMOUS_RIDER
+    return prompt

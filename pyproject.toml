@@ -85,6 +85,9 @@ dependencies = [
     "pydavinci>=0.3.0",
 ]
 
+[project.scripts]
+vea-oneshot = "src.cli:main"
+
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
