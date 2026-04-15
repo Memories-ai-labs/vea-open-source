@@ -254,9 +254,12 @@ TOOL_DECLARATIONS = Tool(
             description=(
                 "Generate a background music track using AI (Google Lyria 3). Produces an "
                 "original instrumental track matching your description. Returns the file "
-                "path and duration. The prompt should describe mood, energy, genre, "
-                "instruments, and tempo — be specific. Generates up to ~3 minutes. "
-                "Only call this when the user has explicitly requested music."
+                "path, duration, detected tempo (BPM), and a `beats` array of beat times "
+                "(seconds). Use the beat array to align cut points: set a clip's source_end "
+                "so its timeline end lands on a beat. Beat-aligned cuts feel rhythmic; "
+                "off-beat cuts create tension — it's an editorial choice. The prompt should "
+                "describe mood, energy, genre, instruments, and tempo — be specific. "
+                "Generates up to ~3 minutes. Only call when the user has requested music."
             ),
             parameters={
                 "type": "object",

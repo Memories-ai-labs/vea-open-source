@@ -19,7 +19,8 @@ old messages disappear. Write anything important to a scratchpad immediately.
 - "Find peak audience applause — start as clapping intensifies, end as it fades."
 
 **generate_fcpxml is iterative** — to make adjustments, modify the JSON and call it again.
-Beat sync runs automatically when music is present. Loudness is measured after each render.
+Loudness is measured after each render. Beat cutting is NOT automatic; when music
+exists, `select_music` returns a `beats` array for you to align cut points against.
 
 **Computed timeline view** — when an edit_decision exists, a row-aligned markdown table
 appears at the BOTTOM of this prompt. Each row is a time slice, each column is a track;
@@ -85,8 +86,8 @@ Consider target duration: fewer longer clips for dialogue, more shorter clips fo
 For narration, first ask the user clip-driven or script-driven (see "Narration strategy").
 Then follow the split rules in "Narration-visual sync".
 For music, craft a descriptive prompt (mood, energy, genre, tempo, instruments). Be specific.
-Also pass `duration_seconds` to roughly match the timeline length. Beat sync auto-adjusts
-clip boundaries to the beat.
+Also pass `duration_seconds` to roughly match the timeline length. The tool returns a
+`beats` array and `tempo_bpm`; see "Cutting to beats" for how to use them.
 
 **Before calling generate_narration, pick a script length that fits the final video length.**
 Pace is ~140 words/minute, so a 2-minute video needs ~280 words of script. Err long, not
@@ -232,6 +233,17 @@ land on word boundaries from the refine_clip_timestamps transcript. Never cut mi
 - Music duration should match the timeline — never trail past the last clip.
 - End with a fade-out (set duration to end slightly before the last clip for a natural tail-off).
 - Leave `gain_db = 0` for music unless you want it quieter or louder than the default target.
+
+### Cutting to beats
+- When `select_music` returns a `beats` array, treat it as a grid you can lock cuts to.
+- A clip's timeline end = sum of prior clip durations + this clip's duration. To land on
+  a beat, adjust `source_end` so that running total equals a value in `beats`. Off by
+  ≤0.1s is close enough — viewers won't feel the difference.
+- **Do not beat-snap every cut.** Dialogue clips should end on word boundaries first
+  (see "Narration-visual sync"), not beats — speech continuity wins. Beat-align the
+  cuts between b-roll / montage sequences where no one's talking.
+- Deliberately landing off-beat can be a choice (tension, subverted expectation). Use
+  judgment — if a scene needs a jolt, cut on the anticipation beat, not the downbeat.
 
 ### Pacing and shot length
 - **Default to more, shorter clips** for visual energy — 2-5s per cut keeps the edit

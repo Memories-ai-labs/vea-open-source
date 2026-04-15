@@ -418,23 +418,12 @@ class ToolExecutor:
                 except Exception as e:
                     logger.warning(f"[AGENT] Narration boundary check skipped: {e}")
 
-        # Snap clips to music beats if music is present
+        # Note: auto beat-snap used to run here. It's now advisory — the agent
+        # gets beat times + tempo back from select_music and decides itself
+        # which clip boundaries to align with beats. This keeps editorial
+        # control (e.g. deliberate off-beat tension cuts) in the model's hands
+        # instead of silently shifting every clip's source_end by up to 0.5s.
         beat_metadata = None
-        if edit.music and edit.music.file:
-            music_file = Path(edit.music.file)
-            if not music_file.exists() and not music_file.is_absolute():
-                music_file = self.workspace.root / edit.music.file
-            if music_file.exists():
-                try:
-                    from src.pipelines.v2.music.beat_sync import snap_to_beats
-                    clip_dicts = [c.model_dump() for c in edit.clips]
-                    _, beat_metadata = snap_to_beats(clip_dicts, str(music_file))
-                    # Apply snapped durations back to edit
-                    for cd, clip in zip(clip_dicts, edit.clips):
-                        clip.source_end = cd["source_end"]
-                    logger.info(f"[AGENT] Beat sync: {beat_metadata.get('snapped', 0)}/{len(edit.clips)} clips snapped")
-                except Exception as e:
-                    logger.warning(f"[AGENT] Beat sync failed (non-fatal): {e}")
 
         # Save the EditDecision JSON for dashboard / debugging
         json_path = self.workspace.root / "fcpxml" / "edit_decision.json"
@@ -984,12 +973,51 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
         # Get actual duration via ffprobe
         duration = await self._get_audio_duration(str(music_path))
 
-        return {
+        # Detect beats so the agent can align its own cut points. Returned
+        # as a plain list of seconds + a BPM number — no auto-snap, the
+        # agent reads these and decides which clip boundaries to land on a
+        # beat. Beat detection can be slow on long tracks, so we cap the
+        # returned array to something the prompt can actually fit.
+        beats_list: List[float] = []
+        tempo_bpm = 0.0
+        try:
+            from src.pipelines.v2.music.beat_sync import detect_beats
+            import numpy as np
+
+            def _detect():
+                import librosa
+                y, sr = librosa.load(str(music_path), sr=22050)
+                tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, units="frames")
+                beat_times = librosa.frames_to_time(beat_frames, sr=sr)
+                return float(tempo), beat_times
+
+            tempo_bpm, beat_times = await loop.run_in_executor(None, _detect)
+            beats_list = [round(float(t), 3) for t in beat_times]
+            logger.info(f"[MUSIC] Detected {len(beats_list)} beats at {tempo_bpm:.1f} BPM")
+        except Exception as e:
+            logger.warning(f"[MUSIC] Beat detection failed (non-fatal): {e}")
+
+        result_payload: Dict[str, Any] = {
             "status": "generated",
             "music_path": str(music_path),
             "duration_seconds": duration,
             "prompt_used": prompt,
         }
+        if beats_list:
+            # Trim to ~200 beats (more than enough for a 2-3 min edit) so the
+            # tool result doesn't explode the context window.
+            truncated = beats_list[:200]
+            result_payload["tempo_bpm"] = round(tempo_bpm, 1)
+            result_payload["beats"] = truncated
+            result_payload["beats_note"] = (
+                f"{len(beats_list)} beats detected at {tempo_bpm:.1f} BPM "
+                f"(first {len(truncated)} returned). To cut on a beat, set a "
+                f"clip's source_end so its timeline end (sum of prior durations + "
+                f"this clip's duration) equals a value in this array. Beat cuts "
+                f"are an editorial choice — align when it serves the edit, break "
+                f"intentionally when you want dissonance or emphasis."
+            )
+        return result_payload
 
     async def _get_audio_duration(self, path: str) -> Optional[float]:
         """Get audio duration using ffprobe."""
