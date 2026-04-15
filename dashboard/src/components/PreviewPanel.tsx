@@ -33,7 +33,6 @@ export const PreviewPanel = forwardRef<PreviewPanelHandle, PreviewPanelProps>(fu
   const abortRef = useRef<AbortController | null>(null);
 
   const activeRender = activeTab === 'draft' ? draftRenderState : finalRenderState;
-  const activeVideoRef = activeTab === 'draft' ? draftVideoRef : finalVideoRef;
 
   useImperativeHandle(ref, () => ({
     seekTo(time: number) {

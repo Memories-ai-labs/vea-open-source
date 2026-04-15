@@ -1,6 +1,6 @@
 import { useEffect, useCallback, useMemo, useState, useRef } from 'react';
 import type { ProjectSummary } from '../types';
-import { listProjects, createProject } from '../api';
+import { createProject } from '../api';
 import { useBreakpoint } from '../hooks/useBreakpoint';
 import { useToast } from './Toast';
 
@@ -406,7 +406,7 @@ export function ProjectBrowser({ onSelectProject }: ProjectBrowserProps) {
             </div>
           </div>
           <button
-            onClick={refresh}
+            onClick={() => refresh()}
             style={{
               padding: '12px 16px',
               borderRadius: '999px',
@@ -433,7 +433,7 @@ export function ProjectBrowser({ onSelectProject }: ProjectBrowserProps) {
           <div className="status-message error" style={{ display: 'flex', alignItems: 'center', gap: '12px', justifyContent: 'space-between' }}>
             <span>Could not load projects — the backend may be unavailable.</span>
             <button
-              onClick={refresh}
+              onClick={() => refresh()}
               style={{
                 padding: '6px 14px',
                 borderRadius: '999px',

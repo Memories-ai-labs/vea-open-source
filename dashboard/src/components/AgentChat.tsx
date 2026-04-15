@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import type { AgentEvent, ChatMessage, ScratchpadState, ScratchpadTimestamps, EditDecision, TransformSettings, RenderState } from '../hooks/useAgentChat';
+import type { AgentEvent, ChatMessage, ScratchpadState, ScratchpadTimestamps, EditDecision, TransformSettings, RenderState, CropStatus } from '../hooks/useAgentChat';
 import type { ProjectSummary } from '../types';
 import { listProjects, clearGists, clearPlanning, clearMemories, indexProject, getResolveStatus, getSystemInfo, setMainModel, setVideoModel } from '../api';
 import type { SystemInfo } from '../api';
@@ -24,7 +24,7 @@ interface AgentChatProps {
   editDecision: EditDecision | null;
   renderState: RenderState;
   draftRenderState: RenderState;
-  cropStatuses: Record<string, { clip_id: string; status: string; step?: string }>;
+  cropStatuses: Record<string, CropStatus>;
   connected: boolean;
   busy: boolean;
   needsIndexing?: boolean;
@@ -151,7 +151,7 @@ export function AgentChat({
   const [modelOpen, setModelOpen] = useState(false);
   const [modelLoading, setModelLoading] = useState<string | null>(null);
   const [modelDropdownPos, setModelDropdownPos] = useState<{ top: number; right: number } | null>(null);
-  const [indexing, setIndexing] = useState(false);
+  const [, setIndexing] = useState(false);
   const [expandedFile, setExpandedFile] = useState<string | null>(null);
   const [playheadTime, setPlayheadTime] = useState(0);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
@@ -163,7 +163,6 @@ export function AgentChat({
   const modelBtnRef = useRef<HTMLButtonElement>(null);
   const [dropdownPos, setDropdownPos] = useState<{ top: number; right: number } | null>(null);
   const isTablet = useBreakpoint(1080);
-  const isMobile = useBreakpoint(720);
 
   // Layout: upper row pct (of the main content area), lower gets the rest
   const [upperPct, setUpperPct] = useState(55);

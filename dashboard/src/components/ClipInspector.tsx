@@ -22,7 +22,6 @@ export default function ClipInspector({
   clip,
   cropStatus,
   timelineWidth,
-  timelineHeight,
   onTransformChange,
   onResetTransform,
   onRequestCrop,

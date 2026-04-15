@@ -56,7 +56,6 @@ export default function TransformPreview({
   const srcW = clip.source_width || 1920;
   const srcH = clip.source_height || 1080;
   const tlAspect = timelineWidth / timelineHeight;
-  const srcAspect = srcW / srcH;
 
   const t = clip.transform as TransformSettings | undefined;
 
