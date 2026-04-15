@@ -500,8 +500,12 @@ async def _mix_audio_and_titles(
     # gain_db math, so we hardcode targets and compute the actual dB at render time.
     # The agent's gain_db is treated as an OFFSET from the target (so gain_db=0 means
     # "play at target", gain_db=-3 means "3 dB below target", etc.).
+    #
+    # Music target drops 10 dB when narration is present so the voice sits clearly
+    # on top. Without that, default music (-18 LUFS) is only 2 dB under narration
+    # (-16 LUFS) and drowns the voice. Pro voice-over mixing wants ~12 dB separation.
     TARGET_NARRATION_LUFS = -16.0
-    TARGET_MUSIC_LUFS = -18.0
+    TARGET_MUSIC_LUFS = -28.0 if has_narration else -18.0
 
     def _compute_auto_gain(measured_lufs: Optional[float], target_lufs: float, agent_offset_db: float) -> float:
         if measured_lufs is None:

@@ -1170,6 +1170,11 @@ export function AgentChat({
                       timelineOffset={selectedAudio.timelineOffset}
                       gainDb={selectedAudio.gainDb}
                       measuredLufs={selectedAudio.measuredLufs}
+                      targetLufsOverride={
+                        selectedAudio.kind === 'music' && (editDecision?.narration?.length ?? 0) > 0
+                          ? -28
+                          : null
+                      }
                       onGainChange={handleAudioGainChange}
                       onClose={() => setSelectedClipId(null)}
                     />

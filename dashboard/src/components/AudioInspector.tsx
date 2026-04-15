@@ -10,6 +10,10 @@ interface AudioInspectorProps {
   timelineOffset: number;   // absolute placement on timeline
   gainDb: number;
   measuredLufs?: number | null;
+  // Effective render target. Set when the renderer uses a non-default target
+  // (e.g. music drops to -28 LUFS when narration is present for voice-over
+  // separation). Falls back to kind defaults: music -18, narration -16.
+  targetLufsOverride?: number | null;
   onGainChange: (gainDb: number) => void;
   onClose?: () => void;
 }
@@ -22,6 +26,7 @@ export default function AudioInspector({
   timelineOffset,
   gainDb,
   measuredLufs,
+  targetLufsOverride,
   onGainChange,
   onClose,
 }: AudioInspectorProps) {
@@ -35,7 +40,7 @@ export default function AudioInspector({
     [onGainChange]
   );
 
-  const target = kind === 'music' ? -18 : -16;
+  const target = targetLufsOverride ?? (kind === 'music' ? -18 : -16);
   // Music/narration gain_db is an OFFSET from target — the renderer auto-normalizes
   // using (target + offset) - measured. To hit target, offset = 0. Suggesting
   // `target - measured` (which is the literal-dB formula for source clips) would
