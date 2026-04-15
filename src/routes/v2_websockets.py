@@ -116,9 +116,13 @@ def register_websocket_routes(app: FastAPI):
             await websocket.close()
             return
 
-        # Load workspace
+        # Load workspace. Use dir_exists() rather than exists() — the latter
+        # only returns True after a session.json has been written, which
+        # doesn't happen until indexing completes. A freshly-created workspace
+        # with footage but no session still needs a live WebSocket so the
+        # Index button can kick off indexing.
         workspace = _workspace(project_name)
-        if not workspace.exists():
+        if not workspace.dir_exists():
             await websocket.send_json({"type": "error", "data": {"message": f"Project '{project_name}' not found."}})
             await websocket.close()
             return
