@@ -290,6 +290,13 @@ class AgentSession:
                 p for p in model_content.parts
                 if p.function_call is not None
             ]
+            # Capture any accompanying text so ``finish_turn`` with an empty
+            # ``final_message`` can fall back to it. Some models (Sonnet via
+            # OpenRouter in particular) put an info-query answer in the text
+            # channel alongside the finish_turn call, and the user would
+            # otherwise see nothing.
+            inline_text_parts = [p.text for p in model_content.parts if p.text]
+            inline_text = "\n".join(inline_text_parts).strip()
 
             if not function_calls:
                 # Final text response — emit as agent message
@@ -430,16 +437,25 @@ class AgentSession:
 
             # Exit the loop if finish_turn was called in this batch
             if finish_after_batch:
-                if finish_final_message.strip():
+                # Fall back to any inline text when final_message is empty —
+                # otherwise answers that the model wrote alongside the tool
+                # call would be silently dropped.
+                effective_final = finish_final_message.strip() or inline_text
+                if effective_final and not message_user_this_round:
                     await self._emit("agent_message", {
-                        "text": finish_final_message,
+                        "text": effective_final,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     })
                     self._chat_log.append(ChatMessage(
                         role="model",
-                        text=finish_final_message,
+                        text=effective_final,
                         timestamp=datetime.now(timezone.utc).isoformat(),
                     ))
+                    if not finish_final_message.strip():
+                        logger.info(
+                            f"[AGENT] finish_turn had empty final_message; "
+                            f"used inline text ({len(effective_final)} chars) as fallback"
+                        )
                 logger.info(f"[AGENT] Turn ended via finish_turn after {round_num + 1} rounds")
                 return
 

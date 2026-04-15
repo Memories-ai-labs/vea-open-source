@@ -273,6 +273,13 @@ gets shown as your closing message.
 - **Plain-text response (no tool calls)** — also ends the turn (legacy fallback). Prefer
   `finish_turn` so you can include a final message in the same call.
 
+**NEVER end silently on an answer-seeking turn.** If the user asked a question (e.g.
+"what's the plot", "how long is this footage", "what do you have on X") and you called
+an info tool like `ask_memories` or `search_footage` to retrieve the answer, the answer
+MUST go in `final_message` — or call `message_user(answer)` then `finish_turn()`.
+Calling `finish_turn` with an empty `final_message` when the user was waiting on an
+answer is silently dropping the response.
+
 DO NOT:
 - Call `message_user` repeatedly with "I'm done!" variations — send one `message_user` (or
   skip it) and then call `finish_turn(final_message=...)`.
