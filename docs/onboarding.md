@@ -56,10 +56,10 @@ Edit `config.json` and fill in the `api_keys` section:
 | `GOOGLE_CLOUD_LOCATION` | No | Defaults to `us-central1` (Vertex only) |
 | `ELEVENLABS_API_KEY` | No | https://elevenlabs.io -- needed for narration |
 
-VEA needs one LLM provider for the agent loop. Pick **one**:
+VEA uses **two** LLM slots — a `main_llm` for the agent loop and a `video_llm` for the one tool that needs native video (`refine_clip_timestamps`). Configure both in `config.json`:
 
-- **OpenRouter (simplest):** set `OPENROUTER_API_KEY`. Default model is `google/gemini-2.5-flash`; override with `OPENROUTER_MODEL`. No further auth needed.
-- **Vertex AI Gemini:** set `GOOGLE_CLOUD_PROJECT` and run the gcloud step below. If both are configured, OpenRouter wins; force Vertex with `LLM_PROVIDER=vertex`.
+- **`main_llm`**: requires `OPENROUTER_API_KEY`. Pick a model with `MAIN_LLM_MODEL` (the example config uses `anthropic/claude-opus-4.6`). Switchable at runtime from the dashboard header.
+- **`video_llm`**: set `VIDEO_LLM_MODEL`. A bare name like `gemini-2.5-flash` routes via Vertex (needs `GOOGLE_CLOUD_PROJECT` + the gcloud step below). A slash-prefixed ID like `google/gemini-3-flash-preview` routes via OpenRouter.
 
 ### 3. Authenticate Google Cloud (Vertex AI users only)
 

@@ -382,7 +382,7 @@ App.tsx
 Features a "Manage" dropdown for: re-indexing, clearing gists, clearing planning/chat, deleting from Memories.ai.
 
 **NLETimeline** (`NLETimeline.tsx`): A custom-built non-linear editing timeline visualization:
-- Builds tracks from EditDecision: V1 (video spine), T1 (titles), A1 (narration), A2 (music)
+- Builds tracks from EditDecision: V1 (video spine), V2+ (overlay clips and titles via their `lane` field), A1 (narration), A2 (music). Titles with `lane=N` render on V-track `N+1` so V1 stays the dedicated spine row.
 - Each clip is a colored block with label, sublabel (filename), gain badge
 - Audio tracks show procedural waveform shapes
 - Timecode ruler with adaptive tick intervals
@@ -459,19 +459,19 @@ This is much faster than V1 indexing (no scene-by-scene analysis). Detailed unde
 
 ## LLM Provider Integration
 
-V2 supports two LLM backends, both exposing the same `gemini_manager` interface so call sites are identical. The selection happens in `src/services.py` at startup:
+V2 uses **two** LLM slots, wired in `src/services.py` at startup:
 
-* **OpenRouter** (`lib/llm/OpenRouterManager.py`) — used when `OPENROUTER_API_KEY` is set and `LLM_PROVIDER` is not `vertex`. Default model: `google/gemini-2.5-flash` (override via `OPENROUTER_MODEL`).
-* **Vertex AI Gemini** (`lib/llm/GeminiGenaiManager.py`) — used when OpenRouter is not configured, or forced via `LLM_PROVIDER=vertex`. Requires `GOOGLE_CLOUD_PROJECT` and `gcloud auth application-default login`.
+* **`main_llm`** — the text + tool-calling workhorse for the agent loop. Routes through `OpenRouterManager` (`lib/llm/OpenRouterManager.py`), so any frontier model works (Claude, GPT, Gemini, MiniMax, Qwen). Controlled by `MAIN_LLM_MODEL` in `config.json`.
+* **`video_llm`** — only for tools that need native video input (`refine_clip_timestamps`, `verify_preview`). Controlled by `VIDEO_LLM_MODEL`. Bare names route via `GeminiGenaiManager` (Vertex AI, requires `GOOGLE_CLOUD_PROJECT`). Slash-prefixed IDs route via OpenRouter.
 
-Both wrap function calling, structured output, and multimodal (video/image) inputs. The remainder of this section uses "Gemini" generically.
+`gemini_manager` is a backwards-compat alias for `main_llm`. Both `main_llm` and `video_llm` expose the same `LLM_request()` surface (function calling, structured output, multimodal). Both can be swapped live: `services.set_main_llm(model_id)` / `services.set_video_llm(model_id)`, exposed via the dashboard header dropdown and the `POST /video-edit/v2/system/model` + `POST /video-edit/v2/system/video_model` endpoints.
 
 ### Agent Loop Usage
 
-The agent session calls Gemini directly via `genai_client.models.generate_content()` with:
+The agent session calls `self.gemini.genai_client.models.generate_content()` (i.e. `main_llm`) with:
 - `contents`: conversation history (user/model/tool Content objects)
-- `system_instruction`: rebuilt each turn with current scratchpad state
-- `tools`: `TOOL_DECLARATIONS` (7 function declarations)
+- `system_instruction`: rebuilt each turn with current scratchpad state and timeline view
+- `tools`: `TOOL_DECLARATIONS` (10 function declarations)
 - `safety_settings`: all categories set to `BLOCK_NONE` for creative content
 
 ### Structured Output (refine_clip_timestamps)

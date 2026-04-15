@@ -99,12 +99,12 @@ Edit `config.json` and fill in the `api_keys` section:
 | `GOOGLE_CLOUD_PROJECT` | **One of these two** | A GCP project with Vertex AI enabled |
 | `ELEVENLABS_API_KEY` | Optional | https://elevenlabs.io — needed for narration |
 
-VEA needs an LLM provider for the agent loop. You can use **either**:
+VEA uses **two** LLM slots and routes each to the best backend:
 
-* **OpenRouter** (simplest): set `OPENROUTER_API_KEY` in your environment and you're done. Optionally set `OPENROUTER_MODEL` (default `google/gemini-2.5-flash`).
-* **Vertex AI Gemini**: set `GOOGLE_CLOUD_PROJECT` and run `gcloud auth application-default login`.
+* **Main agent LLM** (text + tool-calling) — runs every round of the agent loop. Set `OPENROUTER_API_KEY` and pick a model in `config.json` via `MAIN_LLM_MODEL` (the example config uses `anthropic/claude-opus-4.6`; `claude-sonnet-4.6`, `openai/gpt-5.4`, `google/gemini-3.1-pro-preview`, `minimax/minimax-m2.7`, and `qwen/qwen3.6-plus` are also available). Switchable at runtime from the dashboard header.
+* **Video LLM** (native video input for `refine_clip_timestamps`) — controlled by `VIDEO_LLM_MODEL`. A bare name like `gemini-2.5-flash` routes via **Vertex AI Gemini** (needs `GOOGLE_CLOUD_PROJECT` + `gcloud auth application-default login`). A slash-prefixed ID like `google/gemini-3-flash-preview` routes via OpenRouter.
 
-If both are set, OpenRouter wins. Force Vertex by setting `LLM_PROVIDER=vertex`.
+Both can be swapped live — dashboard dropdown, `POST /video-edit/v2/system/model`, or `POST /video-edit/v2/system/video_model`.
 
 ### 3. Start the backend
 
@@ -174,7 +174,7 @@ You watch all of this happen in real time:
 
 * **Chat panel** — the agent's messages and tool calls
 * **Scratchpad tabs** — its persistent memory (comprehension / creative direction / planning / fcpxml)
-* **NLE timeline** — multi-track view (V1 video, T1 titles, A1 narration, A2 music) with hover details
+* **NLE timeline** — multi-track view (V1 video spine, V2+ overlays and titles, A1 narration, A2 music) with hover details
 * **Preview** — the rendered draft (and final, when DaVinci Resolve is available)
 
 ### 5. Iterate
@@ -191,6 +191,29 @@ When you're happy:
 
 * **MP4** — `data/workspaces/my-project/renders/draft.mp4` (FFmpeg) or `final.mp4` (DaVinci Resolve, if installed)
 * **FCPXML** — `data/workspaces/my-project/fcpxml/edit_v1.fcpxml`, importable into Final Cut Pro, DaVinci Resolve, or Premiere Pro
+
+---
+
+## 🤖 One-shot CLI (for orchestrator agents)
+
+If you want to drive VEA from another agent (subprocess, pipeline, MCP), skip the dashboard and use `vea-oneshot`:
+
+```bash
+python -m src.cli \
+  --project promo \
+  --brief "make a 60-second promo with narration and music" \
+  --footage-dir ./clips
+```
+
+The CLI symlinks your footage into the workspace, indexes if needed, runs the agent in autonomous mode (no clarifying questions — it commits to a reasonable interpretation of the brief), and prints a single JSON line on the last stdout row with the rendered artifact paths:
+
+```json
+{"status":"ok","project":"promo","fcpxml":"/abs/edit_v1.fcpxml",
+ "draft_mp4":"/abs/draft.mp4","final_mp4":"/abs/final.mp4",
+ "edit_decision":{...}}
+```
+
+Flags: `--reuse-index` (skip re-indexing if a session already exists), `--log-format jsonl` (structured progress events for programmatic parsing), `--timeout N` (hard cap on the agent loop, default 900s). Non-zero exit on any unrecoverable failure, with a `status: "error"` JSON still printed so the caller gets structured feedback.
 
 ---
 

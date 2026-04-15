@@ -13,9 +13,12 @@ There is also a legacy V1 pipeline (videoComprehension → flexibleResponse → 
 ```
 src/
 ├── app.py                          # FastAPI entrypoint (port 8000)
-├── services.py                     # Shared singletons (LLM, Memories.ai, agent sessions)
+├── services.py                     # Shared singletons (main_llm, video_llm, Memories.ai, agent sessions)
+├── cli.py                          # One-shot CLI (vea-oneshot) for non-interactive runs
 ├── routes/                         # FastAPI routers
-│   ├── v2_endpoints.py             # REST endpoints for the V2 API
+│   ├── _route_utils.py             # Path-safety helpers (workspace resolution)
+│   ├── v2_pipelines.py             # REST: plan, FCPXML, narration, music, crop
+│   ├── v2_projects.py              # REST: list/create/clear + /system/info + /system/model
 │   └── v2_websockets.py            # WebSocket: agent chat + indexing progress
 ├── pipelines/
 │   ├── v2/                         # ★ Current architecture
@@ -35,6 +38,8 @@ src/
 │   │   │   └── ffmpeg_renderer.py  # Auto draft renderer (no DaVinci needed)
 │   │   ├── audio/
 │   │   │   └── loudness.py         # ITU-R BS.1770 LUFS measurement (pyloudnorm)
+│   │   ├── music/
+│   │   │   └── beat_sync.py        # librosa beat detection (advisory, agent reads)
 │   │   ├── workspace.py            # WorkspaceManager (file I/O for projects)
 │   │   └── schemas.py              # SessionData, EditDecision, ClipDecision, etc.
 │   ├── common/                     # Shared (V1+V2): TimelineConstructor, dynamic crop
@@ -58,6 +63,7 @@ dashboard/                          # React + Vite + TypeScript frontend
 data/
 └── workspaces/{project}/           # Per-project storage (footage, edits, renders)
 docs/                               # architecture.md, onboarding.md
+tests/v2/                           # pytest suite (230+ tests, offline)
 ```
 
 ## Setup commands
@@ -82,14 +88,19 @@ The dashboard is served at **http://localhost:8000/app**. API docs at **http://l
 
 System dependency: `ffmpeg` must be installed (`brew install ffmpeg` or distro equivalent).
 
-## LLM provider
+## LLM providers (main_llm vs video_llm)
 
-V2 supports two backends, controlled by env vars (loaded from `config.json` at startup):
+V2 uses **two** LLM slots, both initialized in `src/services.py`:
 
-* **OpenRouter** — set `OPENROUTER_API_KEY`. Model defaults to `google/gemini-2.5-flash`, override with `OPENROUTER_MODEL`. This is the default if both are configured.
-* **Vertex AI Gemini** — set `GOOGLE_CLOUD_PROJECT` and run `gcloud auth application-default login`. Force this path by setting `LLM_PROVIDER=vertex`.
+* **`main_llm`** — text + tool-calling workhorse for the agent loop. Any frontier model works (Claude, GPT, Gemini, MiniMax, Qwen) because all calls go through the OpenRouter shim. Defaults to `MAIN_LLM_MODEL` from `config.json` (config.example sets Claude Opus 4.6). Requires `OPENROUTER_API_KEY`.
+* **`video_llm`** — used ONLY for tasks that need native video input (`refine_clip_timestamps`, `verify_preview`). Controlled by `VIDEO_LLM_MODEL`. Bare names like `gemini-2.5-flash` route via Vertex AI (needs `GOOGLE_CLOUD_PROJECT` + `gcloud auth application-default login`); slash-prefixed IDs like `google/gemini-3-flash-preview` route via OpenRouter.
 
-The selection happens in `src/services.py`. Both providers expose the same interface (`gemini_manager`), so call sites are identical.
+Both are live-swappable at runtime:
+- Dashboard: header pill opens a two-section dropdown (main + video).
+- REST: `POST /video-edit/v2/system/model` / `POST /video-edit/v2/system/video_model` with `{"model": "..."}`.
+- Catalogs: `GET /video-edit/v2/system/info` returns current + available models.
+
+`gemini_manager` is kept as a backwards-compat alias pointing at `main_llm`.
 
 ## V2 agent architecture (the important part)
 
@@ -112,11 +123,11 @@ Declared in `src/pipelines/v2/agent/tool_definitions.py`, executed by `ToolExecu
 |------|---------|
 | `ask_memories` | Memories.ai chat (Q&A about footage) |
 | `search_footage` | Memories.ai BY_CLIP search (returns clips + transcripts) |
-| `refine_clip_timestamps` | ffmpeg extract → downsample → Gemini structured output for in/out points |
+| `refine_clip_timestamps` | ffmpeg extract → PySceneDetect boundaries + ElevenLabs STT word grid → video LLM two-pass (reasoning + structured) for in/out points. Auto-retries with wider window if speech is truncated. |
 | `update_scratchpad` | Write to `comprehension` / `creative_direction` / `planning` / `fcpxml` |
-| `generate_fcpxml` | Validate clips against ffprobe durations, compile EditDecision → FCPXML, kick off draft render |
-| `generate_narration` | ElevenLabs TTS with `convert_with_timestamps` (real word boundaries) |
-| `select_music` | Google Lyria 3 Pro music generation via OpenRouter → save track |
+| `generate_fcpxml` | Validate clips against ffprobe durations and narration word-grid, compile EditDecision → FCPXML (with `workspace_root` for absolute audio paths), kick off draft render as a background task. |
+| `generate_narration` | ElevenLabs TTS with `convert_with_timestamps` (real word boundaries), persists `words.json` |
+| `select_music` | Google Lyria 3 Pro music generation via OpenRouter. Returns `beats: [float]` and `tempo_bpm` — beat-aligned cutting is advisory, the agent decides when to snap |
 | `generate_subtitles` | STT via ElevenLabs Scribe → subtitle text overlays |
 | `message_user` | Mid-flow message to dashboard (does NOT end the turn) |
 | `finish_turn` | Explicit turn-end signal with optional final message |
@@ -132,18 +143,22 @@ Four markdown files in `{workspace}/scratchpads/` give the agent durable memory 
 ### Audio gain semantics (easy to get wrong)
 
 * **Source clips** (`clips[].gain_db`) — literal dB adjustment. `0` = original. After a render, the agent reads `measured_loudness_lufs` and computes `gain_db = target_lufs - measured`.
-* **Music / narration** (`gain_db` on `MusicTrack` / `NarrationSegment`) — **offset from target**, not literal. Default `0` means "play at target loudness" (-18 LUFS for music, -16 for narration). The renderer computes `(target + offset) - measured` automatically. Writing `gain_db = -18` for music makes it inaudible — that's the most common LLM mistake; the system prompt warns about it explicitly.
+* **Music / narration** (`gain_db` on `MusicTrack` / `NarrationSegment`) — **offset from target**, not literal. Default `0` means "play at target loudness". Narration target is always `-16` LUFS. Music target is **`-35` LUFS when any narration segment exists** (voice-over separation), else `-18`. The renderer in `ffmpeg_renderer.py:TARGET_*` computes `(target + offset) - measured` automatically. Writing `gain_db = -18` for music under narration thinking it's the target would produce `-53` LUFS — inaudible — so the system prompt warns about the offset semantics explicitly.
 
 ### FCPXML compilation
 
-`src/pipelines/v2/fcpxml/edit_compiler.py` is fully deterministic — no LLM in this step. It uses `Fraction` for exact rational frame timing, registers assets for unique source files, and emits FCPXML 1.10. Source paths are absolute filesystem paths inside the workspace `footage/` directory.
+`src/pipelines/v2/fcpxml/edit_compiler.py:compile_edit_decision(edit, output_path, workspace_root=...)` is fully deterministic — no LLM in this step. It uses `Fraction` for exact rational frame timing, registers assets for unique source files, and emits FCPXML 1.10. Pass `workspace_root` so bare narration/music filenames get resolved to absolute URIs under `{workspace}/narration/` and `{workspace}/music/` — without it, Resolve imports fail because the fallback `file:///media/<name>` path doesn't exist.
 
 ### Renders
 
-* **Draft** — `src/pipelines/v2/preview/ffmpeg_renderer.py` runs synchronously after `generate_fcpxml`. Outputs `{workspace}/renders/draft.mp4`. Always available.
-* **Final** — DaVinci Resolve via `lib/utils/resolve_render.py`. Outputs `{workspace}/renders/final.mp4`. Optional; requires DaVinci Resolve Studio.
+* **Draft** — `src/pipelines/v2/preview/ffmpeg_renderer.py` runs as a **background asyncio task** spawned by `AgentSession._auto_render_preview` after `generate_fcpxml` succeeds. Outputs `{workspace}/renders/draft.mp4`. Always available.
+* **Final** — DaVinci Resolve via `lib/utils/resolve_render.py`, also spawned in the same background task. Outputs `{workspace}/renders/final.mp4`. Optional; requires DaVinci Resolve Studio.
 
-The dashboard's preview tabs default to draft, with Final shown when available.
+Because renders are async, callers that need the final file (e.g. the CLI) must `await` the session's `_bg_tasks`. The dashboard's preview tabs default to draft, with Final shown when available.
+
+### Title lane rendering
+
+Titles have a `lane: int` field (FCPXML overlay convention: `lane=1` is "one lane above the spine"). The dashboard `NLETimeline` maps `lane=N` to V-track `V(N+1)` so V1 stays the dedicated spine row and titles render on V2+. Don't confuse this with the old "T1" track layout — titles share the video-family space with overlay clips.
 
 ## Conventions
 
@@ -205,18 +220,56 @@ Tool executors return a `dict` that gets serialized into the LLM `FunctionRespon
 
 The Vite proxy is in `dashboard/vite.config.ts`; it forwards both REST (`/video-edit/*`) and WebSocket upgrades.
 
-## Testing notes
+## Testing
 
-There's no formal test suite yet. The standard sanity check is:
+Offline pytest suite lives in `tests/v2/`. Run:
 
-1. `./dev.sh up`
-2. Open dashboard, pick a small project (a few short clips)
-3. Click Index, wait for completion
-4. Send a brief like "make a 30 second highlight reel with narration and music"
-5. Watch the chat, scratchpads, timeline, and draft preview update live
-6. Verify `data/workspaces/{project}/fcpxml/edit_v1.fcpxml` and `renders/draft.mp4` exist
+```bash
+.venv/bin/pytest tests/v2 -q          # ~230 tests, <2s, no LLM or ffmpeg calls
+```
 
-For end-to-end testing, the Playwright MCP server can drive the dashboard.
+Coverage focuses on refactor-safety for contracts: schema round-tripping, workspace
+path safety + atomic writes, FCPXML audio-path resolution, scene-detect helper,
+scratchpad ops + truncation, REST `/system/*` endpoints, project CRUD + clear,
+timeline-view computation, CLI parser + stdout emitter.
+
+**Not covered by pytest** (needs real services):
+- Full agent turn loop — use the CLI or dashboard for end-to-end.
+- ffmpeg renderer — needs the binary and real media files.
+- Frontend components — no Vitest runner configured yet.
+
+For end-to-end: `./dev.sh up` → dashboard at :8000/app, OR the one-shot CLI:
+
+```bash
+python -m src.cli --project promo --brief "30s highlight" --footage-dir ./clips
+```
+
+Playwright MCP can drive the dashboard for UI regressions.
+
+## One-shot CLI (non-interactive orchestration)
+
+`src/cli.py` (also on PATH as `vea-oneshot` after `uv sync`) runs a single
+agent turn without the dashboard. Useful for letting another agent drive VEA
+via subprocess or MCP.
+
+```bash
+python -m src.cli \
+  --project promo \
+  --brief "make a 60s promo with narration and music" \
+  --footage-dir ./clips \
+  [--reuse-index] [--log-format text|jsonl] [--timeout 900]
+```
+
+Under the hood it:
+1. Symlinks videos from `--footage-dir` into `{workspace}/footage/`.
+2. Runs `LightweightComprehension` unless `--reuse-index` and a session exists.
+3. Builds an `AgentSession` with `autonomous=True` — the system prompt gains a
+   rider (`_AUTONOMOUS_RIDER` in `system_prompt.py`) telling the agent not to
+   call `message_user` for clarifications and to commit to defaults.
+4. Awaits `handle_user_message(brief)`, then waits for draft + Resolve
+   background renders.
+5. Prints a final JSON line on stdout: `{"status":"ok","fcpxml":"...","draft_mp4":"...","final_mp4":"...","edit_decision":{...}}`.
+   Exit 0 on success; non-zero + structured error JSON on failure.
 
 ## Things not to be confused by
 
