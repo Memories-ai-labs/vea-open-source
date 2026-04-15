@@ -689,14 +689,16 @@ export function AgentChat({
               background: 'rgba(28,25,23,0.97)',
               border: '1px solid var(--border)',
               borderRadius: 'var(--radius-md)',
-              padding: '8px',
-              minWidth: '260px',
+              padding: '6px',
+              minWidth: '240px',
+              maxHeight: 'min(420px, calc(100vh - 80px))',
+              overflowY: 'auto',
               display: 'grid',
-              gap: '2px',
+              gap: '1px',
               boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
               backdropFilter: 'blur(12px)',
             }}>
-              <div style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '4px 8px' }}>
+              <div style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '2px 8px 4px' }}>
                 Main agent LLM
               </div>
               {systemInfo.available_main_models.map(m => {
@@ -722,7 +724,7 @@ export function AgentChat({
                     }}
                     style={{
                       textAlign: 'left',
-                      padding: '8px 10px',
+                      padding: '5px 8px',
                       borderRadius: 'var(--radius-sm)',
                       border: 'none',
                       background: active ? 'rgba(96,165,250,0.15)' : 'transparent',
@@ -730,21 +732,20 @@ export function AgentChat({
                       cursor: active || modelLoading ? 'default' : 'pointer',
                       opacity: modelLoading && !active ? 0.4 : 1,
                       display: 'grid',
-                      gap: '2px',
+                      gap: '1px',
                     }}
                   >
-                    <div style={{ fontSize: '12px', fontWeight: 600, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ fontSize: '11px', fontWeight: 600, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
                       <span>{m.name}</span>
-                      {active && <span style={{ fontSize: '10px', color: 'var(--accent-blue)' }}>active</span>}
-                      {modelLoading === m.id && <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>switching…</span>}
+                      {active && <span style={{ fontSize: '9px', color: 'var(--accent-blue)' }}>active</span>}
+                      {modelLoading === m.id && <span style={{ fontSize: '9px', color: 'var(--text-muted)' }}>switching…</span>}
                     </div>
-                    <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>{m.hint}</div>
-                    <div style={{ fontSize: '9px', color: 'var(--text-muted)', fontFamily: 'monospace' }}>{m.id}</div>
+                    <div style={{ fontSize: '9px', color: 'var(--text-muted)', lineHeight: 1.3 }}>{m.hint}</div>
                   </button>
                 );
               })}
-              <div style={{ borderTop: '1px solid var(--border)', margin: '6px 0' }} />
-              <div style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '4px 8px' }}>
+              <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
+              <div style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '2px 8px 4px' }}>
                 Video LLM (refine / verify)
               </div>
               {systemInfo.available_video_models.map(m => {
@@ -770,7 +771,7 @@ export function AgentChat({
                     }}
                     style={{
                       textAlign: 'left',
-                      padding: '8px 10px',
+                      padding: '5px 8px',
                       borderRadius: 'var(--radius-sm)',
                       border: 'none',
                       background: active ? 'rgba(96,165,250,0.15)' : 'transparent',
@@ -778,16 +779,15 @@ export function AgentChat({
                       cursor: active || modelLoading ? 'default' : 'pointer',
                       opacity: modelLoading && !active ? 0.4 : 1,
                       display: 'grid',
-                      gap: '2px',
+                      gap: '1px',
                     }}
                   >
-                    <div style={{ fontSize: '12px', fontWeight: 600, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ fontSize: '11px', fontWeight: 600, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
                       <span>{m.name}</span>
-                      {active && <span style={{ fontSize: '10px', color: 'var(--accent-blue)' }}>active</span>}
-                      {modelLoading === m.id && <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>switching…</span>}
+                      {active && <span style={{ fontSize: '9px', color: 'var(--accent-blue)' }}>active</span>}
+                      {modelLoading === m.id && <span style={{ fontSize: '9px', color: 'var(--text-muted)' }}>switching…</span>}
                     </div>
-                    <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>{m.hint}</div>
-                    <div style={{ fontSize: '9px', color: 'var(--text-muted)', fontFamily: 'monospace' }}>{m.id}</div>
+                    <div style={{ fontSize: '9px', color: 'var(--text-muted)', lineHeight: 1.3 }}>{m.hint}</div>
                   </button>
                 );
               })}
