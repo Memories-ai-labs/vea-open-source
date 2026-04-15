@@ -35,6 +35,40 @@ def _refine_debug_log(workspace, entry: dict):
         logger.warning(f"[AGENT] Failed to write refine debug log: {e}")
 
 
+def _detect_scene_cuts(video_path: str, start_sec: float, end_sec: float) -> List[float]:
+    """Detect shot boundaries in the ``[start_sec, end_sec]`` window of ``video_path``.
+
+    Returns a list of cut timestamps in seconds, **relative to start_sec**. A "cut"
+    is the start of the 2nd+ detected scene. An empty list means the window is one
+    continuous shot (or detection failed). Uses PySceneDetect's ContentDetector with
+    the same thresholds as ``src/pipelines/common/dynamic_cropping.py``.
+
+    Called synchronously; callers should wrap in ``run_in_executor`` since
+    PySceneDetect reads frames sequentially.
+    """
+    try:
+        from scenedetect import detect, ContentDetector
+        scenes = detect(
+            video_path,
+            ContentDetector(threshold=27.0, min_scene_len=12),
+            start_time=float(start_sec),
+            end_time=float(end_sec),
+        )
+    except Exception as e:
+        logger.warning(f"[REFINE] Scene detection failed for {video_path}: {e}")
+        return []
+
+    cuts: List[float] = []
+    for i, scene in enumerate(scenes):
+        if i == 0:
+            continue  # first scene starts at window start — not a real cut
+        scene_start, _ = scene
+        rel = scene_start.get_seconds() - start_sec
+        if rel > 0.05:  # drop near-zero artifacts
+            cuts.append(round(rel, 2))
+    return cuts
+
+
 # ── Tool executor ─────────────────────────────────────────────────────────────
 
 class ToolExecutor:
@@ -1120,6 +1154,16 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
             except Exception as e:
                 logger.warning(f"[AGENT] Could not transcribe segment: {e}")
 
+            # Step 3b: Detect scene cuts in the padded window. Runs on the original
+            # source (not the downsampled file — 2 fps is too coarse for ContentDetector's
+            # 12-frame minimum). Gemini uses these to avoid sloppy edits near a cut.
+            scene_cuts = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: _detect_scene_cuts(str(source_path), padded_start, padded_end),
+            )
+            if scene_cuts:
+                logger.info(f"[AGENT] Scene cuts in padded window: {scene_cuts}")
+
             # Step 4: Send to Gemini for analysis
             await self._emit("refine_progress", {
                 "step": "analyzing",
@@ -1136,6 +1180,7 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
                 prompt=prompt,
                 clip_description=clip_description,
                 transcript=clip_transcript,
+                scene_cuts=scene_cuts,
             )
 
             # Debug: log the full request before sending to Gemini
@@ -1315,6 +1360,7 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
         prompt: str,
         clip_description: str,
         transcript: str = "",
+        scene_cuts: Optional[List[float]] = None,
     ) -> str:
         """Build the Gemini prompt for timestamp refinement.
 
@@ -1338,6 +1384,27 @@ Pick your new_start/new_end by reading the transcript and finding complete sente
 rely on visual cues to decide where speech starts or ends.
 """
 
+        scene_cuts_section = ""
+        if scene_cuts:
+            cuts_str = ", ".join(f"{c:.2f}s" for c in scene_cuts)
+            scene_cuts_section = f"""
+## Scene cut boundaries (from PySceneDetect)
+
+Shot changes in this video excerpt occur at: {cuts_str}
+
+When choosing new_start / new_end, respect these boundaries:
+- **Land EXACTLY on a cut** (offset 0 from a boundary) — ideal. You're riding the
+  existing edit.
+- **Stay ≥0.5s away** from any cut — also fine. Gives the incoming shot room to breathe.
+- **Avoid the 0.01s-0.50s band** on either side of a cut — this feels like a sloppy
+  mistake, as if you nearly caught the old edit but missed.
+
+**Dialogue continuity overrides this rule.** If the transcript says the sentence you
+need starts at T=7.35s and there's a cut at T=7.00s, cut at 7.35s (word boundary) even
+though that's inside the "sloppy" band — never cut mid-word or drop speech to satisfy
+a scene-cut margin.
+"""
+
         return f"""\
 You are a professional video editor refining clip timestamps. You are watching a video segment
 and must choose the best start and end points for a clip.
@@ -1359,7 +1426,7 @@ Your ideal clip duration is ~{target_duration:.1f}s.
 
 ## What to look for
 {prompt}
-{transcript_section}
+{transcript_section}{scene_cuts_section}
 ## Instructions
 
 First, determine if this clip is **speech-heavy** (someone talking) or **visual** (b-roll, reactions, scenery).
