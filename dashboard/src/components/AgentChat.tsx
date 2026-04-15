@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import { createPortal } from 'react-dom';
 import type { AgentEvent, ChatMessage, ScratchpadState, ScratchpadTimestamps, EditDecision, TransformSettings, RenderState } from '../hooks/useAgentChat';
 import type { ProjectSummary } from '../types';
-import { listProjects, clearGists, clearPlanning, clearMemories, indexProject, getResolveStatus, getSystemInfo, setMainModel } from '../api';
+import { listProjects, clearGists, clearPlanning, clearMemories, indexProject, getResolveStatus, getSystemInfo, setMainModel, setVideoModel } from '../api';
 import type { SystemInfo } from '../api';
 import { useBreakpoint } from '../hooks/useBreakpoint';
 import { SimpleMarkdown } from './SimpleMarkdown';
@@ -653,7 +653,7 @@ export function AgentChat({
         <div style={{ position: 'relative' }}>
           <button
             ref={modelBtnRef}
-            title={systemInfo ? `Main LLM: ${systemInfo.main_llm}\nVideo LLM: ${systemInfo.video_llm} (pinned)` : 'Model'}
+            title={systemInfo ? `Main LLM: ${systemInfo.main_llm}\nVideo LLM: ${systemInfo.video_llm}` : 'Model'}
             onClick={() => {
               setModelOpen(o => {
                 if (!o && modelBtnRef.current) {
@@ -743,10 +743,54 @@ export function AgentChat({
                   </button>
                 );
               })}
-              <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
-              <div style={{ fontSize: '9px', color: 'var(--text-muted)', padding: '4px 8px' }}>
-                Video tasks pinned to <span style={{ fontFamily: 'monospace' }}>{systemInfo.video_llm}</span>
+              <div style={{ borderTop: '1px solid var(--border)', margin: '6px 0' }} />
+              <div style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '4px 8px' }}>
+                Video LLM (refine / verify)
               </div>
+              {systemInfo.available_video_models.map(m => {
+                const active = m.id === systemInfo.video_llm;
+                return (
+                  <button
+                    key={m.id}
+                    disabled={modelLoading !== null || active}
+                    onClick={async () => {
+                      if (active) return;
+                      setModelLoading(m.id);
+                      try {
+                        await setVideoModel(m.id);
+                        const fresh = await getSystemInfo();
+                        setSystemInfo(fresh);
+                        toast(`Video LLM → ${m.name}`, 'success');
+                        setModelOpen(false);
+                      } catch (e: any) {
+                        toast(`Failed to switch video LLM: ${e.message}`, 'error');
+                      } finally {
+                        setModelLoading(null);
+                      }
+                    }}
+                    style={{
+                      textAlign: 'left',
+                      padding: '8px 10px',
+                      borderRadius: 'var(--radius-sm)',
+                      border: 'none',
+                      background: active ? 'rgba(96,165,250,0.15)' : 'transparent',
+                      color: 'var(--text-primary)',
+                      cursor: active || modelLoading ? 'default' : 'pointer',
+                      opacity: modelLoading && !active ? 0.4 : 1,
+                      display: 'grid',
+                      gap: '2px',
+                    }}
+                  >
+                    <div style={{ fontSize: '12px', fontWeight: 600, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>{m.name}</span>
+                      {active && <span style={{ fontSize: '10px', color: 'var(--accent-blue)' }}>active</span>}
+                      {modelLoading === m.id && <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>switching…</span>}
+                    </div>
+                    <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>{m.hint}</div>
+                    <div style={{ fontSize: '9px', color: 'var(--text-muted)', fontFamily: 'monospace' }}>{m.id}</div>
+                  </button>
+                );
+              })}
             </div>,
             document.body
           )}

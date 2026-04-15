@@ -28,6 +28,7 @@ export interface SystemInfo {
   main_llm: string;
   video_llm: string;
   available_main_models: ModelChoice[];
+  available_video_models: ModelChoice[];
 }
 
 export function getSystemInfo(): Promise<SystemInfo> {
@@ -36,6 +37,10 @@ export function getSystemInfo(): Promise<SystemInfo> {
 
 export function setMainModel(model: string): Promise<{ status: string; main_llm: string }> {
   return req('/system/model', 'POST', { model });
+}
+
+export function setVideoModel(model: string): Promise<{ status: string; video_llm: string }> {
+  return req('/system/video_model', 'POST', { model });
 }
 
 export function clearGists(projectName: string): Promise<{ status: string }> {

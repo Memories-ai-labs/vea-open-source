@@ -28,7 +28,7 @@ async def v2_list_projects():
 async def v2_system_info():
     """
     Model IDs currently wired into `services.main_llm` and `services.video_llm`,
-    plus the list of main_llm models the dashboard switcher can select from.
+    plus the catalogs the dashboard switcher can select from.
     """
     def _name(llm) -> str:
         if llm is None:
@@ -39,6 +39,7 @@ async def v2_system_info():
         "main_llm": _name(services.main_llm),
         "video_llm": _name(services.video_llm),
         "available_main_models": services.AVAILABLE_MAIN_MODELS,
+        "available_video_models": services.AVAILABLE_VIDEO_MODELS,
     }
 
 
@@ -59,6 +60,25 @@ async def v2_set_main_model(payload: dict):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"status": "ok", "main_llm": applied}
+
+
+@router.post(f"{_config.V2_API_PREFIX}/system/video_model")
+async def v2_set_video_model(payload: dict):
+    """
+    Swap the video_llm to a different model from ``AVAILABLE_VIDEO_MODELS``.
+    Bare IDs route via Vertex; "org/model" IDs route via OpenRouter.
+    Active agent sessions pick up the new model on their next video-tool call.
+    """
+    model_id = (payload or {}).get("model")
+    if not isinstance(model_id, str) or not model_id:
+        raise HTTPException(status_code=400, detail="`model` is required")
+    try:
+        applied = services.set_video_llm(model_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "ok", "video_llm": applied}
 
 
 @router.post(f"{_config.V2_API_PREFIX}/projects/create")

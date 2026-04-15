@@ -60,7 +60,7 @@ except Exception as e:
 # existing call sites (and the shim's ``genai_client`` interface) continue to
 # work unchanged.
 # Main-LLM catalog the dashboard switcher exposes. Video-capable models are
-# pinned to ``video_llm`` and excluded here — this list is only for the
+# listed separately in AVAILABLE_VIDEO_MODELS — this list is only for the
 # text+tool-calling agent loop.
 AVAILABLE_MAIN_MODELS = [
     {"id": "anthropic/claude-opus-4.6",         "name": "Claude Opus 4.6",     "hint": "Highest quality, slowest"},
@@ -70,6 +70,17 @@ AVAILABLE_MAIN_MODELS = [
     {"id": "qwen/qwen3.6-plus",                 "name": "Qwen 3.6 Plus",       "hint": "Hybrid linear-attention + sparse MoE"},
     {"id": "google/gemini-3-flash-preview",     "name": "Gemini 3 Flash",      "hint": "Fast, low cost"},
     {"id": "google/gemini-3.1-pro-preview",     "name": "Gemini 3.1 Pro",      "hint": "Google frontier"},
+]
+
+# Video-LLM catalog for tasks that need native video input (refine_clip_timestamps,
+# verify_preview). Bare model names (no "/") route via Vertex; slash-prefixed IDs
+# route via OpenRouter. See the _video_via_openrouter branch below.
+AVAILABLE_VIDEO_MODELS = [
+    {"id": "gemini-2.5-flash",                  "name": "Gemini 2.5 Flash",    "hint": "Vertex; cheap, proven default"},
+    {"id": "gemini-2.5-pro",                    "name": "Gemini 2.5 Pro",      "hint": "Vertex; higher quality"},
+    {"id": "google/gemini-3-flash-preview",     "name": "Gemini 3 Flash",      "hint": "OpenRouter; newer than 2.5 Flash"},
+    {"id": "google/gemini-3.1-pro-preview",     "name": "Gemini 3.1 Pro",      "hint": "OpenRouter; frontier video"},
+    {"id": "qwen/qwen3.6-plus",                 "name": "Qwen 3.6 Plus",       "hint": "OpenRouter; 1M context, video-capable"},
 ]
 
 main_llm = None      # type: ignore[assignment]
@@ -157,6 +168,36 @@ def set_main_llm(model_id: str) -> str:
     for sess in _agent_sessions.values():
         sess.gemini = new_llm
     logger.info(f"main_llm switched to {model_id}")
+    return model_id
+
+
+def set_video_llm(model_id: str) -> str:
+    """Swap ``video_llm`` (and every live AgentSession's ``.video_llm``) to
+    ``model_id``. Returns the id that ended up wired in.
+
+    Only models listed in ``AVAILABLE_VIDEO_MODELS`` are accepted. Routing:
+    bare names ("gemini-2.5-flash") go via Vertex; slash-prefixed IDs
+    ("google/gemini-3-flash-preview") go via OpenRouter.
+    """
+    global video_llm
+    allowed = {m["id"] for m in AVAILABLE_VIDEO_MODELS}
+    if model_id not in allowed:
+        raise ValueError(f"Unsupported video_llm model: {model_id!r}")
+
+    via_openrouter = "/" in model_id
+    if via_openrouter:
+        key = os.environ.get("OPENROUTER_API_KEY", "")
+        if not key:
+            raise RuntimeError("OPENROUTER_API_KEY is not set — cannot switch model")
+        from lib.llm.OpenRouterManager import OpenRouterManager
+        new_llm = OpenRouterManager(model=model_id, api_key=key)
+    else:
+        new_llm = GeminiGenaiManager(model=model_id)
+
+    video_llm = new_llm
+    for sess in _agent_sessions.values():
+        sess.video_llm = new_llm
+    logger.info(f"video_llm switched to {model_id}")
     return model_id
 
 # --- Indexing broadcast state ---
