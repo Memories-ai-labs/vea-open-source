@@ -1250,17 +1250,29 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
                 "reasoning_text": reasoning_text,
             })
 
-            # Step 5b: Structured output pass — use reasoning to produce timestamps
+            # Step 5b: Structured output pass — EXTRACT, don't re-analyze.
+            # The reasoning pass (with video + transcript) already made the
+            # call. This pass is a formatting step: it must copy the field
+            # values verbatim. Earlier versions of this prompt let the model
+            # silently rewrite speech_truncated_end (true → false) because
+            # the second pass doesn't see the video and guessed differently.
             structured_prompt = (
                 f"{reasoning_text}\n\n"
-                "Based on your analysis above, you have identified the best cut points for this clip.\n\n"
-                "Now convert your reasoning into structured JSON output. Return:\n"
-                "- `new_start` and `new_end` as seconds from the beginning of the video "
-                f"(0 to {padded_duration:.1f})\n"
-                "- `reasoning`: a brief summary of why you chose these timestamps\n"
-                "- `focus_type`: \"dialogue\", \"visual\", or \"audio\"\n"
-                "- `speech_truncated_start`: true if speech is cut off at the start of the video\n"
-                "- `speech_truncated_end`: true if speech is cut off at the end of the video\n"
+                "## Your task\n"
+                "**Extract** the exact field values from the JSON above into the "
+                "structured output. This is a formatting step, NOT a re-analysis. "
+                "The reasoning pass saw the video and the word-level transcript; "
+                "this pass does not. Trust the values from above.\n\n"
+                "Rules:\n"
+                "- Copy `new_start` and `new_end` exactly as written above.\n"
+                "- Copy `speech_truncated_start` and `speech_truncated_end` exactly. "
+                "If the reasoning JSON said `true`, the structured output MUST say "
+                "`true`. Do NOT silently flip it to `false`.\n"
+                "- Copy `focus_type` exactly (\"dialogue\", \"visual\", or \"audio\").\n"
+                "- For `reasoning`, either copy the reasoning field above verbatim or "
+                "summarize it in one sentence — do not invent new justifications.\n\n"
+                f"(For reference, new_start and new_end are offsets in a {padded_duration:.1f}s "
+                f"video excerpt, so both must be between 0 and {padded_duration:.1f}.)"
             )
 
             result = await asyncio.get_event_loop().run_in_executor(
