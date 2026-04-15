@@ -1474,10 +1474,20 @@ First, determine if this clip is **speech-heavy** (someone talking) or **visual*
 **If speech-heavy (dialogue/presentation):** The transcript above is your PRIMARY source for
 cut points — NOT the video. The word-level timestamps are frame-accurate from STT. Your job:
 1. Read the transcript and find the sentence that best matches what this clip needs.
-2. Set `new_start` to the timestamp of the FIRST word of that sentence (minus ~0.15s for breathing room).
-3. Set `new_end` to the timestamp AFTER the LAST word of that sentence (plus ~0.2s for natural tail).
+2. `new_start` MUST be a timestamp that appears in the transcript as either:
+   - the `start` of the first word of your sentence (begin exactly on that word), OR
+   - the `end` of the word immediately before it (begin in the gap before the sentence).
+   Do NOT invent a number like 4.6 just because it feels clean. If "That's" starts at 5.44s,
+   `new_start` is either 5.44 (begin on "That's") or the `end` of the previous word (begin
+   just after it). Any other value will land mid-word.
+3. `new_end` MUST equal the `end` of the last word of your sentence, or the `start` of the
+   next word after it (end just before it). Same rule: don't round.
 4. NEVER cut mid-word or mid-sentence. If the best content spans multiple sentences, include them all.
-5. Use the video only to confirm the speaker is on screen — do NOT let visual cuts override transcript boundaries.
+5. **Self-check before returning:** scan every `[ws–we] word` line in the transcript. Your
+   `new_start` must not fall strictly between any `ws` and `we` (i.e. `ws < new_start < we`
+   for any real word — audio markers like `(music)` or `(applause)` don't count). Same
+   for `new_end`. If either fails, pick a different word edge.
+6. Use the video only to confirm the speaker is on screen — do NOT let visual cuts override transcript boundaries.
 
 **If visual (b-roll, reactions, scenery):** Prioritize visual composition, movement peaks,
 and natural motion boundaries. Cut on action. Transcript is secondary.
