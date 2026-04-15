@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import type { AgentEvent, ChatMessage, ScratchpadState, ScratchpadTimestamps, EditDecision, EditDecisionClip, TransformSettings, RenderState } from '../hooks/useAgentChat';
+import type { AgentEvent, ChatMessage, ScratchpadState, ScratchpadTimestamps, EditDecision, TransformSettings, RenderState } from '../hooks/useAgentChat';
 import type { ProjectSummary } from '../types';
-import { listProjects, clearGists, clearPlanning, clearMemories, indexProject, getResolveStatus } from '../api';
+import { listProjects, clearGists, clearPlanning, clearMemories, indexProject, getResolveStatus, getSystemInfo, setMainModel } from '../api';
+import type { SystemInfo } from '../api';
 import { useBreakpoint } from '../hooks/useBreakpoint';
 import { SimpleMarkdown } from './SimpleMarkdown';
 import { NLETimeline } from './NLETimeline';
@@ -47,7 +48,12 @@ interface AgentChatProps {
   onBack: () => void;
   onClearState: () => void;
   onEditDecisionChange: (updated: EditDecision) => void;
+  onEditDecisionPreview: (updated: EditDecision) => void;
   onRequestCropClip: (clipId: string) => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 function formatTime(iso: string | undefined): string {
@@ -56,6 +62,21 @@ function formatTime(iso: string | undefined): string {
     const d = new Date(iso);
     return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   } catch { return ''; }
+}
+
+/** True when we should render Mac-style modifier glyphs (⌘, ⇧) in shortcuts. */
+function isMacLike(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent);
+}
+
+/** Compact label for the header pill. "anthropic/claude-opus-4.6" → "Opus 4.6" */
+function shortModelLabel(id: string | undefined): string {
+  if (!id) return '…';
+  const slug = id.includes('/') ? id.split('/')[1] : id;
+  const m = slug.match(/(opus|sonnet|haiku|gpt|gemini)[-_ ]?([\d.]+(?:[-\s][a-z]+)?)/i);
+  if (m) return `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}`;
+  return slug;
 }
 
 const PAD_LABELS: Record<string, string> = {
@@ -116,7 +137,7 @@ function useHorizontalDivider(
 }
 
 export function AgentChat({
-  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, connected, busy, needsIndexing, indexingState, videoMeta, reindexingFiles, onSend, onRequestRender, onRequestDraftRender, onTriggerIndex, onBack, onClearState, onEditDecisionChange, onRequestCropClip,
+  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, connected, busy, needsIndexing, indexingState, videoMeta, reindexingFiles, onSend, onRequestRender, onRequestDraftRender, onTriggerIndex, onBack, onClearState, onEditDecisionChange, onEditDecisionPreview, onRequestCropClip, onUndo, onRedo, canUndo, canRedo,
 }: AgentChatProps) {
   const { toast } = useToast();
   const [project, setProject] = useState(initialProject);
@@ -126,6 +147,10 @@ export function AgentChat({
   const [manageOpen, setManageOpen] = useState(false);
   const [manageLoading, setManageLoading] = useState<string | null>(null);
   const [manageMsg, setManageMsg] = useState('');
+  const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [modelLoading, setModelLoading] = useState<string | null>(null);
+  const [modelDropdownPos, setModelDropdownPos] = useState<{ top: number; right: number } | null>(null);
   const [indexing, setIndexing] = useState(false);
   const [expandedFile, setExpandedFile] = useState<string | null>(null);
   const [playheadTime, setPlayheadTime] = useState(0);
@@ -134,6 +159,8 @@ export function AgentChat({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const manageRef = useRef<HTMLDivElement>(null);
   const manageBtnRef = useRef<HTMLButtonElement>(null);
+  const modelRef = useRef<HTMLDivElement>(null);
+  const modelBtnRef = useRef<HTMLButtonElement>(null);
   const [dropdownPos, setDropdownPos] = useState<{ top: number; right: number } | null>(null);
   const isTablet = useBreakpoint(1080);
   const isMobile = useBreakpoint(720);
@@ -177,6 +204,37 @@ export function AgentChat({
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [selectedClipId]);
+
+  // Cmd/Ctrl+Z → undo, Cmd+Shift+Z or Ctrl+Y → redo.
+  // Skip when focus is in a text input/textarea/contenteditable so the browser's
+  // native undo keeps working inside the chat input, inspector fields, etc.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const active = document.activeElement as HTMLElement | null;
+      if (active) {
+        const tag = active.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || active.isContentEditable) {
+          return;
+        }
+      }
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      // Undo: (Cmd|Ctrl)+Z without Shift
+      if (e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        onUndo();
+        return;
+      }
+      // Redo: (Cmd|Ctrl)+Shift+Z  OR  Ctrl+Y
+      if ((e.key.toLowerCase() === 'z' && e.shiftKey) || e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        onRedo();
+        return;
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onUndo, onRedo]);
 
   // Toast popups when renders finish or fail (transition-aware so we only fire once per render)
   const prevDraftStatusRef = useRef<RenderState['status']>('idle');
@@ -254,6 +312,24 @@ export function AgentChat({
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [manageOpen]);
+
+  // Fetch current + available main_llm models once on mount.
+  useEffect(() => {
+    getSystemInfo().then(setSystemInfo).catch(() => {/* header pill just stays empty */});
+  }, []);
+
+  // Close model dropdown on outside click
+  useEffect(() => {
+    if (!modelOpen) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (modelRef.current?.contains(target)) return;
+      if (modelBtnRef.current?.contains(target)) return;
+      setModelOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [modelOpen]);
 
   // Space bar to play/pause when not typing
   useEffect(() => {
@@ -572,6 +648,147 @@ export function AgentChat({
         <span className="pill" style={{ fontSize: '9px', padding: '2px 8px' }}>
           <span style={{ color: isIndexed ? 'var(--accent-green)' : 'var(--text-muted)', fontWeight: 800 }}>{project.indexed_files?.length || 0}</span> indexed
         </span>
+
+        {/* Main-LLM switcher — affects the agent loop, not video tasks. */}
+        <div style={{ position: 'relative' }}>
+          <button
+            ref={modelBtnRef}
+            title={systemInfo ? `Main LLM: ${systemInfo.main_llm}\nVideo LLM: ${systemInfo.video_llm} (pinned)` : 'Model'}
+            onClick={() => {
+              setModelOpen(o => {
+                if (!o && modelBtnRef.current) {
+                  const rect = modelBtnRef.current.getBoundingClientRect();
+                  setModelDropdownPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                }
+                return !o;
+              });
+            }}
+            className="pill"
+            style={{
+              fontSize: '9px',
+              padding: '2px 8px',
+              background: modelOpen ? 'rgba(255,255,255,0.08)' : undefined,
+              cursor: systemInfo ? 'pointer' : 'default',
+              border: '1px solid rgba(255,255,255,0.08)',
+              display: 'inline-flex', alignItems: 'center', gap: '4px',
+            }}
+            disabled={!systemInfo}
+          >
+            <span style={{ color: 'var(--accent-blue)', fontWeight: 800 }}>
+              {shortModelLabel(systemInfo?.main_llm)}
+            </span>
+            <span style={{ color: 'var(--text-muted)' }}>{'\u25BE'}</span>
+          </button>
+
+          {modelOpen && modelDropdownPos && systemInfo && createPortal(
+            <div ref={modelRef} style={{
+              position: 'fixed',
+              top: modelDropdownPos.top,
+              right: modelDropdownPos.right,
+              zIndex: 1000,
+              background: 'rgba(28,25,23,0.97)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              padding: '8px',
+              minWidth: '260px',
+              display: 'grid',
+              gap: '2px',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+              backdropFilter: 'blur(12px)',
+            }}>
+              <div style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '4px 8px' }}>
+                Main agent LLM
+              </div>
+              {systemInfo.available_main_models.map(m => {
+                const active = m.id === systemInfo.main_llm;
+                return (
+                  <button
+                    key={m.id}
+                    disabled={modelLoading !== null || active}
+                    onClick={async () => {
+                      if (active) return;
+                      setModelLoading(m.id);
+                      try {
+                        await setMainModel(m.id);
+                        const fresh = await getSystemInfo();
+                        setSystemInfo(fresh);
+                        toast(`Switched to ${m.name}`, 'success');
+                        setModelOpen(false);
+                      } catch (e: any) {
+                        toast(`Failed to switch model: ${e.message}`, 'error');
+                      } finally {
+                        setModelLoading(null);
+                      }
+                    }}
+                    style={{
+                      textAlign: 'left',
+                      padding: '8px 10px',
+                      borderRadius: 'var(--radius-sm)',
+                      border: 'none',
+                      background: active ? 'rgba(96,165,250,0.15)' : 'transparent',
+                      color: 'var(--text-primary)',
+                      cursor: active || modelLoading ? 'default' : 'pointer',
+                      opacity: modelLoading && !active ? 0.4 : 1,
+                      display: 'grid',
+                      gap: '2px',
+                    }}
+                  >
+                    <div style={{ fontSize: '12px', fontWeight: 600, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>{m.name}</span>
+                      {active && <span style={{ fontSize: '10px', color: 'var(--accent-blue)' }}>active</span>}
+                      {modelLoading === m.id && <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>switching…</span>}
+                    </div>
+                    <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>{m.hint}</div>
+                    <div style={{ fontSize: '9px', color: 'var(--text-muted)', fontFamily: 'monospace' }}>{m.id}</div>
+                  </button>
+                );
+              })}
+              <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
+              <div style={{ fontSize: '9px', color: 'var(--text-muted)', padding: '4px 8px' }}>
+                Video tasks pinned to <span style={{ fontFamily: 'monospace' }}>{systemInfo.video_llm}</span>
+              </div>
+            </div>,
+            document.body
+          )}
+        </div>
+
+        {/* Undo / redo — affects the edit_decision only. Keyboard: Cmd/Ctrl+Z, Cmd+Shift+Z (Ctrl+Y). */}
+        <button
+          title={`Undo (${isMacLike() ? '⌘Z' : 'Ctrl+Z'})`}
+          onClick={onUndo}
+          disabled={!canUndo}
+          aria-label="Undo"
+          style={{
+            ...toolbarBtnStyle,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: '28px', height: '28px', padding: 0, fontSize: '15px',
+            borderRadius: '6px',
+            border: '1px solid rgba(255,255,255,0.08)',
+            background: 'transparent',
+            opacity: canUndo ? 1 : 0.35,
+            cursor: canUndo ? 'pointer' : 'default',
+          }}
+        >
+          {'\u21A9'}
+        </button>
+        <button
+          title={`Redo (${isMacLike() ? '⌘⇧Z' : 'Ctrl+Y'})`}
+          onClick={onRedo}
+          disabled={!canRedo}
+          aria-label="Redo"
+          style={{
+            ...toolbarBtnStyle,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: '28px', height: '28px', padding: 0, fontSize: '15px',
+            borderRadius: '6px',
+            border: '1px solid rgba(255,255,255,0.08)',
+            background: 'transparent',
+            opacity: canRedo ? 1 : 0.35,
+            cursor: canRedo ? 'pointer' : 'default',
+          }}
+        >
+          {'\u21AA'}
+        </button>
 
         <div style={{ position: 'relative' }}>
           <button
@@ -1085,6 +1302,7 @@ export function AgentChat({
                 cropStatuses={cropStatuses}
                 onSeek={handleTimelineSeek}
                 onEditDecisionChange={onEditDecisionChange}
+                onEditDecisionPreview={onEditDecisionPreview}
                 onClipSelect={setSelectedClipId}
               />
             </div>

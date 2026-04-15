@@ -36,8 +36,11 @@ export default function AudioInspector({
   );
 
   const target = kind === 'music' ? -18 : -16;
-  const suggestedGain =
-    measuredLufs != null ? Math.round((target - measuredLufs) * 10) / 10 : null;
+  // Music/narration gain_db is an OFFSET from target — the renderer auto-normalizes
+  // using (target + offset) - measured. To hit target, offset = 0. Suggesting
+  // `target - measured` (which is the literal-dB formula for source clips) would
+  // double-subtract the measured loudness and render the track inaudible.
+  const suggestedGain = measuredLufs == null ? null : 0;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>

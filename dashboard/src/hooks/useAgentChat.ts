@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 
-const WS_BASE = 'ws://localhost:8000/video-edit/v2/agent';
+// Derive WS base from the page origin so non-localhost deploys work.
+const WS_PROTO = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const WS_HOST = typeof window !== 'undefined' ? window.location.host : 'localhost:8000';
+const WS_BASE = `${WS_PROTO}//${WS_HOST}/video-edit/v2/agent`;
 
 export interface AgentEvent {
   type: string;
@@ -61,6 +64,7 @@ export interface NarrationSegment {
   duration: number;
   gain_db: number;
   measured_loudness_lufs?: number | null;
+  track?: number;                       // audio lane (default 1 = A1)
 }
 
 export interface MusicTrack {
@@ -69,6 +73,7 @@ export interface MusicTrack {
   duration: number;
   gain_db: number;
   measured_loudness_lufs?: number | null;
+  track?: number;                       // audio lane (default 2 = A2)
 }
 
 export interface TextOverlay {
@@ -78,6 +83,7 @@ export interface TextOverlay {
   font_size?: number;
   style?: 'title' | 'subtitle';
   position?: 'center' | 'bottom' | 'top';
+  lane?: number;                        // which V-track above the spine (default 1)
 }
 
 export interface EditDecision {
@@ -136,7 +142,37 @@ interface UseAgentChatResult {
   triggerIndex: (files?: string[]) => void;
   clearAndReconnect: () => void;
   updateEditDecision: (updated: EditDecision) => void;
+  /**
+   * Update the local editDecision state WITHOUT sending to the server or
+   * pushing history. Used for live drag previews so a retrim doesn't fire
+   * 50 WebSocket messages per second. Pair with ``updateEditDecision``
+   * at drag-end to commit the final state.
+   */
+  previewEditDecision: (updated: EditDecision) => void;
   requestCropClip: (clipId: string) => void;
+  /** Undo last edit-decision change. No-op if ``canUndo`` is false. */
+  undo: () => void;
+  /** Redo the next edit-decision change. No-op if ``canRedo`` is false. */
+  redo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
+const HISTORY_MAX = 50;
+
+/** Structural deep-equal for plain JSON-compatible values.
+ *
+ * Used to avoid pushing a history entry when the server echoes back the
+ * exact same EditDecision we just sent. JSON roundtrip is cheap compared to
+ * the API call that produced the update, and covers every shape we need.
+ */
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
 }
 
 export function useAgentChat(projectName: string | null): UseAgentChatResult {
@@ -154,7 +190,65 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     planning: null,
     fcpxml: null,
   });
-  const [editDecision, setEditDecision] = useState<EditDecision | null>(null);
+  const [editDecision, setEditDecisionRaw] = useState<EditDecision | null>(null);
+
+  // ── Undo / redo history ────────────────────────────────────────────────
+  // History for the current editDecision only. Each user edit (or incoming
+  // agent edit via timeline_update) pushes the previous ``present`` onto
+  // ``past`` and clears ``future``. Undo/redo apply a snapshot locally AND
+  // send it back to the server via updateEditDecision so the change sticks.
+  //
+  // Use refs for the stacks (don't need to re-render when they change) and
+  // useState only for the canUndo/canRedo booleans that the UI needs.
+  const historyRef = useRef<{ past: EditDecision[]; future: EditDecision[] }>(
+    { past: [], future: [] },
+  );
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+  const applyingHistoryRef = useRef(false);
+  const currentEditRef = useRef<EditDecision | null>(null);
+
+  // Always keep currentEditRef aligned so undo/redo can read the "present"
+  // synchronously without waiting for a re-render cycle.
+  useEffect(() => { currentEditRef.current = editDecision; }, [editDecision]);
+
+  // Every write path goes through this wrapper. Marks whether the change is
+  // a "commit" (push onto past, clear future) or a "replace" (new baseline,
+  // wipes history). Replace is used for fresh WS init / project switch.
+  const setEditDecision = useCallback(
+    (next: EditDecision | null, opts: { kind: 'commit' | 'replace' } = { kind: 'commit' }) => {
+      const prev = currentEditRef.current;
+
+      // Fast path — no-op if the next state is structurally equal to prev.
+      // Avoids a history entry when a server echo arrives after our own
+      // optimistic update.
+      if (prev && next && deepEqual(prev, next)) {
+        return;
+      }
+
+      if (opts.kind === 'replace' || next === null) {
+        historyRef.current = { past: [], future: [] };
+        setCanUndo(false);
+        setCanRedo(false);
+      } else if (!applyingHistoryRef.current && prev) {
+        // Real user/agent edit — push the outgoing value onto past,
+        // drop the redo stack.
+        const { past } = historyRef.current;
+        historyRef.current = {
+          past: [...past, prev].slice(-HISTORY_MAX),
+          future: [],
+        };
+        setCanUndo(true);
+        setCanRedo(false);
+      }
+      // When applyingHistoryRef is true, the stacks were already arranged
+      // inside undo()/redo() — we just set state here.
+      applyingHistoryRef.current = false;
+      currentEditRef.current = next;
+      setEditDecisionRaw(next);
+    },
+    [],
+  );
   const [renderState, setRenderState] = useState<RenderState>({
     status: 'idle', progress: 0, filename: null, error: null,
   });
@@ -234,7 +328,9 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
               setMessages(event.data.chat_history as ChatMessage[]);
             }
             if (event.data.edit_decision) {
-              setEditDecision(event.data.edit_decision as EditDecision);
+              // init is a fresh snapshot — wipe any prior history so the
+              // reconnected session starts with a clean undo stack.
+              setEditDecision(event.data.edit_decision as EditDecision, { kind: 'replace' });
             }
             if (event.data.render_state) {
               const rs = event.data.render_state;
@@ -402,8 +498,10 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
 
         // Append to events array (init is handled above with reset)
         setEvents((prev) => [...prev, event]);
-      } catch {
-        // ignore malformed messages
+      } catch (err) {
+        // Log malformed messages instead of silently dropping them —
+        // silent drops made protocol bugs invisible during development.
+        console.warn('[agentChat] Dropped malformed WS message:', err, ev.data);
       }
     };
 
@@ -411,6 +509,8 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
       if (!mountedRef.current) return;
       setConnected(false);
       wsRef.current = null;
+      // Cap the reconnect delay at 5 s, but also cap the backoff state itself
+      // so it cannot grow beyond the cap. Start at 500 ms (see BACKOFF_INITIAL).
       const delay = Math.min(backoffRef.current, 5000);
       backoffRef.current = Math.min(backoffRef.current * 2, 5000);
       reconnectTimerRef.current = setTimeout(() => {
@@ -500,9 +600,56 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
   }, []);
 
   const updateEditDecision = useCallback((updated: EditDecision) => {
-    setEditDecision(updated);
+    setEditDecision(updated, { kind: 'commit' });
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'edit_decision_update', edit_decision: updated }));
+    }
+  }, [setEditDecision]);
+
+  // Preview channel — local state only, no server, no history. Used while a
+  // drag is in flight to give responsive feedback without thrashing the WS.
+  const previewEditDecision = useCallback((updated: EditDecision) => {
+    setEditDecisionRaw(updated);
+    currentEditRef.current = updated;
+  }, []);
+
+  const undo = useCallback(() => {
+    const { past, future } = historyRef.current;
+    const present = currentEditRef.current;
+    if (past.length === 0 || !present) return;
+    const prev = past[past.length - 1];
+    historyRef.current = {
+      past: past.slice(0, -1),
+      future: [present, ...future].slice(0, HISTORY_MAX),
+    };
+    setCanUndo(historyRef.current.past.length > 0);
+    setCanRedo(true);
+    // Apply the restored snapshot locally AND send it to the server so the
+    // change persists and downstream agents see the same state.
+    applyingHistoryRef.current = true;
+    setEditDecisionRaw(prev);
+    currentEditRef.current = prev;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'edit_decision_update', edit_decision: prev }));
+    }
+  }, []);
+
+  const redo = useCallback(() => {
+    const { past, future } = historyRef.current;
+    const present = currentEditRef.current;
+    if (future.length === 0 || !present) return;
+    const next = future[0];
+    historyRef.current = {
+      past: [...past, present].slice(-HISTORY_MAX),
+      future: future.slice(1),
+    };
+    setCanUndo(true);
+    setCanRedo(historyRef.current.future.length > 0);
+    applyingHistoryRef.current = true;
+    setEditDecisionRaw(next);
+    currentEditRef.current = next;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'edit_decision_update', edit_decision: next }));
     }
   }, []);
 
@@ -559,5 +706,5 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     setTimeout(() => { if (mountedRef.current) connect(); }, 300);
   }, [connect]);
 
-  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, footageFiles, indexedFiles, videoMeta, reindexingFiles, needsIndexing, indexingState, connected, busy, send, requestRender, requestDraftRender, clearAndReconnect, updateEditDecision, requestCropClip, triggerIndex };
+  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, footageFiles, indexedFiles, videoMeta, reindexingFiles, needsIndexing, indexingState, connected, busy, send, requestRender, requestDraftRender, clearAndReconnect, updateEditDecision, previewEditDecision, requestCropClip, triggerIndex, undo, redo, canUndo, canRedo };
 }

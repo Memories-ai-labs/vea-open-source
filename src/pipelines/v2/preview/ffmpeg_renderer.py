@@ -556,10 +556,14 @@ async def _mix_audio_and_titles(
                 f"measured={getattr(mus, 'measured_loudness_lufs', '?')} → applied={actual_gain:+g}dB"
             )
             gain = f"volume={actual_gain}dB," if actual_gain != 0 else ""
+            # Clamp the fade length to the music length so very short tracks
+            # don't fade the entire track (and so st never goes negative).
+            fade_dur = min(2.0, max(0.0, mus_dur * 0.5))
+            fade_start = max(0.0, mus_dur - fade_dur)
             filter_parts.append(
                 f"[{input_idx}:a]atrim={mus.start:.3f}:duration={mus_dur:.3f},"
                 f"asetpts=PTS-STARTPTS,{gain}"
-                f"afade=t=out:st={max(0, mus_dur - 2):.3f}:d=2[mus]"
+                f"afade=t=out:st={fade_start:.3f}:d={fade_dur:.3f}[mus]"
             )
             audio_streams.append("[mus]")
             input_idx += 1
@@ -569,7 +573,7 @@ async def _mix_audio_and_titles(
         mix_inputs = "".join(audio_streams)
         filter_parts.append(
             f"{mix_inputs}amix=inputs={len(audio_streams)}:"
-            f"duration=first:dropout_transition=2[aout]"
+            f"duration=first:dropout_transition=2:normalize=0[aout]"
         )
         audio_map = "[aout]"
     else:
@@ -577,9 +581,9 @@ async def _mix_audio_and_titles(
 
     # Text overlays — requires FFmpeg built with --enable-libfreetype (drawtext filter)
     video_map = "0:v"
+    txt_files: List[Path] = []
     if has_titles and _has_drawtext():
         vf_chain = "[0:v]"
-        txt_files: List[Path] = []
         for ti, title in enumerate(edit.titles):
             scaled_size = max(12, int(title.font_size * out_h / edit.timeline.height))
             start_t = title.timeline_offset
@@ -593,13 +597,17 @@ async def _mix_audio_and_titles(
             else:
                 y_expr = "(h-text_h)/2"
             box_opts = ":box=1:boxcolor=black@0.5:boxborderw=6" if is_subtitle else ""
-            # Write text to a temp file to avoid FFmpeg filter escaping issues
+            # Write text to a temp file to avoid FFmpeg filter escaping issues.
+            # We put the temp next to the output so FFmpeg can read it without
+            # caring about sandboxes on macOS.
             import tempfile as _tf
             txt_file = Path(_tf.mktemp(suffix=".txt", dir=str(output.parent)))
             txt_file.write_text(title.text, encoding="utf-8")
             txt_files.append(txt_file)
+            # Escape single quotes in the path for the filter string
+            txt_path_escaped = str(txt_file).replace("'", "\\'")
             vf_chain += (
-                f"drawtext=textfile='{txt_file}':"
+                f"drawtext=textfile='{txt_path_escaped}':"
                 f"fontsize={scaled_size}:fontcolor=white:"
                 f"x=(w-text_w)/2:y={y_expr}{box_opts}:"
                 f"enable='between(t\\,{start_t:.3f}\\,{end_t:.3f})'"
@@ -639,7 +647,16 @@ async def _mix_audio_and_titles(
     ])
     logger.info(f"[PREVIEW] Mix cmd: {' '.join(str(c) for c in cmd)}")
 
-    await _run_ffmpeg(cmd)
+    try:
+        await _run_ffmpeg(cmd)
+    finally:
+        # Always clean up subtitle temp files — even on error — so the render
+        # directory doesn't accumulate orphans.
+        for tf in txt_files:
+            try:
+                tf.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _resolve_audio_file(file_path: str, footage_dir: Path) -> Path:

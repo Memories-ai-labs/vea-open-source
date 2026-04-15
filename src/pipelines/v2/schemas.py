@@ -194,25 +194,34 @@ class ClipDecision(BaseModel):
     timeline_offset: Optional[float] = Field(default=None, description="Absolute timeline position in seconds (track 2+ free placement; track 1 uses sequential array order)")
 
 class NarrationSegment(BaseModel):
-    """A narration audio segment placed at a specific timeline position."""
+    """A narration audio segment placed at a specific timeline position.
+
+    ``track`` is a UI-level organizational lane (A1, A2, A3, ...). The FCPXML
+    compiler and FFmpeg renderer ignore it — it just lets the dashboard place
+    segments on visually distinct audio rows.
+    """
     file: str                   # path to narration audio file
     timeline_offset: float      # where on the timeline to place it (seconds)
     start: float = 0.0          # in-point within the narration file
     duration: float             # duration of this segment
     gain_db: float = 0.0
     measured_loudness_lufs: Optional[float] = None
+    track: int = 1              # audio lane (1 = A1, 2 = A2, ...)
 
 class MusicTrack(BaseModel):
     """Background music spanning the timeline.
 
     gain_db is interpreted by the renderer as an OFFSET from the target LUFS
     (-18 LUFS for music). Default 0 means "play at target loudness."
+
+    ``track`` is a UI-level organizational lane; the renderer ignores it.
     """
     file: str
     start: float = 0.0         # in-point within the music file
     duration: float = 0.0      # 0 = use full timeline duration
     gain_db: float = 0.0       # offset from -18 LUFS target
     measured_loudness_lufs: Optional[float] = None
+    track: int = 2             # audio lane (defaults to A2 so music sits below narration)
 
 class TextOverlay(BaseModel):
     """A title/text overlay at a specific timeline position."""

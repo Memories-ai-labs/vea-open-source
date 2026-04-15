@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 
 from src import config as _config
 from src.pipelines.v2.workspace import WorkspaceManager
+from src.routes._route_utils import safe_workspace as _workspace
 from src import services
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,43 @@ async def v2_list_projects():
     return {"projects": projects}
 
 
+@router.get(f"{_config.V2_API_PREFIX}/system/info")
+async def v2_system_info():
+    """
+    Model IDs currently wired into `services.main_llm` and `services.video_llm`,
+    plus the list of main_llm models the dashboard switcher can select from.
+    """
+    def _name(llm) -> str:
+        if llm is None:
+            return "none"
+        return getattr(llm, "model", None) or llm.__class__.__name__
+
+    return {
+        "main_llm": _name(services.main_llm),
+        "video_llm": _name(services.video_llm),
+        "available_main_models": services.AVAILABLE_MAIN_MODELS,
+    }
+
+
+@router.post(f"{_config.V2_API_PREFIX}/system/model")
+async def v2_set_main_model(payload: dict):
+    """
+    Swap the main_llm to a different model from ``AVAILABLE_MAIN_MODELS``.
+    Active agent sessions pick up the new model on their next request.
+    video_llm is untouched.
+    """
+    model_id = (payload or {}).get("model")
+    if not isinstance(model_id, str) or not model_id:
+        raise HTTPException(status_code=400, detail="`model` is required")
+    try:
+        applied = services.set_main_llm(model_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "ok", "main_llm": applied}
+
+
 @router.post(f"{_config.V2_API_PREFIX}/projects/create")
 async def v2_create_project(project_name: str):
     """
@@ -35,7 +73,7 @@ async def v2_create_project(project_name: str):
             status_code=400,
             detail="project_name must contain only letters, numbers, hyphens, and underscores."
         )
-    workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(project_name)
     if workspace.dir_exists():
         return {"status": "exists", "project_name": project_name, "path": str(workspace.root)}
     workspace.create()
@@ -50,7 +88,7 @@ async def v2_create_project(project_name: str):
 @router.post(f"{_config.V2_API_PREFIX}/projects/{{project_name}}/clear/gists")
 async def v2_clear_gists(project_name: str):
     """Clear per-video gists and session gist. Re-index to regenerate."""
-    workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
     session = workspace.load_session()
@@ -69,7 +107,7 @@ async def v2_clear_gists(project_name: str):
 async def v2_clear_planning(project_name: str):
     """Clear planning context: storyboard, clips, iterations, context.md, agent chat, scratchpads."""
     import shutil
-    workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
 
@@ -100,7 +138,7 @@ async def v2_clear_planning(project_name: str):
 async def v2_clear_session(project_name: str):
     """Full local reset -- deletes session.json, keeps footage."""
     import shutil
-    workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(project_name)
     if not workspace.dir_exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
 
@@ -123,7 +161,7 @@ async def v2_clear_memories(project_name: str):
     """Delete uploaded videos from Memories.ai cloud. Irreversible."""
     if not services.memories_manager:
         raise HTTPException(status_code=500, detail="Memories.ai not configured.")
-    workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
 

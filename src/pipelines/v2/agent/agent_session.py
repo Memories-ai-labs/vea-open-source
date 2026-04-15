@@ -14,6 +14,7 @@ from google.genai.types import SafetySetting, HarmCategory, HarmBlockThreshold
 from src.pipelines.v2.agent.scratchpad import ScratchpadManager
 from src.pipelines.v2.agent.system_prompt import build_system_prompt
 from src.pipelines.v2.agent.tools import TOOL_DECLARATIONS, ToolExecutor
+from src.pipelines.v2.workspace import _atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -50,13 +51,27 @@ class AgentSession:
         gemini_manager,
         video_entries: list,
         emit: Callable[..., Coroutine],
+        video_llm=None,
     ):
         self.project_name = project_name
         self.workspace = workspace
         self.memories = memories_manager
+        # ``gemini`` is the main text + tool-calling LLM (may be Claude/GPT via
+        # OpenRouter despite the historical name). ``video_llm`` is the
+        # Gemini-family manager used for tasks that need native video input
+        # (refine_clip_timestamps, verify_preview). If the caller doesn't
+        # pass one, fall back to gemini for both — preserves old behavior.
         self.gemini = gemini_manager
+        self.video_llm = video_llm or gemini_manager
         self.video_entries = video_entries
-        self._emit = emit
+        # Multi-subscriber fan-out: the agent owns a set of emit callables.
+        # Each WebSocket connection adds/removes itself via add_subscriber /
+        # remove_subscriber. ``self._emit`` remains callable as ``await
+        # self._emit(type, data)`` — it fans out to every subscriber.
+        self._subscribers: "set[Callable[..., Coroutine]]" = set()
+        if emit is not None:
+            self._subscribers.add(emit)
+        self._emit = self._broadcast_emit
 
         # Build video info for system prompt and tools
         self.video_nos = [v.video_no for v in video_entries if v.video_no]
@@ -115,6 +130,12 @@ class AgentSession:
         self._render_state: Dict = {"status": "idle"}
         self._draft_render_state: Dict = {"status": "idle"}
 
+        # Background tasks spawned from the agent loop (auto-render, etc.)
+        # We track them so the session can await them before being released —
+        # otherwise create_task() returns a task that nobody holds a reference
+        # to, and Python's GC can kill it mid-run (see RUF006 / PYI053).
+        self._bg_tasks: "set[asyncio.Task]" = set()
+
         # Scratchpads
         self.scratchpads = ScratchpadManager(workspace.root)
 
@@ -148,6 +169,7 @@ class AgentSession:
         self.tools = ToolExecutor(
             memories_manager=memories_manager,
             gemini_manager=gemini_manager,
+            video_llm=self.video_llm,
             workspace=workspace,
             scratchpads=self.scratchpads,
             video_nos=self.video_nos,
@@ -373,8 +395,9 @@ class AgentSession:
                         except Exception:
                             pass  # non-critical
 
-                    # Auto-trigger preview render via Resolve
-                    asyncio.create_task(self._auto_render_preview(result))
+                    # Auto-trigger preview render via Resolve.
+                    # Track the task so it isn't collected mid-run.
+                    self._spawn_bg_task(self._auto_render_preview(result))
 
                 # Special handling for scratchpad updates — emit the update
                 if tool_name == "update_scratchpad":
@@ -486,8 +509,7 @@ class AgentSession:
                     None, measure_edit_loudness, edit, footage_dir,
                 )
                 # Save updated edit decision with loudness measurements
-                with open(ed_path, "w") as f:
-                    _json.dump(edit.model_dump(), f, indent=2)
+                _atomic_write_json(ed_path, edit.model_dump())
                 # Emit updated edit decision to dashboard
                 try:
                     await self._emit("timeline_update", {
@@ -523,10 +545,46 @@ class AgentSession:
             except Exception:
                 pass  # client may be disconnected
 
+    def _spawn_bg_task(self, coro) -> asyncio.Task:
+        """Create a background task and keep a strong reference to it.
+
+        Without this, ``asyncio.create_task(coro)`` alone can be garbage
+        collected mid-run and cancelled silently.
+        """
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
+
+    def add_subscriber(self, emit: Callable[..., Coroutine]) -> None:
+        """Register a WebSocket emit callable to receive agent events."""
+        self._subscribers.add(emit)
+
+    def remove_subscriber(self, emit: Callable[..., Coroutine]) -> None:
+        """Stop sending events to this WebSocket emit callable."""
+        self._subscribers.discard(emit)
+
+    async def _broadcast_emit(self, event_type: str, data: dict) -> None:
+        """Fan ``(event_type, data)`` out to every connected subscriber.
+
+        A single misbehaving client is isolated: its exception is swallowed
+        (with a log entry) so it cannot stop events reaching the others.
+        """
+        # Snapshot to avoid 'set changed during iteration' if a client
+        # disconnects while we're fanning out.
+        for sub in list(self._subscribers):
+            try:
+                await sub(event_type, data)
+            except Exception as e:
+                logger.warning(
+                    f"[AGENT] Dropping subscriber after emit error: {e}"
+                )
+                self._subscribers.discard(sub)
+
     async def _auto_render_preview(self, fcpxml_result: Dict) -> None:
         """Kick off a Resolve preview render in the background after FCPXML generation."""
         # Start FFmpeg draft render first (fast, no Resolve dependency)
-        asyncio.create_task(self._render_ffmpeg_draft())
+        self._spawn_bg_task(self._render_ffmpeg_draft())
 
         # Then attempt Resolve render
         try:
@@ -635,13 +693,11 @@ class AgentSession:
 
     def _save_chat_log(self) -> None:
         """Persist chat log to workspace."""
-        path = self.workspace.root / "chat_history.json"
         data = [
             {"role": m.role, "text": m.text, "timestamp": m.timestamp}
             for m in self._chat_log
         ]
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+        _atomic_write_json(self.workspace.root / "chat_history.json", data)
 
     def _load_event_log(self) -> None:
         """Load persisted events (tool calls, results) for replay on reconnect."""
@@ -657,11 +713,9 @@ class AgentSession:
 
     def _save_event_log(self) -> None:
         """Persist event log to workspace."""
-        path = self.workspace.root / "event_log.json"
         # Keep last 200 events to prevent unbounded growth
         trimmed = self._event_log[-200:]
-        with open(path, "w") as f:
-            json.dump(trimmed, f, indent=2)
+        _atomic_write_json(self.workspace.root / "event_log.json", trimmed)
 
     def get_scratchpad_state(self) -> Dict[str, str]:
         """Return current scratchpad contents for the frontend."""

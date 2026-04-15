@@ -10,7 +10,8 @@ from fastapi import FastAPI
 from fastapi.websockets import WebSocket, WebSocketDisconnect
 
 from src import config as _config
-from src.pipelines.v2.workspace import WorkspaceManager
+from src.pipelines.v2.workspace import WorkspaceManager, validate_project_name, _atomic_write_json
+from src.routes._route_utils import safe_workspace as _workspace
 from src.pipelines.v2.agent.agent_session import AgentSession
 from src import services
 
@@ -116,7 +117,7 @@ def register_websocket_routes(app: FastAPI):
             return
 
         # Load workspace
-        workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+        workspace = _workspace(project_name)
         if not workspace.exists():
             await websocket.send_json({"type": "error", "data": {"message": f"Project '{project_name}' not found."}})
             await websocket.close()
@@ -155,7 +156,8 @@ def register_websocket_routes(app: FastAPI):
                     project_name=project_name,
                     workspace=workspace,
                     memories_manager=services.memories_manager,
-                    gemini_manager=services.gemini_manager,
+                    gemini_manager=services.main_llm,
+                    video_llm=services.video_llm,
                     video_entries=session_data.videos,
                     emit=emit,
                 )
@@ -168,10 +170,11 @@ def register_websocket_routes(app: FastAPI):
                 await websocket.close()
                 return
 
-        # Always point the agent's emit at the current connection's queue (if agent exists)
+        # Subscribe this connection to the agent's event fan-out. Multiple
+        # concurrent clients for the same project all receive the same events.
         if agent is not None:
-            agent._emit = emit
-            print(f"[AGENT WS] Bound emit to current connection for project={project_name}", flush=True)
+            agent.add_subscriber(emit)
+            print(f"[AGENT WS] Subscribed client to project={project_name}", flush=True)
 
         # Register this client's emit on the project-level indexing channel so the
         # client receives index_progress events even when no agent exists yet.
@@ -312,8 +315,6 @@ def register_websocket_routes(app: FastAPI):
                                 "data": {"message": "Project must be indexed before chatting with the agent."},
                             })
                         elif agent_task is None:
-                            # Reassign emit in case this is a reconnection
-                            agent._emit = emit
                             agent_task = asyncio.create_task(
                                 agent.handle_user_message(text)
                             )
@@ -339,10 +340,9 @@ def register_websocket_routes(app: FastAPI):
                         if agent is None:
                             await websocket.send_json({"type": "render_error", "data": {"error": "Project must be indexed first."}})
                         else:
-                            agent._emit = emit
                             fcpxml = agent.workspace.get_latest_fcpxml()
                             if fcpxml:
-                                asyncio.create_task(
+                                agent._spawn_bg_task(
                                     agent._auto_render_preview({"fcpxml_path": str(fcpxml)})
                                 )
                             else:
@@ -355,8 +355,7 @@ def register_websocket_routes(app: FastAPI):
                         if agent is None:
                             await websocket.send_json({"type": "render_error", "data": {"error": "Project must be indexed first."}})
                         else:
-                            agent._emit = emit
-                            asyncio.create_task(agent._render_ffmpeg_draft())
+                            agent._spawn_bg_task(agent._render_ffmpeg_draft())
 
                     elif msg_type == "crop_clip":
                         clip_id = msg.get("clip_id", "")
@@ -366,15 +365,13 @@ def register_websocket_routes(app: FastAPI):
                             )
 
                     elif msg_type == "edit_decision_update":
-                        # Persist edit decision from client, recompile FCPXML, and broadcast
-                        import json as _json
+                        # Persist edit decision from client, recompile FCPXML, and broadcast.
+                        # Use atomic write (tmp + os.replace) so a crash mid-write can't
+                        # leave the project's source-of-truth JSON corrupted.
                         ed = msg.get("edit_decision")
                         if ed:
-                            ed_dir = workspace.root / "fcpxml"
-                            ed_dir.mkdir(parents=True, exist_ok=True)
-                            ed_path = ed_dir / "edit_decision.json"
-                            with open(ed_path, "w") as f:
-                                _json.dump(ed, f, indent=2)
+                            ed_path = workspace.root / "fcpxml" / "edit_decision.json"
+                            _atomic_write_json(ed_path, ed)
                             logger.info(f"[AGENT WS] Persisted edit_decision for project={project_name}")
 
                             # Recompile FCPXML so next render uses updated edit
@@ -390,10 +387,30 @@ def register_websocket_routes(app: FastAPI):
                                         if resolved.exists():
                                             clip.source_path = str(resolved)
                                 fcpxml_out = str(workspace.get_fcpxml_path(version=1))
-                                compile_edit_decision(edit_obj, fcpxml_out)
+                                compile_edit_decision(edit_obj, fcpxml_out, workspace_root=workspace.root)
                                 logger.info(f"[AGENT WS] Recompiled FCPXML from UI edit: {fcpxml_out}")
                             except Exception as e:
                                 logger.warning(f"[AGENT WS] FCPXML recompile failed (non-fatal): {e}")
+
+                            # Drop a short note into the agent's planning scratchpad so
+                            # its own free-form notes don't drift stale when the user
+                            # edits in the UI. The full JSON is still injected into the
+                            # system prompt every turn; this is a breadcrumb, not the
+                            # source of truth.
+                            if agent is not None:
+                                try:
+                                    from datetime import datetime, timezone
+                                    now = datetime.now(timezone.utc).strftime("%H:%M UTC")
+                                    num_clips = len(ed.get("clips", []))
+                                    num_narr = len(ed.get("narration", []))
+                                    note = (
+                                        f"\n\n> User edited timeline in UI at {now} — "
+                                        f"{num_clips} clips, {num_narr} narration segments. "
+                                        f"Always defer to the JSON in the system prompt."
+                                    )
+                                    agent.scratchpads.update("planning", "append", note)
+                                except Exception as e:
+                                    logger.warning(f"[AGENT WS] scratchpad breadcrumb failed: {e}")
 
                             await emit("timeline_update", {"edit_decision": ed})
 
@@ -410,11 +427,24 @@ def register_websocket_routes(app: FastAPI):
             # Cancel running agent task if client disconnects
             if agent_task and not agent_task.done():
                 agent_task.cancel()
+            # Unsubscribe from the agent's event fan-out
+            if agent is not None:
+                agent.remove_subscriber(emit)
             # Unregister this client from the indexing emitters
             try:
                 services._indexing_emitters.get(project_name, []).remove(emit)
             except (ValueError, KeyError):
                 pass
+            # If this was the last client for the project, drop the agent session
+            # so the next connect gets a fresh one (avoids leaked state).
+            remaining = services._indexing_emitters.get(project_name, [])
+            if not remaining:
+                dropped = services._agent_sessions.pop(project_name, None)
+                if dropped is not None:
+                    logger.info(
+                        f"[AGENT WS] Released AgentSession for {project_name} "
+                        f"(no clients remain)"
+                    )
 
     async def _broadcast_index_progress(project_name: str, payload: dict):
         """Push an index_progress event to all connected clients for this project."""
@@ -599,7 +629,7 @@ def register_websocket_routes(app: FastAPI):
                         if resolved.exists():
                             clip.source_path = str(resolved)
                 fcpxml_out = str(workspace.get_fcpxml_path(version=1))
-                compile_edit_decision(edit_obj, fcpxml_out)
+                compile_edit_decision(edit_obj, fcpxml_out, workspace_root=workspace.root)
             except Exception as e:
                 logger.warning(f"[CROP] FCPXML recompile failed (non-fatal): {e}")
 

@@ -105,7 +105,12 @@ export default function App() {
         onBack={handleBack}
         onClearState={agent.clearAndReconnect}
         onEditDecisionChange={agent.updateEditDecision}
+        onEditDecisionPreview={agent.previewEditDecision}
         onRequestCropClip={agent.requestCropClip}
+        onUndo={agent.undo}
+        onRedo={agent.redo}
+        canUndo={agent.canUndo}
+        canRedo={agent.canRedo}
       />
     </ToastProvider>
   );

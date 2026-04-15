@@ -24,6 +24,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple, Type
 
+import httpx
 from openai import OpenAI
 from pydantic import BaseModel
 
@@ -38,11 +39,15 @@ class OpenRouterManager:
         model: str = "google/gemini-2.5-flash",
         api_key: str = "",
         base_url: str = "https://openrouter.ai/api/v1",
+        timeout_s: float = 120.0,
     ):
         self.model = model
+        # Pass an explicit httpx timeout so the OpenAI SDK doesn't hang forever
+        # if the upstream API stalls. Per-request timeout can still be passed in.
         self.client = OpenAI(
             base_url=base_url,
             api_key=api_key,
+            timeout=httpx.Timeout(timeout_s, connect=10.0),
         )
         # Compatibility: agent_session.py accesses self.gemini.genai_client
         # We provide a shim that routes generate_content calls through OpenAI
@@ -285,32 +290,74 @@ class _GenaiClientShim:
         if config and hasattr(config, "system_instruction") and config.system_instruction:
             messages.append({"role": "system", "content": str(config.system_instruction)})
 
-        # Convert Content objects to OpenAI messages
+        # Convert Content objects to OpenAI messages.
+        #
+        # Claude (and strict OpenAI clients) require that every tool_result's
+        # ``tool_call_id`` matches the ``id`` of the tool_use in the IMMEDIATELY
+        # PREVIOUS assistant message. Older versions of this shim minted IDs
+        # via a global counter that was reused incorrectly; Anthropic via
+        # OpenRouter rejects those requests with "unexpected tool_use_id".
+        #
+        # We now issue IDs as we walk the Contents in order, maintain a FIFO
+        # queue of pending IDs from the last assistant turn, and pop from it
+        # when we see each function_response. This guarantees perfect pairing.
+        pending_tool_ids: List[str] = []      # IDs emitted by the last assistant turn
+        pending_tool_names: List[str] = []    # parallel list, for sanity-check only
+
         for content in contents:
             role = _map_role(getattr(content, "role", "user"))
             parts = getattr(content, "parts", [])
 
-            # Handle function call responses (tool role)
+            # Handle function call responses (tool role). Pop the next pending
+            # ID from the previous assistant turn and use it as ``tool_call_id``.
             if role == "tool":
                 for part in parts:
                     fn_resp = getattr(part, "function_response", None)
-                    if fn_resp:
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": _make_tool_call_id(fn_resp.name),
-                            "content": json.dumps(fn_resp.response) if isinstance(fn_resp.response, dict) else str(fn_resp.response),
-                        })
+                    if not fn_resp:
+                        continue
+                    if pending_tool_ids:
+                        tool_id = pending_tool_ids.pop(0)
+                        expected_name = pending_tool_names.pop(0) if pending_tool_names else None
+                        if expected_name and expected_name != fn_resp.name:
+                            # Mismatch — history must be corrupted. Fall back
+                            # to a deterministic-by-name id so the call still
+                            # has some chance of succeeding.
+                            logger.warning(
+                                f"[OPENROUTER] tool_result name mismatch: "
+                                f"pending={expected_name} got={fn_resp.name}. "
+                                "Regenerating id."
+                            )
+                            tool_id = _make_tool_call_id(fn_resp.name)
+                    else:
+                        # No pending ids — likely a truncated history. Synthesize
+                        # an id so we emit a well-formed message; the provider
+                        # may still reject it but at least not with our bug.
+                        tool_id = _make_tool_call_id(fn_resp.name)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_id,
+                        "content": json.dumps(fn_resp.response) if isinstance(fn_resp.response, dict) else str(fn_resp.response),
+                    })
                 continue
 
-            # Handle model responses with function calls
+            # Handle model responses with function calls. Mint a fresh id for
+            # each function_call; remember it so the next tool-role message
+            # can pair against it. Any leftover pending ids from an earlier
+            # assistant turn indicate a missing tool_result — drop them rather
+            # than letting them bleed into the next round.
             if role == "assistant":
                 text_parts = []
                 tool_calls = []
+                new_pending_ids: List[str] = []
+                new_pending_names: List[str] = []
                 for part in parts:
                     if getattr(part, "function_call", None):
                         fc = part.function_call
+                        tool_id = _make_tool_call_id(fc.name)
+                        new_pending_ids.append(tool_id)
+                        new_pending_names.append(fc.name)
                         tool_calls.append({
-                            "id": _make_tool_call_id(fc.name),
+                            "id": tool_id,
                             "type": "function",
                             "function": {
                                 "name": fc.name,
@@ -319,6 +366,15 @@ class _GenaiClientShim:
                         })
                     elif getattr(part, "text", None):
                         text_parts.append(part.text)
+
+                if pending_tool_ids:
+                    logger.warning(
+                        f"[OPENROUTER] {len(pending_tool_ids)} orphan tool_call id(s) "
+                        f"without matching tool_result; dropping."
+                    )
+
+                pending_tool_ids = new_pending_ids
+                pending_tool_names = new_pending_names
 
                 msg: Dict[str, Any] = {"role": "assistant"}
                 if text_parts:
@@ -348,6 +404,26 @@ class _GenaiClientShim:
         if tools:
             kwargs["tools"] = tools
 
+        # Forward structured-output config (response schema / MIME) so callers
+        # that pass ``response_schema=<pydantic model>`` via GenerateContentConfig
+        # actually get JSON mode. Previously this was accepted but dropped on
+        # the floor, causing the agent to get free-form text when it expected
+        # a schema-validated response.
+        if config is not None:
+            schema = getattr(config, "response_schema", None)
+            mime = getattr(config, "response_mime_type", None)
+            if schema is not None and mime == "application/json":
+                kwargs["response_format"] = _schema_to_response_format(schema)
+            elif mime == "application/json":
+                kwargs["response_format"] = {"type": "json_object"}
+
+        # Per-call safety: allow caller to override the session-level timeout
+        # via config.http_options.timeout (ms), mirroring Gemini's HttpOptions.
+        if config is not None and getattr(config, "http_options", None) is not None:
+            timeout_ms = getattr(config.http_options, "timeout", None)
+            if timeout_ms:
+                kwargs["timeout"] = max(5.0, float(timeout_ms) / 1000.0)
+
         t0 = time.time()
         response = self._mgr.client.chat.completions.create(**kwargs)
         elapsed = time.time() - t0
@@ -369,13 +445,56 @@ def _map_role(role: str) -> str:
     return {"user": "user", "model": "assistant", "tool": "tool"}.get(role, role)
 
 
-_tool_call_counter = 0
-
 def _make_tool_call_id(name: str) -> str:
-    """Generate a deterministic tool_call_id from function name."""
-    global _tool_call_counter
-    _tool_call_counter += 1
-    return f"call_{name}_{_tool_call_counter}"
+    """Generate a unique tool_call_id.
+
+    Each call returns a distinct id so tool_use / tool_result pairings can be
+    tracked unambiguously by the caller (see ``_GenaiClientShim.generate_content``).
+    Anthropic requires tool_call_ids to start with ``call_`` or ``toolu_``.
+    """
+    import uuid
+    return f"call_{name[:32]}_{uuid.uuid4().hex[:12]}"
+
+
+def _schema_to_response_format(schema: Any) -> Dict[str, Any]:
+    """Convert a Pydantic model / dict / genai Schema → OpenAI ``response_format``.
+
+    OpenAI structured outputs expect::
+
+        {"type": "json_schema", "json_schema": {"name": ..., "schema": {...}, "strict": True}}
+
+    We accept several input shapes to match GeminiGenaiManager's behavior:
+    - pydantic BaseModel subclass → ``model.model_json_schema()``
+    - plain dict → used directly
+    - google.genai Schema with ``to_json_dict()`` → converted to dict
+
+    Falls back to ``{"type": "json_object"}`` if the schema can't be extracted
+    (loose JSON mode) rather than raising.
+    """
+    json_schema: Optional[Dict[str, Any]] = None
+    name = "response"
+    try:
+        if isinstance(schema, type) and issubclass(schema, BaseModel):
+            json_schema = schema.model_json_schema()
+            name = schema.__name__
+        elif isinstance(schema, dict):
+            json_schema = schema
+        elif hasattr(schema, "to_json_dict"):
+            json_schema = _lowercase_schema_types(schema.to_json_dict())
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning(f"[OPENROUTER] Could not extract JSON schema: {e}")
+
+    if not json_schema:
+        return {"type": "json_object"}
+
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": name[:64],  # OpenAI name length cap
+            "schema": json_schema,
+            "strict": False,  # strict=True rejects additionalProperties; loosen it
+        },
+    }
 
 
 def _convert_tool_declarations(tools_list: list) -> List[Dict]:

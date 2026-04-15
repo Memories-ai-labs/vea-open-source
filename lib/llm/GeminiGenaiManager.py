@@ -25,16 +25,43 @@ logger = logging.getLogger(__name__)
 
 
 class GeminiGenaiManager:
-    def __init__(self, model="gemini-2.5-flash", location="us-central1", project="research-459618"):
+    def __init__(
+        self,
+        model: str = "gemini-2.5-flash",
+        location: Optional[str] = None,
+        project: Optional[str] = None,
+        http_timeout_s: int = 60,
+    ):
         self.model = model
+        # Resolve project/location from env at construction time so tests and
+        # callers can override without editing the source.
+        resolved_project = (
+            project
+            or os.environ.get("GOOGLE_CLOUD_PROJECT")
+            or os.environ.get("GCP_PROJECT")
+        )
+        resolved_location = (
+            location
+            or os.environ.get("GOOGLE_CLOUD_LOCATION")
+            or os.environ.get("GCP_LOCATION")
+            or "us-central1"
+        )
+        if not resolved_project:
+            raise RuntimeError(
+                "GeminiGenaiManager requires GOOGLE_CLOUD_PROJECT (or an explicit "
+                "project= arg). Set it in config.json or the environment."
+            )
+        self.project = resolved_project
+        self.location = resolved_location
         self.genai_client = genai.Client(
             vertexai=True,
-            location=location,
-            project=project
+            location=resolved_location,
+            project=resolved_project,
+            http_options=HttpOptions(timeout=http_timeout_s * 1000),  # ms
         )
 
     def _convert_to_part(self, item) -> Part:
-        """Convert Path, GCS URI, or string into Gemini-compatible Part"""
+        """Convert Patok h, GCS URI, or string into Gemini-compatible Part"""
         if isinstance(item, Path):
             if not item.exists():
                 raise FileNotFoundError(f"File not found: {item}")

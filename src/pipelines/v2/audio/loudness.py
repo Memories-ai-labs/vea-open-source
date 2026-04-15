@@ -77,13 +77,24 @@ def measure_lufs(
             logger.warning(f"[LOUDNESS] FFmpeg failed for {path.name}: {proc.stderr.decode()[:200]}")
             return None
 
-        # Convert raw PCM to numpy array shape (samples, 2)
+        # Convert raw PCM to numpy array shape (samples, 2).
+        # The buffer is interleaved stereo float32, so N total samples == N/2
+        # frames. BS.1770 integrated loudness needs at least ~400ms of audio
+        # to return a stable value, so we require 500ms of *frames* post-reshape.
         audio = np.frombuffer(proc.stdout, dtype=np.float32)
-        if len(audio) < sr * 0.2:  # less than 100ms of stereo audio (200 samples interleaved)
-            logger.warning(f"[LOUDNESS] Audio too short for {path.name} ({len(audio)} samples)")
+        # De-interleave to (samples, channels) first so the length check below
+        # measures frames (not interleaved samples).
+        if audio.size < 2:
+            logger.warning(f"[LOUDNESS] Audio too short for {path.name} ({audio.size} samples)")
             return None
-        # De-interleave to (samples, channels)
         audio = audio.reshape(-1, 2)
+        min_frames = int(sr * 0.5)  # 500 ms of audio minimum
+        if audio.shape[0] < min_frames:
+            logger.warning(
+                f"[LOUDNESS] Audio too short for {path.name} "
+                f"({audio.shape[0]} frames < {min_frames})"
+            )
+            return None
 
         # Measure integrated loudness per ITU-R BS.1770
         meter = pyloudnorm.Meter(sr)

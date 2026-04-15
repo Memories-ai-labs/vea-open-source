@@ -89,7 +89,9 @@ export default function TransformPreview({
   const posX = t ? t.position_x * pxPerUnit : 0;
   const posY = t ? -t.position_y * pxPerUnit : 0;
 
-  const src = `http://localhost:8000/video-edit/v2/projects/${projectName}/footage/${clip.source_file}`;
+  // Use a relative URL so we stay on the page's origin (works with the Vite
+  // dev proxy, with ngrok, and with any reverse proxy).
+  const src = `/video-edit/v2/projects/${encodeURIComponent(projectName)}/footage/${encodeURIComponent(clip.source_file)}`;
   const isCropping = cropStatus?.status === 'running';
 
   return (

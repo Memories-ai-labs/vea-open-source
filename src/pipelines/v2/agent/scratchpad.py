@@ -50,25 +50,39 @@ class ScratchpadManager:
         else:
             return {"error": f"Unknown operation: {operation}. Valid: replace, append, prepend"}
 
-        # Enforce size cap
-        if len(self.pads[name]) > MAX_PAD_SIZE:
+        # Enforce size cap. Return a visible truncation notice so the agent
+        # can choose to summarize / consolidate rather than quietly losing
+        # context that it wrote early in the session.
+        truncated = False
+        original_len = len(self.pads[name])
+        if original_len > MAX_PAD_SIZE:
             logger.warning(
                 f"[SCRATCHPAD] {name} exceeds {MAX_PAD_SIZE} chars "
-                f"({len(self.pads[name])}). Truncating from the start."
+                f"({original_len}). Truncating from the start."
             )
             self.pads[name] = self.pads[name][-MAX_PAD_SIZE:]
+            truncated = True
 
         now = datetime.now(timezone.utc).isoformat()
         self.last_updated[name] = now
         self._save(name)
         self._save_timestamps()
-        return {
+        result = {
             "status": "updated",
             "name": name,
             "operation": operation,
             "length": len(self.pads[name]),
             "last_updated": now,
         }
+        if truncated:
+            result["truncated"] = True
+            result["truncated_chars"] = original_len - len(self.pads[name])
+            result["warning"] = (
+                f"Scratchpad '{name}' exceeded the {MAX_PAD_SIZE}-char cap; "
+                f"the oldest {original_len - len(self.pads[name])} characters were dropped. "
+                f"Consider summarizing earlier entries next time you write to this pad."
+            )
+        return result
 
     def read(self, name: str) -> str:
         if name not in PAD_NAMES:

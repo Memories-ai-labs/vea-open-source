@@ -3,9 +3,6 @@ import { createPortal } from 'react-dom';
 import type {
   EditDecision,
   EditDecisionClip,
-  NarrationSegment,
-  MusicTrack,
-  TextOverlay,
 } from '../hooks/useAgentChat';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -16,13 +13,29 @@ interface NLETimelineProps {
   selectedClipId?: string | null;
   cropStatuses?: Record<string, { status: string; step?: string }>;
   onSeek?: (time: number) => void;
+  /** Commit a change: persists to server + history. Use on drag-end/click. */
   onEditDecisionChange?: (updated: EditDecision) => void;
+  /** Live preview during a drag: updates local state only (no server, no history).
+   *  If omitted, drags fall back to ``onEditDecisionChange`` per pointer-move. */
+  onEditDecisionPreview?: (updated: EditDecision) => void;
   onClipSelect?: (clipId: string | null) => void;
 }
 
+// Discriminator so drag handlers know which schema field to write back to.
+// - 'v1'        : primary spine video clip (ordering matters, no timeline_offset)
+// - 'v-overlay' : overlay video clip on V2+, free-placed via timeline_offset
+// - 'title'     : TextOverlay on a V-track lane (above the spine)
+// - 'narration' : NarrationSegment on an A-track lane
+// - 'music'     : MusicTrack on an A-track lane
+type ItemKind = 'v1' | 'v-overlay' | 'title' | 'narration' | 'music';
+
+// Which visual family a track belongs to. Cross-family drags are blocked.
+type TrackFamily = 'video' | 'audio';
+
 interface TrackItem {
   id: string;
-  clipIndex: number;   // index in editDecision.clips (-1 for non-clip items)
+  kind: ItemKind;
+  sourceIdx: number;   // index into edit.clips / edit.narration / edit.titles (0 for music)
   tlStart: number;
   tlEnd: number;
   label: string;
@@ -35,8 +48,10 @@ interface TrackItem {
 }
 
 interface Track {
-  id: string;
+  id: string;                  // "V1", "V2", "A1", "A2", ...
   name: string;
+  family: TrackFamily;
+  trackNum: number;            // integer extracted from id
   type: 'video' | 'audio' | 'title';
   height: number;
   color: string;
@@ -48,19 +63,21 @@ type DragMode = 'move' | 'retrim-left' | 'retrim-right' | null;
 
 interface DragState {
   mode: DragMode;
-  sourceTrackNum: number;   // track the clip started on
+  sourceFamily: TrackFamily;   // 'video' or 'audio' — destination must match
+  sourceTrackNum: number;      // track the item started on
+  kind: ItemKind;              // which schema array to write back to
+  sourceIdx: number;           // index in that array
   itemId: string;
-  clipIndex: number;        // index in editDecision.clips
   startX: number;
   startY: number;
-  ghostOffset: number;      // px offset from clip left edge to pointer
+  ghostOffset: number;         // px offset from item left edge to pointer
   // For move — updated during drag
-  targetTrackNum: number;   // track the clip is hovering over
-  ghostLeft: number;        // px position of ghost in timeline
-  timelineOffset: number;   // absolute time position where clip would land
-  // For retrim
-  originalStart: number;
-  originalEnd: number;
+  targetTrackNum: number;      // track the item is hovering over
+  ghostLeft: number;           // px position of ghost in timeline
+  timelineOffset: number;      // absolute time position where item would land
+  // For retrim — snapshot the fields we'll compute deltas against
+  originalStart: number;       // source_start (clip) / start (narr/music) / 0 (title)
+  originalEnd: number;         // source_end (clip) / start+duration (narr/music/title)
   originalTimelineOffset: number | undefined;
 }
 
@@ -70,13 +87,11 @@ const TRACK_HEADER_W = 52;
 const RULER_H = 22;
 const VIDEO_TRACK_H = 48;
 const AUDIO_TRACK_H = 34;
-const TITLE_TRACK_H = 30;
 const TRACK_BORDER = 1;
 const MIN_CLIP_W = 22;
 const BASE_PX_PER_SEC = 18;
 const RETRIM_HANDLE_W = 5;
 const DRAG_DEADZONE = 4;
-const DRAG_DOWN_THRESHOLD = 30; // px below track to trigger new track creation
 
 const V1 = { color: '#60d5c8', border: '#88e0d8', bg: 'rgba(96,213,200,' };
 const T1 = { color: '#d79bb5', border: '#e4b4ca', bg: 'rgba(215,155,181,' };
@@ -93,14 +108,6 @@ const CLIP_PALETTE = [
 ];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function fmtTC(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  const f = Math.floor((seconds % 1) * 24);
-  return `${pad(h)}:${pad(m)}:${pad(s)}:${pad(f)}`;
-}
 
 function fmtShort(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -156,121 +163,238 @@ function clipTooltip(c: EditDecisionClip): string[] {
   ].filter(Boolean);
 }
 
+// ─── Edit-decision mutation helpers ─────────────────────────────────────────
+// Each drag produces a candidate next EditDecision. Keeping the math out of
+// the component's body keeps the drag callbacks small and each kind's rule
+// localized.
+
+const MIN_DUR = 0.1;   // never let something trim below 100ms
+
+function applyRetrim(
+  ed: EditDecision,
+  drag: DragState,
+  deltaSec: number,
+): EditDecision | null {
+  switch (drag.kind) {
+    case 'v1':
+    case 'v-overlay': {
+      const clips = [...ed.clips];
+      const c = { ...clips[drag.sourceIdx] };
+      if (!c) return null;
+      if (drag.mode === 'retrim-left') {
+        c.source_start = Math.max(0, Math.min(drag.originalStart + deltaSec, c.source_end - MIN_DUR));
+      } else {
+        c.source_end = Math.max(c.source_start + MIN_DUR, drag.originalEnd + deltaSec);
+      }
+      clips[drag.sourceIdx] = c;
+      return { ...ed, clips };
+    }
+    case 'title': {
+      const titles = [...(ed.titles ?? [])];
+      const t = { ...titles[drag.sourceIdx] };
+      if (!t) return null;
+      if (drag.mode === 'retrim-left') {
+        // Move the left edge: shift timeline_offset + shrink duration
+        const origStartTL = drag.originalTimelineOffset ?? t.timeline_offset;
+        const origEndTL = origStartTL + drag.originalEnd; // originalEnd = original duration
+        const newStart = Math.max(0, Math.min(origStartTL + deltaSec, origEndTL - MIN_DUR));
+        t.timeline_offset = newStart;
+        t.duration = origEndTL - newStart;
+      } else {
+        t.duration = Math.max(MIN_DUR, drag.originalEnd + deltaSec);
+      }
+      titles[drag.sourceIdx] = t;
+      return { ...ed, titles };
+    }
+    case 'narration': {
+      const narr = [...(ed.narration ?? [])];
+      const n = { ...narr[drag.sourceIdx] };
+      if (!n) return null;
+      if (drag.mode === 'retrim-left') {
+        // Left edge: shift in-point AND timeline_offset together, shrink duration.
+        // Clamp so we don't run off either end of the audio file.
+        const origStart = drag.originalStart;
+        const origEnd = drag.originalEnd;
+        const origTL = drag.originalTimelineOffset ?? n.timeline_offset;
+        const newStart = Math.max(0, Math.min(origStart + deltaSec, origEnd - MIN_DUR));
+        const shift = newStart - origStart;
+        n.start = newStart;
+        n.duration = origEnd - newStart;
+        n.timeline_offset = Math.max(0, origTL + shift);
+      } else {
+        // Right edge: grow/shrink duration. Don't grow past audio file length
+        // if we know it (we don't here — the renderer will clamp at play time).
+        const newEnd = Math.max(n.start + MIN_DUR, drag.originalEnd + deltaSec);
+        n.duration = newEnd - n.start;
+      }
+      narr[drag.sourceIdx] = n;
+      return { ...ed, narration: narr };
+    }
+    case 'music': {
+      const m = ed.music ? { ...ed.music } : null;
+      if (!m) return null;
+      if (drag.mode === 'retrim-left') {
+        // Music's "position" on the timeline is tracked only via start + duration
+        // (it doesn't have a timeline_offset field), so left-trim both advances
+        // the in-point and shrinks the duration by the same amount.
+        const newStart = Math.max(0, Math.min((drag.originalStart) + deltaSec, drag.originalEnd - MIN_DUR));
+        const shift = newStart - drag.originalStart;
+        m.start = newStart;
+        m.duration = Math.max(MIN_DUR, (drag.originalEnd - drag.originalStart) - shift);
+      } else {
+        m.duration = Math.max(MIN_DUR, (drag.originalEnd - drag.originalStart) + deltaSec);
+      }
+      return { ...ed, music: m };
+    }
+  }
+  return null;
+}
+
+
 // ─── Track builder ──────────────────────────────────────────────────────────
 
 function buildTracks(ed: EditDecision): { tracks: Track[]; totalDuration: number } {
   const tracks: Track[] = [];
   let totalDur = 0;
 
-  // Video tracks — group clips by track number (V1, V2, etc.)
-  if (ed.clips.length > 0) {
-    const trackGroups = new Map<number, { clip: EditDecisionClip; origIndex: number }[]>();
-    ed.clips.forEach((c, i) => {
-      const trackNum = c.track ?? 1;
-      if (!trackGroups.has(trackNum)) trackGroups.set(trackNum, []);
-      trackGroups.get(trackNum)!.push({ clip: c, origIndex: i });
+  // ── Video family: V-tracks contain clips AND titles. Titles sit above clips
+  // on a V-lane above the spine (per their `lane` field). We merge them so a
+  // single family ('video') covers every visual layer.
+  //
+  // Collect per-track items in a dict keyed by V-track number, then emit
+  // sorted by track (V1 at top, V2+ below).
+  const videoBuckets = new Map<number, TrackItem[]>();
+
+  // Pass 1 — V1 is the primary spine: clips are sequential. Compute timeline
+  // positions from array order, not timeline_offset.
+  const v1Items: TrackItem[] = [];
+  let v1Offset = 0;
+  ed.clips.forEach((c, idx) => {
+    if ((c.track ?? 1) !== 1) return;
+    const dur = Math.max(0.5, (c.source_end - c.source_start) / (c.speed?.rate ?? 1));
+    const start = v1Offset;
+    v1Offset += dur;
+    const pal = CLIP_PALETTE[idx % CLIP_PALETTE.length];
+    v1Items.push({
+      id: c.id, kind: 'v1', sourceIdx: idx,
+      tlStart: start, tlEnd: v1Offset,
+      label: c.label || c.id, sublabel: baseName(c.source_file),
+      color: pal.color, borderColor: pal.border, gainDb: c.gain_db,
+      tooltip: clipTooltip(c), type: 'video',
     });
-
-    const sortedTrackNums = [...trackGroups.keys()].sort((a, b) => a - b);
-
-    for (const trackNum of sortedTrackNums) {
-      const group = trackGroups.get(trackNum)!;
-      const items: TrackItem[] = [];
-
-      if (trackNum === 1) {
-        // V1 = primary spine: clips are sequential by array order
-        let offset = 0;
-        for (const { clip: c, origIndex } of group) {
-          const dur = Math.max(0.5, (c.source_end - c.source_start) / (c.speed?.rate ?? 1));
-          const start = offset;
-          offset += dur;
-          const pal = CLIP_PALETTE[origIndex % CLIP_PALETTE.length];
-          items.push({
-            id: c.id, clipIndex: origIndex, tlStart: start, tlEnd: offset,
-            label: c.label || c.id, sublabel: baseName(c.source_file),
-            color: pal.color, borderColor: pal.border, gainDb: c.gain_db,
-            tooltip: clipTooltip(c), type: 'video',
-          });
-        }
-        totalDur = Math.max(totalDur, offset);
-      } else {
-        // V2+ = free placement: use timeline_offset for absolute positioning
-        for (const { clip: c, origIndex } of group) {
-          const dur = Math.max(0.5, (c.source_end - c.source_start) / (c.speed?.rate ?? 1));
-          const start = c.timeline_offset ?? 0;
-          const pal = CLIP_PALETTE[origIndex % CLIP_PALETTE.length];
-          items.push({
-            id: c.id, clipIndex: origIndex, tlStart: start, tlEnd: start + dur,
-            label: c.label || c.id, sublabel: baseName(c.source_file),
-            color: pal.color, borderColor: pal.border, gainDb: c.gain_db,
-            tooltip: clipTooltip(c), type: 'video',
-          });
-          totalDur = Math.max(totalDur, start + dur);
-        }
-      }
-
-      const trackId = `V${trackNum}`;
-      tracks.push({ id: trackId, name: trackId, type: 'video', height: VIDEO_TRACK_H, color: V1.color, items });
-    }
+  });
+  if (v1Items.length > 0) {
+    videoBuckets.set(1, v1Items);
+    totalDur = Math.max(totalDur, v1Offset);
   }
 
-  // T1 — Titles
-  const titles = ed.titles ?? [];
-  if (titles.length > 0) {
-    const items: TrackItem[] = titles.map((t, i) => ({
-      id: `title-${i}`,
-      clipIndex: -1,
+  // Pass 2 — V2+ overlay clips: free-placed via timeline_offset
+  ed.clips.forEach((c, idx) => {
+    const trackNum = c.track ?? 1;
+    if (trackNum === 1) return;
+    const dur = Math.max(0.5, (c.source_end - c.source_start) / (c.speed?.rate ?? 1));
+    const start = c.timeline_offset ?? 0;
+    const pal = CLIP_PALETTE[idx % CLIP_PALETTE.length];
+    const item: TrackItem = {
+      id: c.id, kind: 'v-overlay', sourceIdx: idx,
+      tlStart: start, tlEnd: start + dur,
+      label: c.label || c.id, sublabel: baseName(c.source_file),
+      color: pal.color, borderColor: pal.border, gainDb: c.gain_db,
+      tooltip: clipTooltip(c), type: 'video',
+    };
+    if (!videoBuckets.has(trackNum)) videoBuckets.set(trackNum, []);
+    videoBuckets.get(trackNum)!.push(item);
+    totalDur = Math.max(totalDur, start + dur);
+  });
+
+  // Pass 3 — Titles render on V-tracks per their `lane` field (default 1).
+  // FCPXML lane numbering is "above the spine", so lane=1 → V2, lane=2 → V3.
+  // V1 stays dedicated to the spine (main video clips).
+  (ed.titles ?? []).forEach((t, idx) => {
+    const laneNum = Math.max(1, t.lane ?? 1);
+    const vTrack = laneNum + 1;
+    const item: TrackItem = {
+      id: `title-${idx}`, kind: 'title', sourceIdx: idx,
       tlStart: t.timeline_offset,
       tlEnd: t.timeline_offset + t.duration,
       label: t.text.length > 20 ? t.text.slice(0, 19) + '…' : t.text,
-      color: T1.color,
-      borderColor: T1.border,
-      tooltip: [`"${t.text}"`, `Duration: ${t.duration}s`],
+      color: T1.color, borderColor: T1.border,
+      tooltip: [`"${t.text}"`, `Duration: ${t.duration}s`, `Lane V${vTrack}`],
       type: 'title',
-    }));
-    for (const it of items) totalDur = Math.max(totalDur, it.tlEnd);
-    tracks.push({ id: 'T1', name: 'T1', type: 'title', height: TITLE_TRACK_H, color: T1.color, items });
+    };
+    if (!videoBuckets.has(vTrack)) videoBuckets.set(vTrack, []);
+    videoBuckets.get(vTrack)!.push(item);
+    totalDur = Math.max(totalDur, t.timeline_offset + t.duration);
+  });
+
+  // Emit V-tracks in ascending order
+  for (const trackNum of [...videoBuckets.keys()].sort((a, b) => a - b)) {
+    const id = `V${trackNum}`;
+    tracks.push({
+      id, name: id, family: 'video', trackNum,
+      type: 'video', height: VIDEO_TRACK_H, color: V1.color,
+      items: videoBuckets.get(trackNum)!,
+    });
   }
 
-  // A1 — Narration
-  const narr = ed.narration ?? [];
-  if (narr.length > 0) {
-    const items: TrackItem[] = narr.map((n, i) => ({
-      id: `narr-${i}`,
-      clipIndex: -1,
+  // ── Audio family: A-tracks contain narration segments and the music clip,
+  // bucketed by their (optional) track field. Defaults preserve the old
+  // layout: narration → A1, music → A2.
+  const audioBuckets = new Map<number, TrackItem[]>();
+
+  (ed.narration ?? []).forEach((n, idx) => {
+    const trackNum = Math.max(1, n.track ?? 1);
+    const item: TrackItem = {
+      id: `narr-${idx}`, kind: 'narration', sourceIdx: idx,
       tlStart: n.timeline_offset,
       tlEnd: n.timeline_offset + n.duration,
-      label: 'Narration',
-      sublabel: baseName(n.file),
-      color: A1.color,
-      borderColor: A1.border,
-      gainDb: n.gain_db,
-      tooltip: [`Narration`, `File: ${baseName(n.file)}`, `Duration: ${n.duration.toFixed(1)}s`, `Gain: ${n.gain_db}dB`],
+      label: 'Narration', sublabel: baseName(n.file),
+      color: A1.color, borderColor: A1.border, gainDb: n.gain_db,
+      tooltip: [
+        'Narration',
+        `File: ${baseName(n.file)}`,
+        `Duration: ${n.duration.toFixed(1)}s`,
+        `Gain: ${n.gain_db}dB`,
+        `Lane A${trackNum}`,
+      ],
       type: 'audio',
-    }));
-    for (const it of items) totalDur = Math.max(totalDur, it.tlEnd);
-    tracks.push({ id: 'A1', name: 'A1', type: 'audio', height: AUDIO_TRACK_H, color: A1.color, items });
-  }
+    };
+    if (!audioBuckets.has(trackNum)) audioBuckets.set(trackNum, []);
+    audioBuckets.get(trackNum)!.push(item);
+    totalDur = Math.max(totalDur, n.timeline_offset + n.duration);
+  });
 
-  // A2 — Music
   if (ed.music) {
     const m = ed.music;
     const dur = m.duration > 0 ? m.duration : Math.max(totalDur, 10);
-    const items: TrackItem[] = [{
-      id: 'music-0',
-      clipIndex: -1,
-      tlStart: 0,
-      tlEnd: dur,
-      label: 'Music',
-      sublabel: baseName(m.file),
-      color: A2.color,
-      borderColor: A2.border,
-      gainDb: m.gain_db,
-      tooltip: [`Music`, `File: ${baseName(m.file)}`, `Gain: ${m.gain_db}dB`, `Duration: ${dur.toFixed(1)}s`],
+    const trackNum = Math.max(1, m.track ?? 2);
+    const item: TrackItem = {
+      id: 'music-0', kind: 'music', sourceIdx: 0,
+      tlStart: m.start ?? 0,
+      tlEnd: (m.start ?? 0) + dur,
+      label: 'Music', sublabel: baseName(m.file),
+      color: A2.color, borderColor: A2.border, gainDb: m.gain_db,
+      tooltip: [
+        'Music', `File: ${baseName(m.file)}`,
+        `Gain: ${m.gain_db}dB`, `Duration: ${dur.toFixed(1)}s`,
+        `Lane A${trackNum}`,
+      ],
       type: 'audio',
-    }];
-    totalDur = Math.max(totalDur, dur);
-    tracks.push({ id: 'A2', name: 'A2', type: 'audio', height: AUDIO_TRACK_H, color: A2.color, items });
+    };
+    if (!audioBuckets.has(trackNum)) audioBuckets.set(trackNum, []);
+    audioBuckets.get(trackNum)!.push(item);
+    totalDur = Math.max(totalDur, (m.start ?? 0) + dur);
+  }
+
+  // Emit A-tracks in ascending order
+  for (const trackNum of [...audioBuckets.keys()].sort((a, b) => a - b)) {
+    const id = `A${trackNum}`;
+    tracks.push({
+      id, name: id, family: 'audio', trackNum,
+      type: 'audio', height: AUDIO_TRACK_H,
+      color: trackNum === 1 ? A1.color : A2.color,
+      items: audioBuckets.get(trackNum)!,
+    });
   }
 
   return { tracks, totalDuration: totalDur };
@@ -285,13 +409,10 @@ interface ClipItemProps {
   itemIdx: number;
   left: number;
   width: number;
-  pxPerSec: number;
   isHovered: boolean;
   isSelected: boolean;
   isCropping: boolean;
   isDragging: boolean;
-  isDropTarget: boolean;
-  isVideoTrack: boolean;
   onHover: (trackIdx: number, itemIdx: number, e: React.MouseEvent) => void;
   onMove: (e: React.MouseEvent) => void;
   onLeave: () => void;
@@ -300,15 +421,15 @@ interface ClipItemProps {
 }
 
 function ClipItem({
-  item, track, trackIdx, itemIdx, left, width, pxPerSec,
-  isHovered, isSelected, isCropping, isDragging, isDropTarget, isVideoTrack,
+  item, track, trackIdx, itemIdx, left, width,
+  isHovered, isSelected, isCropping, isDragging,
   onHover, onMove, onLeave, onDragStart, onSelect,
 }: ClipItemProps) {
   const isAudioTrack = track.type === 'audio';
   const isTitleTrack = track.type === 'title';
-  const canDrag = isVideoTrack && item.clipIndex >= 0;
-  // Audio items support click-to-select but not drag yet
-  const canSelect = canDrag || isAudioTrack;
+  // All item kinds now support trim + move.
+  const canDrag = true;
+  const canSelect = true;
 
   const handlePointerDown = useCallback((e: React.PointerEvent) => {
     if (!canDrag) return;
@@ -538,7 +659,11 @@ function ClipItem({
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cropStatuses, onSeek, onEditDecisionChange, onClipSelect }: NLETimelineProps) {
+export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cropStatuses, onSeek, onEditDecisionChange, onEditDecisionPreview, onClipSelect }: NLETimelineProps) {
+  // During a drag, stream updates through the preview channel (no server, no
+  // history). On pointer-up we commit once with onEditDecisionChange. Falls
+  // back to the commit channel if no preview callback is provided.
+  const livePreview = onEditDecisionPreview ?? onEditDecisionChange;
   const scrollRef = useRef<HTMLDivElement>(null);
   const [hoveredItem, setHoveredItem] = useState<{ trackIdx: number; itemIdx: number } | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
@@ -676,9 +801,59 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
     e.stopPropagation();
     e.preventDefault();
 
-    const clip = editDecision.clips[item.clipIndex];
-    if (!clip) return;
-    const trackNum = clip.track ?? 1;
+    // Resolve the current source record from its array + track this item is on
+    // based on the item's kind. Each branch also records the family so the
+    // move handler can block cross-family drops (V → A or A → V).
+    let family: TrackFamily;
+    let sourceTrackNum: number;
+    let originalStart: number;
+    let originalEnd: number;
+    let originalTimelineOffset: number | undefined;
+
+    switch (item.kind) {
+      case 'v1':
+      case 'v-overlay': {
+        const clip = editDecision.clips[item.sourceIdx];
+        if (!clip) return;
+        family = 'video';
+        sourceTrackNum = clip.track ?? 1;
+        originalStart = clip.source_start;
+        originalEnd = clip.source_end;
+        originalTimelineOffset = clip.timeline_offset;
+        break;
+      }
+      case 'title': {
+        const t = (editDecision.titles ?? [])[item.sourceIdx];
+        if (!t) return;
+        family = 'video';  // titles live on V-tracks above the spine
+        // lane=1 (first overlay in FCPXML) renders on V2; lane=N → V(N+1).
+        sourceTrackNum = Math.max(1, t.lane ?? 1) + 1;
+        originalStart = 0;  // titles don't have a source in-point
+        originalEnd = t.duration;
+        originalTimelineOffset = t.timeline_offset;
+        break;
+      }
+      case 'narration': {
+        const n = (editDecision.narration ?? [])[item.sourceIdx];
+        if (!n) return;
+        family = 'audio';
+        sourceTrackNum = Math.max(1, n.track ?? 1);
+        originalStart = n.start;
+        originalEnd = n.start + n.duration;
+        originalTimelineOffset = n.timeline_offset;
+        break;
+      }
+      case 'music': {
+        const m = editDecision.music;
+        if (!m) return;
+        family = 'audio';
+        sourceTrackNum = Math.max(1, m.track ?? 2);
+        originalStart = m.start ?? 0;
+        originalEnd = (m.start ?? 0) + (m.duration || (item.tlEnd - item.tlStart));
+        originalTimelineOffset = item.tlStart;  // music has no timeline_offset field
+        break;
+      }
+    }
 
     const mode: DragMode = edge === 'body' ? 'move' : edge === 'left' ? 'retrim-left' : 'retrim-right';
 
@@ -693,18 +868,20 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
 
     dragRef.current = {
       mode,
-      sourceTrackNum: trackNum,
+      sourceFamily: family,
+      sourceTrackNum,
+      kind: item.kind,
+      sourceIdx: item.sourceIdx,
       itemId: item.id,
-      clipIndex: item.clipIndex,
       startX: e.clientX,
       startY: e.clientY,
       ghostOffset,
-      targetTrackNum: trackNum,
+      targetTrackNum: sourceTrackNum,
       ghostLeft: item.tlStart * pxPerSec,
       timelineOffset: item.tlStart,
-      originalStart: clip.source_start,
-      originalEnd: clip.source_end,
-      originalTimelineOffset: clip.timeline_offset,
+      originalStart,
+      originalEnd,
+      originalTimelineOffset,
     };
 
     const target = scrollRef.current || (e.target as HTMLElement);
@@ -712,31 +889,38 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
     setHoveredItem(null);
   }, [editDecision, onEditDecisionChange, pxPerSec]);
 
-  // Resolve pointer Y to a track number
-  const resolveTrackAtY = useCallback((clientY: number): number => {
+  // Resolve pointer Y to a destination track for the given family.
+  // Returns the track number inside that family (1-indexed). If the pointer
+  // is below the last track of the family, returns max+1 (new track). If
+  // above the first track of the family, returns 1.
+  const resolveTrackAtY = useCallback((clientY: number, family: TrackFamily): number => {
     const el = scrollRef.current;
     if (!el) return 1;
-    // Find which video track the pointer is over
-    const videoTracks = tracks.filter(t => t.type === 'video');
-    for (const vt of videoTracks) {
-      const trackEl = el.querySelector(`[data-track-id="${vt.id}"]`);
+    const familyTracks = tracks.filter(t => t.family === family);
+    if (familyTracks.length === 0) return 1;
+
+    for (const t of familyTracks) {
+      const trackEl = el.querySelector(`[data-track-id="${t.id}"]`);
       if (trackEl) {
         const rect = trackEl.getBoundingClientRect();
         if (clientY >= rect.top && clientY <= rect.bottom) {
-          return parseInt(vt.id.replace('V', ''), 10) || 1;
+          return t.trackNum;
         }
       }
     }
-    // If below all video tracks, return max+1 (new track)
-    if (videoTracks.length > 0) {
-      const lastTrackEl = el.querySelector(`[data-track-id="${videoTracks[videoTracks.length - 1].id}"]`);
-      if (lastTrackEl && clientY > lastTrackEl.getBoundingClientRect().bottom) {
-        const maxNum = Math.max(...videoTracks.map(t => parseInt(t.id.replace('V', ''), 10) || 1));
-        return maxNum + 1;
-      }
+
+    // Pointer outside every family track. Pick above-all vs below-all based
+    // on comparison to the first and last track's bounding rects.
+    const firstEl = el.querySelector(`[data-track-id="${familyTracks[0].id}"]`);
+    const lastEl = el.querySelector(`[data-track-id="${familyTracks[familyTracks.length - 1].id}"]`);
+    if (lastEl && clientY > lastEl.getBoundingClientRect().bottom) {
+      // Below last track — create a new one
+      return Math.max(...familyTracks.map(t => t.trackNum)) + 1;
     }
-    // If above all video tracks, return 1
-    return 1;
+    if (firstEl && clientY < firstEl.getBoundingClientRect().top) {
+      return familyTracks[0].trackNum;
+    }
+    return familyTracks[0].trackNum;
   }, [tracks]);
 
   // Global pointer move for drag operations
@@ -762,8 +946,9 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
       const ghostLeft = Math.max(0, pointerXInTimeline - drag.ghostOffset);
       const timelineOffset = Math.max(0, ghostLeft / pxPerSec);
 
-      // Determine which track the pointer is over
-      const targetTrackNum = resolveTrackAtY(e.clientY);
+      // Constrain destination track to the item's family (V → A or A → V
+      // is not allowed; the drop snaps back to the source track).
+      const targetTrackNum = resolveTrackAtY(e.clientY, drag.sourceFamily);
 
       drag.targetTrackNum = targetTrackNum;
       drag.ghostLeft = ghostLeft;
@@ -778,8 +963,6 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
       });
     } else if (drag.mode === 'retrim-left' || drag.mode === 'retrim-right') {
       const deltaSec = dx / pxPerSec;
-      const clip = editDecision.clips[drag.clipIndex];
-      if (!clip) return;
 
       setDragVisual({
         mode: drag.mode,
@@ -789,18 +972,13 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
         sourceTrackNum: drag.sourceTrackNum,
       });
 
-      // Live retrim preview
-      const newClips = [...editDecision.clips];
-      const c = { ...newClips[drag.clipIndex] };
-      if (drag.mode === 'retrim-left') {
-        c.source_start = Math.max(0, Math.min(drag.originalStart + deltaSec, c.source_end - 0.1));
-      } else {
-        c.source_end = Math.max(c.source_start + 0.1, drag.originalEnd + deltaSec);
-      }
-      newClips[drag.clipIndex] = c;
-      onEditDecisionChange?.({ ...editDecision, clips: newClips });
+      // Apply retrim per kind. Route through the PREVIEW channel so we don't
+      // hit the WebSocket + disk on every pointer-move (a drag fires 40-50
+      // moves). The final value commits on pointer-up.
+      const next = applyRetrim(editDecision, drag, deltaSec);
+      if (next) livePreview?.(next);
     }
-  }, [editDecision, onEditDecisionChange, tracks, pxPerSec, onPanPointerMove, resolveTrackAtY]);
+  }, [editDecision, onEditDecisionChange, livePreview, tracks, pxPerSec, onPanPointerMove, resolveTrackAtY]);
 
   // Global pointer up — commit drag
   const handleDragPointerUp = useCallback((e: React.PointerEvent) => {
@@ -825,75 +1003,78 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
     }
 
     if (drag.mode === 'move') {
-      const clipIdx = drag.clipIndex;
-      const clip = editDecision.clips[clipIdx];
-      if (!clip) { dragRef.current = null; setDragVisual(null); return; }
-
-      const fromTrack = drag.sourceTrackNum;
       const toTrack = drag.targetTrackNum;
       const timelineOffset = drag.timelineOffset;
-      const newClips = [...editDecision.clips];
 
-      if (fromTrack === toTrack && toTrack === 1) {
-        // Reorder within V1 (sequential spine) — find insert position by time
-        const v1Clips = newClips
-          .map((c, i) => ({ c, i }))
-          .filter(({ c }) => (c.track ?? 1) === 1);
-        // Compute timeline positions for V1 clips to find insertion point
-        let offset = 0;
-        let insertBefore = v1Clips.length;
-        for (let j = 0; j < v1Clips.length; j++) {
-          const vc = v1Clips[j].c;
-          if (v1Clips[j].i === clipIdx) { offset += Math.max(0.5, (vc.source_end - vc.source_start) / (vc.speed?.rate ?? 1)); continue; }
-          const dur = Math.max(0.5, (vc.source_end - vc.source_start) / (vc.speed?.rate ?? 1));
-          const mid = offset + dur / 2;
-          if (timelineOffset < mid && insertBefore === v1Clips.length) {
-            insertBefore = j;
+      // Branch on the item kind so each schema field gets updated correctly.
+      // Cross-family drops were already blocked in resolveTrackAtY, so by
+      // here sourceFamily === destination family.
+      switch (drag.kind) {
+        case 'v1':
+        case 'v-overlay': {
+          const clipIdx = drag.sourceIdx;
+          const clip = editDecision.clips[clipIdx];
+          if (!clip) break;
+          const newClips = [...editDecision.clips];
+
+          if (toTrack === 1) {
+            // Landing on V1 — insert into the sequential spine.
+            // Compute insert position from the hover timelineOffset.
+            const [moved] = newClips.splice(clipIdx, 1);
+            const v1Only = newClips.filter(c => (c.track ?? 1) === 1);
+            let offset = 0;
+            let insertAt = v1Only.length;
+            for (let j = 0; j < v1Only.length; j++) {
+              const vc = v1Only[j];
+              const dur = Math.max(0.5, (vc.source_end - vc.source_start) / (vc.speed?.rate ?? 1));
+              const mid = offset + dur / 2;
+              if (timelineOffset < mid) { insertAt = j; break; }
+              offset += dur;
+            }
+            const targetArrayIdx = insertAt < v1Only.length
+              ? newClips.indexOf(v1Only[insertAt])
+              : newClips.length;
+            newClips.splice(targetArrayIdx, 0, { ...moved, track: 1, timeline_offset: undefined });
+          } else {
+            // Landing on V2+ — free placement via timeline_offset.
+            newClips[clipIdx] = { ...clip, track: toTrack, timeline_offset: timelineOffset };
           }
-          offset += dur;
+          onEditDecisionChange({ ...editDecision, clips: newClips });
+          break;
         }
-        // Move clip in array
-        const [moved] = newClips.splice(clipIdx, 1);
-        // Recalculate insert position in the full array among V1 clips
-        const v1After = newClips.filter(c => (c.track ?? 1) === 1);
-        let targetArrayIdx = newClips.length; // default: end
-        const actualInsert = Math.min(insertBefore, v1After.length);
-        if (actualInsert < v1After.length) {
-          targetArrayIdx = newClips.indexOf(v1After[actualInsert]);
+        case 'title': {
+          const titles = [...(editDecision.titles ?? [])];
+          const t = titles[drag.sourceIdx];
+          if (!t) break;
+          // V-track N → FCPXML lane (N-1); V1 spine is not a valid title lane,
+          // so clamp to lane≥1 (title dropped on V1 snaps to the first overlay).
+          const lane = Math.max(1, toTrack - 1);
+          titles[drag.sourceIdx] = { ...t, lane, timeline_offset: timelineOffset };
+          onEditDecisionChange({ ...editDecision, titles });
+          break;
         }
-        newClips.splice(targetArrayIdx, 0, { ...moved, track: 1, timeline_offset: undefined });
-        onEditDecisionChange({ ...editDecision, clips: newClips });
-
-      } else if (toTrack === 1) {
-        // Moving FROM V2+ TO V1 — insert into sequential spine
-        const [moved] = newClips.splice(clipIdx, 1);
-        // Find insertion position based on timelineOffset
-        const v1Clips = newClips.filter(c => (c.track ?? 1) === 1);
-        let offset = 0;
-        let insertAt = v1Clips.length;
-        for (let j = 0; j < v1Clips.length; j++) {
-          const vc = v1Clips[j];
-          const dur = Math.max(0.5, (vc.source_end - vc.source_start) / (vc.speed?.rate ?? 1));
-          const mid = offset + dur / 2;
-          if (timelineOffset < mid) { insertAt = j; break; }
-          offset += dur;
+        case 'narration': {
+          const narr = [...(editDecision.narration ?? [])];
+          const n = narr[drag.sourceIdx];
+          if (!n) break;
+          narr[drag.sourceIdx] = { ...n, track: toTrack, timeline_offset: timelineOffset };
+          onEditDecisionChange({ ...editDecision, narration: narr });
+          break;
         }
-        let targetArrayIdx = newClips.length;
-        if (insertAt < v1Clips.length) {
-          targetArrayIdx = newClips.indexOf(v1Clips[insertAt]);
+        case 'music': {
+          if (!editDecision.music) break;
+          // Music uses `start` for its timeline position (no timeline_offset field).
+          const m = { ...editDecision.music, track: toTrack, start: timelineOffset };
+          onEditDecisionChange({ ...editDecision, music: m });
+          break;
         }
-        newClips.splice(targetArrayIdx, 0, { ...moved, track: 1, timeline_offset: undefined });
-        onEditDecisionChange({ ...editDecision, clips: newClips });
-
-      } else {
-        // Moving to V2+ (free placement) — set timeline_offset and track
-        // If coming from V1, compute the absolute position the clip was at
-        let tlOffset = timelineOffset;
-        newClips[clipIdx] = { ...clip, track: toTrack, timeline_offset: tlOffset };
-        onEditDecisionChange({ ...editDecision, clips: newClips });
       }
+    } else if (drag.mode === 'retrim-left' || drag.mode === 'retrim-right') {
+      // Retrim has been live-previewing via livePreview. Commit the final
+      // state once so the server persists it and the undo stack records it.
+      // editDecision already reflects all the preview mutations.
+      onEditDecisionChange(editDecision);
     }
-    // Retrim is already committed via live updates in pointer move
 
     dragRef.current = null;
     setDragVisual(null);
@@ -948,7 +1129,6 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
 
   const timelineName = editDecision.timeline?.name || 'Untitled Timeline';
   const fps = editDecision.timeline?.fps || 24;
-  const trackCount = tracks.length;
   const clipCount = editDecision.clips.length;
   const hasNarration = (editDecision.narration?.length ?? 0) > 0;
   const hasMusic = !!editDecision.music;
@@ -1213,7 +1393,6 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
 
             {/* Track lanes */}
             {tracks.map((track, trackIdx) => {
-              const isVideoTrack = track.type === 'video';
               return (
                 <div
                   key={track.id}
@@ -1244,13 +1423,10 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
                         itemIdx={itemIdx}
                         left={left}
                         width={width}
-                        pxPerSec={pxPerSec}
                         isHovered={isHovered}
                         isSelected={selectedClipId === item.id}
                         isCropping={cropStatuses?.[item.id]?.status === 'running'}
                         isDragging={isBeingDragged}
-                        isDropTarget={false}
-                        isVideoTrack={isVideoTrack}
                         onHover={handleHover}
                         onMove={handleMove}
                         onLeave={handleLeave}
@@ -1260,11 +1436,15 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
                     );
                   })}
 
-                  {/* Drop indicator — highlight target track */}
-                  {dragVisual?.mode === 'move' && isVideoTrack && (() => {
-                    const trackNum = parseInt(track.id.replace('V', ''), 10) || 1;
-                    if (trackNum !== dragVisual.targetTrackNum) return null;
-                    // Show a vertical line at drop position
+                  {/* Drop indicator — highlight target track, any family */}
+                  {dragVisual?.mode === 'move' && (() => {
+                    // Only render the indicator on tracks in the same family
+                    // as the item being dragged. The drag state carries its
+                    // source family; we compare track.family to that.
+                    const drag = dragRef.current;
+                    if (!drag) return null;
+                    if (track.family !== drag.sourceFamily) return null;
+                    if (track.trackNum !== dragVisual.targetTrackNum) return null;
                     const indicatorX = dragVisual.ghostLeft;
                     return (
                       <div

@@ -7,6 +7,7 @@ this module only handles XML structure and rational-fraction time math.
 from __future__ import annotations
 
 import logging
+import subprocess
 from fractions import Fraction
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -32,13 +33,66 @@ from src.pipelines.v2.schemas import (
 logger = logging.getLogger(__name__)
 
 
+def _resolve_audio_path(file_path: str, workspace_root: Optional[Path]) -> str:
+    """Resolve a bare narration/music filename against the workspace layout.
+
+    Returns an absolute path if a match is found in ``{workspace}/narration/``,
+    ``{workspace}/music/``, or ``{workspace}/``. Otherwise returns the input
+    unchanged — the compiler's downstream ``file:///media/<name>`` fallback will
+    fire and Resolve will simply show the clip as offline instead of choking on
+    malformed XML.
+    """
+    p = Path(file_path)
+    if p.is_absolute() and p.exists():
+        return str(p)
+    if workspace_root is None:
+        return file_path
+    name = p.name
+    for subdir in ("narration", "music", ""):
+        candidate = workspace_root / subdir / name if subdir else workspace_root / name
+        if candidate.exists():
+            return str(candidate.resolve())
+    return file_path
+
+
+def _probe_audio_duration(path: str) -> Optional[float]:
+    """Return the audio duration in seconds using ffprobe, or None on failure.
+
+    Replaces the old ``+10.0`` safety pad that made FCP show "media unavailable"
+    warnings because the declared asset duration didn't match the real file.
+    """
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-show_entries", "format=duration",
+                "-of", "csv=p=0",
+                str(path),
+            ],
+            capture_output=True, text=True, timeout=5,
+        )
+        s = out.stdout.strip()
+        return float(s) if s else None
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
+def compile_edit_decision(
+    edit: EditDecision,
+    output_path: str,
+    workspace_root: Optional[Path] = None,
+) -> str:
     """
     Compile an EditDecision to FCPXML 1.10 and write to disk.
+
+    ``workspace_root`` is used to resolve bare narration/music filenames
+    (e.g. ``"narration.mp3"``) against ``{workspace}/narration/`` and
+    ``{workspace}/music/``. When omitted, bare filenames fall back to
+    ``file:///media/<name>`` and Resolve will show them as offline.
 
     Returns the output_path on success.
     """
@@ -79,22 +133,38 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
         _add_video_asset(resources, aid, key, max_end, name, fps)
 
     # --- Register narration assets ---
+    # Prefer the actual file duration (via ffprobe) over the +10s safety pad
+    # so FCP doesn't flag the asset duration as mismatched.
     narration_asset_map: Dict[str, str] = {}
     for seg in edit.narration:
         if seg.file not in narration_asset_map:
             aid = f"r{asset_counter}"
             asset_counter += 1
             narration_asset_map[seg.file] = aid
-            est_dur = seg.start + seg.duration + 10.0  # safe overestimate
-            _add_audio_asset(resources, aid, seg.file, est_dur)
+            # Collect the max (start+duration) across all segments of this file
+            max_end_for_file = max(
+                (s.start + s.duration)
+                for s in edit.narration
+                if s.file == seg.file
+            )
+            resolved_nar = _resolve_audio_path(seg.file, workspace_root)
+            probed = _probe_audio_duration(resolved_nar)
+            est_dur = probed if probed is not None else (max_end_for_file + 2.0)
+            _add_audio_asset(resources, aid, resolved_nar, est_dur)
 
     # --- Register music asset ---
     music_aid: Optional[str] = None
     if edit.music and edit.music.file:
         music_aid = f"r{asset_counter}"
         asset_counter += 1
-        est_dur = edit.music.start + (edit.music.duration or 600.0) + 10.0
-        _add_audio_asset(resources, music_aid, edit.music.file, est_dur, channels=2)
+        resolved_mus = _resolve_audio_path(edit.music.file, workspace_root)
+        probed = _probe_audio_duration(resolved_mus)
+        est_dur = (
+            probed
+            if probed is not None
+            else edit.music.start + (edit.music.duration or 600.0) + 10.0
+        )
+        _add_audio_asset(resources, music_aid, resolved_mus, est_dur, channels=2)
 
     # --- Register title effect ---
     title_effect_id: Optional[str] = None
@@ -159,7 +229,10 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
 
         # Check for multi-shot transforms (per-shot crop positions)
         if clip.shot_transforms and len(clip.shot_transforms) > 1:
-            # Emit N consecutive asset-clips, one per shot, each with its own transform
+            # Emit N consecutive asset-clips, one per shot, each with its own transform.
+            # Track the actual start frame so the parent range matches what we emitted
+            # (quantization of individual shots may differ from the aggregate duration).
+            parent_start_frame = timeline_frames
             for si, shot in enumerate(clip.shot_transforms):
                 shot_src_dur = shot.source_end - shot.source_start
                 if shot_src_dur <= 0:
@@ -185,7 +258,7 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
                 )
 
                 if clip.speed and clip.speed.rate != 1.0:
-                    _add_speed_remap(shot_el, shot_src_dur, shot_tl_dur, fps_frac, clip.speed.rate)
+                    _add_speed_remap(shot_el, shot_src_dur, shot_tl_dur, fps_frac, clip.speed.rate, shot.source_start)
 
                 t = shot.transform
                 SubElement(
@@ -200,7 +273,8 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
 
                 timeline_frames += shot_tl_frames
 
-            clip_timeline_ranges.append((timeline_frames - tl_frames, timeline_frames))
+            # Range covers everything we actually emitted for this parent clip
+            clip_timeline_ranges.append((parent_start_frame, timeline_frames))
         else:
             # Single shot — emit one asset-clip (original behavior)
             offset = Fraction(timeline_frames, 1) / fps_frac
@@ -219,7 +293,7 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
 
             # Speed remap via timeMap
             if clip.speed and clip.speed.rate != 1.0:
-                _add_speed_remap(clip_el, src_dur_sec, tl_dur, fps_frac, clip.speed.rate)
+                _add_speed_remap(clip_el, src_dur_sec, tl_dur, fps_frac, clip.speed.rate, clip.source_start)
 
             # Transform (crop/reframe)
             if clip.transform:
@@ -311,7 +385,7 @@ def compile_edit_decision(edit: EditDecision, output_path: str) -> str:
             )
 
             if clip.speed and clip.speed.rate != 1.0:
-                _add_speed_remap(conn_el, src_dur_sec, tl_dur, fps_frac, clip.speed.rate)
+                _add_speed_remap(conn_el, src_dur_sec, tl_dur, fps_frac, clip.speed.rate, clip.source_start)
 
             if clip.transform:
                 t = clip.transform
@@ -487,7 +561,10 @@ def _add_video_asset(
     fps: float,
 ) -> None:
     duration_frac = _fraction_from_seconds(max_end + 10.0, fps_hint=fps)
-    uri = _file_uri(src_path) if "/" in src_path else f"file:///media/{name}"
+    # Use Path.is_absolute() so we handle Windows paths (C:\foo\bar) as well as
+    # POSIX ones. Bare filenames fall back to ``file:///media/<name>`` which FCP
+    # will show as offline but never as malformed XML.
+    uri = _file_uri(src_path) if Path(src_path).is_absolute() else f"file:///media/{name}"
     asset = SubElement(
         resources, "asset",
         id=asset_id,
@@ -512,7 +589,11 @@ def _add_audio_asset(
     channels: int = 1,
 ) -> None:
     duration_frac = _fraction_from_seconds(duration_seconds)
-    uri = _file_uri(src_path) if "/" in src_path else f"file:///media/{Path(src_path).name}"
+    uri = (
+        _file_uri(src_path)
+        if Path(src_path).is_absolute()
+        else f"file:///media/{Path(src_path).name}"
+    )
     asset = SubElement(
         resources, "asset",
         id=asset_id,
@@ -555,11 +636,25 @@ def _add_speed_remap(
     tl_dur: Fraction,
     fps_frac: Fraction,
     rate: float,
+    source_start_sec: float = 0.0,
 ) -> None:
-    """Add a <timeMap> for constant speed changes."""
+    """Add a <timeMap> for constant speed changes.
+
+    ``source_start_sec`` is the clip's in-point inside the source media. The
+    timeMap maps timeline-time → source-time, so when the clip starts mid-way
+    through a source file we must seed the first keyframe at that offset.
+    Passing 0 means "start at the beginning of the source", which is wrong
+    whenever ``source_start`` != 0 (produces silent seeks to the wrong frame).
+    """
     time_map = SubElement(clip_el, "timeMap")
-    SubElement(time_map, "timept", time="0s", value="0s", interp="smooth2")
-    src_end = _fraction_from_seconds(src_dur_sec)
+    src_start = _fraction_from_seconds(source_start_sec)
+    SubElement(
+        time_map, "timept",
+        time="0s",
+        value=_format_fraction_seconds(src_start),
+        interp="smooth2",
+    )
+    src_end = src_start + _fraction_from_seconds(src_dur_sec)
     SubElement(
         time_map, "timept",
         time=_format_fraction_seconds(tl_dur),

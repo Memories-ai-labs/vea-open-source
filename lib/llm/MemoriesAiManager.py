@@ -6,6 +6,7 @@ which handles video upload, indexing, search, and chat capabilities.
 """
 
 import asyncio
+import logging
 import aiohttp
 import json
 import os
@@ -14,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from lib.utils.metrics_collector import metrics_collector
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -109,17 +112,41 @@ class MemoriesAiManager:
         host: Optional[str] = None,
         params: Optional[Dict] = None,
     ) -> Dict:
-        """Make an API request."""
+        """Make an API request and surface HTTP-level errors.
+
+        Previously this swallowed non-2xx responses by returning the parsed
+        body; callers then had to know to check ``result.get("success")``,
+        and HTTP 429 / 500 would silently look like a successful "failure".
+        We now raise an explicit ``RuntimeError`` on transport errors so
+        retry logic (e.g. wait_for_ready) can back off correctly.
+        """
         session = await self._get_session()
         url = f"{host or self.API_HOST}{endpoint}"
 
         async with session.request(method, url, json=data, params=params) as response:
-            result = await response.json()
+            if response.status >= 500:
+                body = (await response.text())[:500]
+                raise RuntimeError(
+                    f"[MEMORIES] {method} {endpoint} returned HTTP {response.status}: {body}"
+                )
+            if response.status == 429:
+                body = (await response.text())[:500]
+                raise RuntimeError(
+                    f"[MEMORIES] Rate limited ({response.status}) on {endpoint}: {body}"
+                )
+            try:
+                result = await response.json()
+            except Exception:
+                body = (await response.text())[:500]
+                raise RuntimeError(
+                    f"[MEMORIES] {method} {endpoint} returned non-JSON "
+                    f"(HTTP {response.status}): {body}"
+                )
 
             if self.debug:
-                print(f"[MEMORIES DEBUG] {method} {endpoint}")
-                print(f"[MEMORIES DEBUG] Request: {json.dumps(data, indent=2)}")
-                print(f"[MEMORIES DEBUG] Response: {json.dumps(result, indent=2)}")
+                logger.debug(f"[MEMORIES] {method} {endpoint}")
+                logger.debug(f"[MEMORIES]   request: {json.dumps(data)[:500]}")
+                logger.debug(f"[MEMORIES]   response: {json.dumps(result)[:500]}")
 
             return result
 

@@ -34,6 +34,7 @@ _EDIT_DECISION_SCHEMA = (
     '    "duration": number,           // (start + duration) MUST equal a word end from the words array\n'
     '    "gain_db": number,            // offset from -16 LUFS target (default 0)\n'
     '    "measured_loudness_lufs": number,  // READ-ONLY\n'
+    '    "track": int,                 // audio lane for UI display (default 1 = A1). Renderer ignores this.\n'
     '  }],\n'
     '  "music": {\n'
     '    "file": str,                  // usually "track.mp3"\n'
@@ -41,6 +42,7 @@ _EDIT_DECISION_SCHEMA = (
     '    "duration": number,           // 0 = use full timeline length\n'
     '    "gain_db": number,            // offset from -18 LUFS target (default 0 — do NOT write -18!)\n'
     '    "measured_loudness_lufs": number,  // READ-ONLY\n'
+    '    "track": int,                 // audio lane for UI display (default 2 = A2). Renderer ignores this.\n'
     '  },\n'
     '  "titles": [{\n'
     '    "text": str,\n'
@@ -144,7 +146,13 @@ TOOL_DECLARATIONS = Tool(
                 "Call this whenever the plan is ready or you want to update an existing edit. "
                 "The system compiles deterministically to valid FCPXML 1.10, validates clip "
                 "source ranges against actual file durations, runs beat sync if music is "
-                "present, and auto-renders both a 480p draft and a native-resolution final."
+                "present, and auto-renders both a 480p draft and a native-resolution final.\n\n"
+                "The edit_decision_json you submit IS the edit — it overwrites edit_decision.json "
+                "and drives the render. Anything you want changed (narration timing, clip order, "
+                "gains) must already be in this JSON. Describing changes in a later message does "
+                "not alter the edit; only another generate_fcpxml call does. Before submitting, "
+                "cross-check: does narration coverage reach the last clip? Are ducking gains set "
+                "for every clip under narration? If not, fix the JSON first."
             ),
             parameters={
                 "type": "object",
@@ -205,11 +213,25 @@ TOOL_DECLARATIONS = Tool(
             name="generate_narration",
             description=(
                 "Generate narration voiceover audio from a script. Produces narration.mp3 in the "
-                "workspace. Returns: file path, duration, a per-sentence `transcript` array, and "
+                "workspace. Returns: file path, duration_seconds (the HARD CEILING on how far "
+                "narration can reach on the timeline), a per-sentence `transcript` array, and "
                 "a per-word `words` array — both with REAL timestamps from ElevenLabs character "
                 "alignment. When splitting narration around dialogue clips, segment start/end "
                 "MUST equal word boundaries from the `words` array or speech will be cut mid-word. "
-                "Only call this when the user has explicitly requested narration."
+                "\n\n"
+                "CALL AGAIN to regenerate. Calling this a second time OVERWRITES narration.mp3 "
+                "and returns a fresh `words` array. The previous audio and its word grid are "
+                "discarded — any old narration segments referencing the old `words` array become "
+                "invalid and must be rewritten from the new `words` array. Regenerate whenever:\n"
+                "  - the edit's total duration grew past the previous narration's duration_seconds\n"
+                "  - the user asked to rewrite, extend, or change the tone of the voiceover\n"
+                "  - a different script would match the visuals better\n"
+                "\n"
+                "Pick the script length deliberately: ~140 words/minute means a 2-minute edit "
+                "needs ~280 words. Err slightly long — trimming segments at word boundaries is "
+                "easy, but you CANNOT stretch audio that doesn't exist.\n"
+                "\n"
+                "Only call when the user has requested narration."
             ),
             parameters={
                 "type": "object",
@@ -218,8 +240,9 @@ TOOL_DECLARATIONS = Tool(
                         "type": "string",
                         "description": (
                             "The full narration script to convert to speech. Write it as natural "
-                            "spoken text — no stage directions, no shot labels. Pace at ~140 words/minute. "
-                            "Use '...' for pauses between sections."
+                            "spoken text — no stage directions, no shot labels. Pace at ~140 "
+                            "words/minute (target length = timeline_seconds * 140 / 60 words, "
+                            "plus a little slack). Use '...' for pauses between sections."
                         ),
                     },
                 },

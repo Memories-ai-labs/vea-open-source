@@ -23,6 +23,21 @@ export function listProjects(): Promise<{ projects: ProjectSummary[] }> {
   return req('/projects');
 }
 
+export interface ModelChoice { id: string; name: string; hint: string }
+export interface SystemInfo {
+  main_llm: string;
+  video_llm: string;
+  available_main_models: ModelChoice[];
+}
+
+export function getSystemInfo(): Promise<SystemInfo> {
+  return req('/system/info');
+}
+
+export function setMainModel(model: string): Promise<{ status: string; main_llm: string }> {
+  return req('/system/model', 'POST', { model });
+}
+
 export function clearGists(projectName: string): Promise<{ status: string }> {
   return req(`/projects/${encodeURIComponent(projectName)}/clear/gists`, 'POST');
 }

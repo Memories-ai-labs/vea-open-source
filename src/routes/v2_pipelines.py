@@ -34,6 +34,26 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _workspace(project_name: str) -> WorkspaceManager:
+    """Construct a WorkspaceManager, converting ValueError into HTTP 400."""
+    try:
+        return WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _safe_child(directory: Path, name: str) -> Path:
+    """Resolve ``directory / name`` and verify the result is inside ``directory``.
+
+    Rejects path traversal via ``..`` or absolute paths in ``name``.
+    """
+    candidate = (directory / name).resolve()
+    root = directory.resolve()
+    if candidate != root and root not in candidate.parents:
+        raise HTTPException(status_code=400, detail=f"Invalid path: {name!r}")
+    return candidate
+
+
 @router.post(f"{_config.V2_API_PREFIX}/index", response_model=V2IndexResponse)
 async def v2_index(request: V2IndexRequest):
     """
@@ -45,7 +65,7 @@ async def v2_index(request: V2IndexRequest):
     footage/ subdirectory (data/workspaces/{project_name}/footage/).
     """
     try:
-        workspace = WorkspaceManager(request.project_name, _config.WORKSPACES_DIR)
+        workspace = _workspace(request.project_name)
 
         # Auto-detect source_dir from workspace footage/ when not explicitly provided
         source_dir = request.source_dir
@@ -109,7 +129,7 @@ async def v2_plan(request: V2PlanRequest):
         return {"status": "already_running", "project_name": project_name}
 
     # Load workspace -- must have been indexed first
-    workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found. Run /v2/index first.")
 
@@ -215,7 +235,7 @@ async def v2_plan_inject(project_name: str, prompt: str):
 @router.get(f"{_config.V2_API_PREFIX}/plan/status")
 async def v2_plan_status(project_name: str):
     """Get current planning status for a project."""
-    workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
     session = workspace.load_session()
@@ -248,7 +268,7 @@ async def v2_generate_fcpxml(request: V2GenerateFcpxmlRequest):
         raise HTTPException(status_code=500, detail="Gemini not configured.")
 
     project_name = request.project_name
-    workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
 
@@ -310,7 +330,7 @@ async def v2_narration(request: V2NarrationRequest):
     if not services.gemini_manager:
         raise HTTPException(status_code=500, detail="Gemini not configured.")
 
-    workspace = WorkspaceManager(request.project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(request.project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{request.project_name}' not found.")
 
@@ -338,7 +358,7 @@ async def v2_music(request: V2MusicRequest):
     if not services.gemini_manager:
         raise HTTPException(status_code=500, detail="Gemini not configured.")
 
-    workspace = WorkspaceManager(request.project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(request.project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{request.project_name}' not found.")
 
@@ -370,7 +390,7 @@ async def v2_crop(request: V2CropRequest):
     Runs ViNet saliency detection and injects <adjust-transform> elements.
     Returns path to new FCPXML version with transforms applied.
     """
-    workspace = WorkspaceManager(request.project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(request.project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{request.project_name}' not found.")
 
@@ -401,7 +421,7 @@ async def v2_render(request: V2RenderRequest):
 
     quality: "preview" (H.264 MP4) or "final" (ProRes 422 QuickTime)
     """
-    workspace = WorkspaceManager(request.project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(request.project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{request.project_name}' not found.")
 
@@ -455,10 +475,10 @@ async def v2_render(request: V2RenderRequest):
 async def v2_serve_render(project_name: str, filename: str):
     """Serve a rendered video file from the workspace."""
     from fastapi.responses import FileResponse
-    workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
-    render_path = workspace.root / "renders" / filename
+    render_path = _safe_child(workspace.root / "renders", filename)
     if not render_path.exists():
         raise HTTPException(status_code=404, detail=f"Render '{filename}' not found.")
     return FileResponse(str(render_path), media_type="video/mp4")
@@ -468,10 +488,10 @@ async def v2_serve_render(project_name: str, filename: str):
 async def v2_serve_footage(project_name: str, filename: str):
     """Serve a source footage file from the workspace (supports range requests for <video> seeking)."""
     from fastapi.responses import FileResponse
-    workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
-    video_path = workspace.root / "footage" / filename
+    video_path = _safe_child(workspace.root / "footage", filename)
     if not video_path.exists():
         raise HTTPException(status_code=404, detail=f"Footage '{filename}' not found.")
     # Determine media type from extension
@@ -485,15 +505,15 @@ async def v2_serve_footage(project_name: str, filename: str):
 async def v2_serve_footage_thumbnail(project_name: str, filename: str):
     """Generate and serve a JPEG thumbnail for a footage file."""
     from fastapi.responses import FileResponse
-    workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
-    video_path = workspace.root / "footage" / filename
+    video_path = _safe_child(workspace.root / "footage", filename)
     if not video_path.exists():
         raise HTTPException(status_code=404, detail=f"Footage '{filename}' not found.")
     thumb_dir = workspace.root / "thumbnails"
     thumb_dir.mkdir(parents=True, exist_ok=True)
-    thumb_path = thumb_dir / f"{filename}.jpg"
+    thumb_path = _safe_child(thumb_dir, f"{filename}.jpg")
     if not thumb_path.exists():
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg", "-y", "-loglevel", "error",
@@ -513,7 +533,7 @@ async def v2_serve_footage_thumbnail(project_name: str, filename: str):
 @router.get(f"{_config.V2_API_PREFIX}/projects/{{project_name}}/preview/frame")
 async def get_preview_frame(project_name: str, t: float = 0.0):
     """Extract a single frame at a timeline position for scrub preview."""
-    workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
+    workspace = _workspace(project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
 

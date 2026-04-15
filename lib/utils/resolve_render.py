@@ -230,14 +230,27 @@ class ResolveRenderer:
                         if progress_callback:
                             await progress_callback(pct)
 
-                        # Check if stalled (0% for too long usually means offline media)
+                        # Stall detection — two cases:
+                        #  (a) stuck at 0% → offline media / broken FCPXML
+                        #  (b) stuck at any non-zero pct for much longer → codec
+                        #      init hang, frozen effect cache, etc.
                         stall_duration = time.monotonic() - last_progress_time
-                        if stall_duration > STALL_TIMEOUT and pct == 0:
+                        if pct == 0 and stall_duration > STALL_TIMEOUT:
                             logger.error(f"[RESOLVE] Render stalled at 0% for {stall_duration:.0f}s — likely offline media")
                             project.StopRendering()
                             raise RuntimeError(
                                 f"Render stalled at 0% for {stall_duration:.0f}s. "
                                 "Check that source media files exist and are accessible."
+                            )
+                        if pct > 0 and stall_duration > STALL_TIMEOUT * 2:
+                            logger.error(
+                                f"[RESOLVE] Render stalled at {pct:.0f}% for "
+                                f"{stall_duration:.0f}s — aborting."
+                            )
+                            project.StopRendering()
+                            raise RuntimeError(
+                                f"Render stalled at {pct:.0f}% for {stall_duration:.0f}s. "
+                                "Likely codec or effect issue — try a different preset."
                             )
                 except Exception as e:
                     if "timed out" in str(e) or "stalled" in str(e):

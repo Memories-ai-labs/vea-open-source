@@ -17,6 +17,7 @@ from src.pipelines.v2.agent.tool_helpers import (
     tts_sync,
     tts_with_timestamps,
 )
+from src.pipelines.v2.workspace import _atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +53,15 @@ class ToolExecutor:
         scratchpads: ScratchpadManager,
         video_nos: List[str],
         event_callback=None,
+        video_llm=None,
     ):
         self.memories = memories_manager
+        # ``gemini`` is the main text LLM (may be Claude/GPT via OpenRouter).
+        # ``video_llm`` is used for tasks that need native video input
+        # (refine_clip_timestamps, verify_preview). If omitted, falls back to
+        # ``gemini`` so older callers keep working.
         self.gemini = gemini_manager
+        self.video_llm = video_llm or gemini_manager
         self.workspace = workspace
         self.scratchpads = scratchpads
         self.video_nos = video_nos
@@ -351,6 +358,32 @@ class ToolExecutor:
             edit.clips = valid_clips
             logger.warning(f"[AGENT] generate_fcpxml: {len(validation_errors)} validation issues")
 
+        # Validate narration segment boundaries against the persisted word grid
+        # (saved by generate_narration). Prevents the LLM from picking mid-word
+        # start/end times that produce choppy playback.
+        if edit.narration:
+            words_path = self.workspace.root / "narration" / "words.json"
+            if words_path.exists():
+                try:
+                    word_grid = json.loads(words_path.read_text())
+                    starts = {round(float(w["start"]), 3) for w in word_grid}
+                    ends = {round(float(w["end"]), 3) for w in word_grid}
+                    eps = 0.05  # tolerate up to 50ms of rounding slop
+                    for seg in edit.narration:
+                        s = round(float(seg.start), 3)
+                        e = round(float(seg.start + seg.duration), 3)
+                        start_ok = any(abs(s - ws) <= eps for ws in starts)
+                        end_ok = any(abs(e - we) <= eps for we in ends)
+                        if not (start_ok and end_ok):
+                            validation_errors.append(
+                                f"⚠️ Narration segment at {seg.timeline_offset:.2f}s "
+                                f"[{s:.3f}–{e:.3f}] does not align to word boundaries. "
+                                f"Snap to a nearby word start/end from the words array to "
+                                f"avoid mid-word cuts."
+                            )
+                except Exception as e:
+                    logger.warning(f"[AGENT] Narration boundary check skipped: {e}")
+
         # Snap clips to music beats if music is present
         beat_metadata = None
         if edit.music and edit.music.file:
@@ -371,14 +404,12 @@ class ToolExecutor:
 
         # Save the EditDecision JSON for dashboard / debugging
         json_path = self.workspace.root / "fcpxml" / "edit_decision.json"
-        json_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(json_path, "w") as f:
-            json.dump(edit.model_dump(), f, indent=2)
+        _atomic_write_json(json_path, edit.model_dump())
 
         # Compile to FCPXML
         fcpxml_path = str(self.workspace.get_fcpxml_path(version=1))
         try:
-            output = compile_edit_decision(edit, fcpxml_path)
+            output = compile_edit_decision(edit, fcpxml_path, workspace_root=self.workspace.root)
         except Exception as e:
             logger.error(f"[AGENT] FCPXML compilation failed: {e}", exc_info=True)
             return {
@@ -528,7 +559,7 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
             loop = asyncio.get_event_loop()
             critique = await loop.run_in_executor(
                 None,
-                lambda: self.gemini.LLM_request(
+                lambda: self.video_llm.LLM_request(
                     prompt_contents=[Path(str(downsampled)), verification_prompt],
                     schema=None,
                     context="verify_preview",
@@ -680,8 +711,7 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
         edit.titles = [t for t in edit.titles if t.style != "subtitle"] + subtitles
 
         # Save updated edit decision
-        with open(json_path, "w") as f:
-            json.dump(edit.model_dump(), f, indent=2)
+        _atomic_write_json(json_path, edit.model_dump())
 
         # Emit updated edit decision to dashboard
         await self._emit("edit_decision", edit.model_dump())
@@ -861,6 +891,14 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
         if words:
             result["words"] = words  # full word-level timing available
             result["timestamps_source"] = "elevenlabs_alignment"
+            # Persist the word grid so generate_fcpxml can validate narration
+            # segment boundaries against real word starts/ends — prevents the
+            # LLM from inventing timestamps that cut mid-word.
+            try:
+                words_path = self.workspace.root / "narration" / "words.json"
+                _atomic_write_json(words_path, words)
+            except Exception as e:
+                logger.warning(f"[AGENT] Could not persist narration words.json: {e}")
         else:
             result["timestamps_source"] = "estimated_proportional"
         logger.info(
@@ -1125,7 +1163,7 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
             # Step 5a: Gemini reasoning pass — free-text analysis with video
             reasoning_text = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self.gemini.LLM_request(
+                lambda: self.video_llm.LLM_request(
                     prompt_contents=[downsampled_path, refinement_prompt],
                     schema=None,  # free-text reasoning
                     context="refine_clip_timestamps_reasoning",
@@ -1154,7 +1192,7 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
 
             result = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self.gemini.LLM_request(
+                lambda: self.video_llm.LLM_request(
                     prompt_contents=[structured_prompt],
                     schema=RefinedTimestamps,
                     context="refine_clip_timestamps_structured",

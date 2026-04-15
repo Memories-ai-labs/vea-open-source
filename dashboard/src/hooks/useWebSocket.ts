@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import type { PlanningEvent } from '../types';
 
-const WS_BASE = 'ws://localhost:8000/video-edit/v2/session';
+// Derive the WebSocket base from the page origin so deploys behind a proxy,
+// ngrok, or any non-localhost origin work without hard-coded URLs. Falls back
+// to localhost only in server-side render contexts.
+const WS_PROTO = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const WS_HOST = typeof window !== 'undefined' ? window.location.host : 'localhost:8000';
+const WS_BASE = `${WS_PROTO}//${WS_HOST}/video-edit/v2/session`;
 
 interface UseWebSocketResult {
   events: PlanningEvent[];

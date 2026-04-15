@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -14,6 +15,39 @@ from src.pipelines.v2.schemas import (
 logger = logging.getLogger(__name__)
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".mpg", ".mpeg", ".m4v", ".ts"}
+
+# Only allow alphanumerics, dashes, underscores, dots, and spaces in project names.
+# Reject path separators, leading dots, and control characters — prevents traversal.
+_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,127}$")
+
+
+def validate_project_name(name: str) -> str:
+    """Raise ValueError if ``name`` is unsafe as a directory name."""
+    if not isinstance(name, str) or not _PROJECT_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"Invalid project name: {name!r}. Must match {_PROJECT_NAME_RE.pattern}"
+        )
+    return name
+
+
+def _atomic_write_json(path: Path, payload: Any, *, indent: int = 2) -> None:
+    """Write ``payload`` as JSON to ``path`` atomically (temp + rename).
+
+    Prevents half-written files if the process crashes mid-dump, and prevents
+    concurrent writers from producing a corrupted file (os.replace is atomic
+    on POSIX and on Windows for files in the same directory).
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    with open(tmp, "w") as f:
+        json.dump(payload, f, indent=indent)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass  # best-effort on filesystems that don't support fsync
+    os.replace(tmp, path)
 
 
 class WorkspaceManager:
@@ -39,8 +73,15 @@ class WorkspaceManager:
     """
 
     def __init__(self, project_name: str, workspaces_dir: Path):
+        validate_project_name(project_name)
         self.project_name = project_name
-        self.root = workspaces_dir / project_name
+        workspaces_root = Path(workspaces_dir).resolve()
+        resolved_root = (workspaces_root / project_name).resolve()
+        if resolved_root != workspaces_root / project_name and (
+            workspaces_root not in resolved_root.parents
+        ):
+            raise ValueError(f"Project path escapes workspaces dir: {project_name!r}")
+        self.root = workspaces_root / project_name
 
     # -------------------------------------------------------------------------
     # Lifecycle
@@ -192,9 +233,7 @@ class WorkspaceManager:
 
     def save_session(self, session: SessionData) -> None:
         session.updated_at = datetime.now(timezone.utc).isoformat()
-        path = self.root / "session.json"
-        with open(path, "w") as f:
-            json.dump(session.to_dict(), f, indent=2)
+        _atomic_write_json(self.root / "session.json", session.to_dict())
 
     def update_status(self, status: str) -> None:
         session = self.load_session()
@@ -213,9 +252,7 @@ class WorkspaceManager:
             return Storyboard.model_validate(json.load(f))
 
     def save_storyboard(self, sb: Storyboard) -> None:
-        path = self.root / "storyboard.json"
-        with open(path, "w") as f:
-            json.dump(sb.model_dump(), f, indent=2)
+        _atomic_write_json(self.root / "storyboard.json", sb.model_dump())
 
     def load_clips(self) -> List[RetrievedClip]:
         path = self.root / "clips.json"
@@ -226,9 +263,9 @@ class WorkspaceManager:
         return [RetrievedClip.model_validate(c) for c in data]
 
     def save_clips(self, clips: List[RetrievedClip]) -> None:
-        path = self.root / "clips.json"
-        with open(path, "w") as f:
-            json.dump([c.model_dump() for c in clips], f, indent=2)
+        _atomic_write_json(
+            self.root / "clips.json", [c.model_dump() for c in clips]
+        )
 
     def load_context(self) -> str:
         path = self.root / "context.md"
@@ -245,10 +282,13 @@ class WorkspaceManager:
         self, iteration: int, tool_plan: ToolCallPlan, storyboard: Storyboard
     ) -> None:
         idir = self.root / "iterations"
-        with open(idir / f"iter_{iteration}_tool_plan.json", "w") as f:
-            json.dump(tool_plan.model_dump(), f, indent=2)
-        with open(idir / f"iter_{iteration}_storyboard.json", "w") as f:
-            json.dump(storyboard.model_dump(), f, indent=2)
+        idir.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(
+            idir / f"iter_{iteration}_tool_plan.json", tool_plan.model_dump()
+        )
+        _atomic_write_json(
+            idir / f"iter_{iteration}_storyboard.json", storyboard.model_dump()
+        )
 
     # -------------------------------------------------------------------------
     # Media
