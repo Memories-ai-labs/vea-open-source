@@ -140,6 +140,11 @@ class AgentSession:
         # otherwise create_task() returns a task that nobody holds a reference
         # to, and Python's GC can kill it mid-run (see RUF006 / PYI053).
         self._bg_tasks: "set[asyncio.Task]" = set()
+        # Warnings from background work (draft render, Resolve render, etc.)
+        # that complete AFTER a finish_turn. Prepended to the next
+        # handle_user_message so the main LLM sees them and relays to the
+        # user instead of the failure being silently swallowed.
+        self._pending_background_warnings: list = []
 
         # Scratchpads
         self.scratchpads = ScratchpadManager(workspace.root)
@@ -218,9 +223,26 @@ class AgentSession:
             # Emit user message event
             await self._emit("user_message", {"text": text, "timestamp": timestamp})
 
+            # If background work (renders, etc.) failed after the last turn,
+            # prepend a NOT-FROM-USER system notice so the LLM relays it to
+            # the user instead of the failure being silently swallowed.
+            effective_text = text
+            if self._pending_background_warnings:
+                notice_lines = "\n".join(
+                    f"- {w}" for w in self._pending_background_warnings
+                )
+                effective_text = (
+                    "[Background events since last turn — relay any relevant "
+                    "ones to the user in your response]\n"
+                    f"{notice_lines}\n\n"
+                    f"---\n\nUser message: {text}"
+                )
+                self._pending_background_warnings = []
+
             # Add to history
-            user_content = Content(role="user", parts=[Part(text=text)])
+            user_content = Content(role="user", parts=[Part(text=effective_text)])
             self._history.append(user_content)
+            # Chat log stores the user's actual words, not the synthetic prefix.
             self._chat_log.append(ChatMessage(role="user", text=text, timestamp=timestamp))
 
             # Run the agent loop
@@ -558,6 +580,13 @@ class AgentSession:
         except Exception as e:
             logger.warning(f"[AGENT] FFmpeg draft render failed (non-fatal): {e}")
             self._draft_render_state = {"status": "error", "error": str(e)}
+            raw = str(e)
+            brief = raw if len(raw) < 240 else raw[:240] + "…"
+            self._pending_background_warnings.append(
+                f"FFmpeg draft render FAILED after the last generate_fcpxml "
+                f"call — there is no draft.mp4 for the user to preview. "
+                f"Underlying error: {brief}"
+            )
             try:
                 await self._emit("render_error", {
                     "renderer": "ffmpeg",
@@ -664,6 +693,24 @@ class AgentSession:
         except Exception as e:
             logger.warning(f"[AGENT] Auto-render failed (non-fatal): {e}")
             self._render_state = {"status": "error", "error": str(e)}
+            raw = str(e)
+            brief = raw if len(raw) < 240 else raw[:240] + "…"
+            # Resolve is optional; don't alarm the user if it's simply not
+            # installed. Only surface real failures (import ok, render ran, Resolve
+            # refused the file). The common "Resolve not running / not installed"
+            # case raises an ImportError or connection error with a known shape.
+            lower = raw.lower()
+            is_resolve_missing = (
+                "davinci" in lower or "resolve" in lower
+            ) and (
+                "not running" in lower or "not found" in lower
+                or "connection" in lower or "no module" in lower
+            )
+            if not is_resolve_missing:
+                self._pending_background_warnings.append(
+                    f"DaVinci Resolve final-render FAILED — only the FFmpeg "
+                    f"draft is available. Underlying error: {brief}"
+                )
             try:
                 await self._emit("render_error", {
                     "renderer": "resolve",

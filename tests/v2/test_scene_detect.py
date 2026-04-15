@@ -24,46 +24,58 @@ def _fake_scene(sec_start: float) -> tuple:
 
 class TestDetectSceneCuts:
     def test_empty_scene_list_returns_empty(self):
-        """One continuous shot → no cuts reported."""
+        """One continuous shot → no cuts reported and no error."""
         with patch("scenedetect.detect", return_value=[]):
-            assert _detect_scene_cuts("/path/to/video.mp4", 10.0, 20.0) == []
+            cuts, error = _detect_scene_cuts("/path/to/video.mp4", 10.0, 20.0)
+        assert cuts == []
+        assert error is None
 
     def test_single_scene_has_no_cuts(self):
         """A single scene spanning the whole window is not a cut."""
         with patch("scenedetect.detect", return_value=[_fake_scene(10.0)]):
-            assert _detect_scene_cuts("/path/to/video.mp4", 10.0, 20.0) == []
+            cuts, error = _detect_scene_cuts("/path/to/video.mp4", 10.0, 20.0)
+        assert cuts == []
+        assert error is None
 
     def test_multiple_scenes_return_boundaries_relative_to_window(self):
         # Scenes starting at abs 10.0, 13.42, 17.80. Window starts at 10.0.
         # Expected relative cuts: 3.42, 7.80 (first scene start excluded).
         scenes = [_fake_scene(10.0), _fake_scene(13.42), _fake_scene(17.80)]
         with patch("scenedetect.detect", return_value=scenes):
-            cuts = _detect_scene_cuts("/path/video.mp4", 10.0, 20.0)
+            cuts, error = _detect_scene_cuts("/path/video.mp4", 10.0, 20.0)
         assert cuts == [3.42, 7.80]
+        assert error is None
 
     def test_near_zero_cuts_are_discarded(self):
         # If detection reports a boundary within 0.05s of window start,
         # the helper drops it — this is the noise-floor filter.
         scenes = [_fake_scene(10.0), _fake_scene(10.02)]
         with patch("scenedetect.detect", return_value=scenes):
-            assert _detect_scene_cuts("/path/video.mp4", 10.0, 20.0) == []
+            cuts, error = _detect_scene_cuts("/path/video.mp4", 10.0, 20.0)
+        assert cuts == []
+        assert error is None
 
     def test_rounding_to_two_decimal_places(self):
         scenes = [_fake_scene(10.0), _fake_scene(13.4567)]
         with patch("scenedetect.detect", return_value=scenes):
-            cuts = _detect_scene_cuts("/path/video.mp4", 10.0, 20.0)
+            cuts, error = _detect_scene_cuts("/path/video.mp4", 10.0, 20.0)
         assert cuts == [3.46]
+        assert error is None
 
-    def test_failed_detection_returns_empty_not_raise(self):
-        # PySceneDetect raises on an invalid path; the helper must swallow
-        # and return [] so refine doesn't crash on the edge case.
+    def test_failed_detection_returns_error_string(self):
+        # PySceneDetect raises on an invalid path; the helper returns
+        # ([], "...") so refine_clip_timestamps can surface the failure
+        # as a warning to the main LLM.
         with patch("scenedetect.detect", side_effect=RuntimeError("bad file")):
-            assert _detect_scene_cuts("/nope.mp4", 0.0, 5.0) == []
+            cuts, error = _detect_scene_cuts("/nope.mp4", 0.0, 5.0)
+        assert cuts == []
+        assert error is not None
+        assert "bad file" in error
 
-    def test_import_failure_returns_empty(self):
+    def test_import_failure_returns_error_string(self):
         # If scenedetect isn't importable (dev env without it installed),
-        # the helper degrades gracefully.
+        # the helper degrades gracefully AND surfaces the error.
         with patch.dict("sys.modules", {"scenedetect": None}):
-            # Force a fresh import attempt to hit the ImportError branch
-            result = _detect_scene_cuts("/any.mp4", 0.0, 5.0)
-            assert result == []
+            cuts, error = _detect_scene_cuts("/any.mp4", 0.0, 5.0)
+        assert cuts == []
+        assert error is not None

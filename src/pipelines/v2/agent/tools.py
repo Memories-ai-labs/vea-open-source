@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.pipelines.v2.agent.scratchpad import ScratchpadManager
 from src.pipelines.v2.agent.tool_definitions import TOOL_DECLARATIONS  # noqa: F401 — re-exported
@@ -35,13 +35,17 @@ def _refine_debug_log(workspace, entry: dict):
         logger.warning(f"[AGENT] Failed to write refine debug log: {e}")
 
 
-def _detect_scene_cuts(video_path: str, start_sec: float, end_sec: float) -> List[float]:
+def _detect_scene_cuts(
+    video_path: str, start_sec: float, end_sec: float,
+) -> Tuple[List[float], Optional[str]]:
     """Detect shot boundaries in the ``[start_sec, end_sec]`` window of ``video_path``.
 
-    Returns a list of cut timestamps in seconds, **relative to start_sec**. A "cut"
-    is the start of the 2nd+ detected scene. An empty list means the window is one
-    continuous shot (or detection failed). Uses PySceneDetect's ContentDetector with
-    the same thresholds as ``src/pipelines/common/dynamic_cropping.py``.
+    Returns ``(cuts, error)``:
+    - ``cuts``: list of cut timestamps in seconds, **relative to start_sec**. A
+      "cut" is the start of the 2nd+ detected scene. An empty list combined with
+      ``error is None`` means the window is one continuous shot.
+    - ``error``: one-line description if detection raised, else ``None``. Callers
+      forward this to the tool result so the main LLM knows detection degraded.
 
     Called synchronously; callers should wrap in ``run_in_executor`` since
     PySceneDetect reads frames sequentially.
@@ -55,8 +59,9 @@ def _detect_scene_cuts(video_path: str, start_sec: float, end_sec: float) -> Lis
             end_time=float(end_sec),
         )
     except Exception as e:
+        msg = f"PySceneDetect failed: {e}"
         logger.warning(f"[REFINE] Scene detection failed for {video_path}: {e}")
-        return []
+        return [], msg
 
     cuts: List[float] = []
     for i, scene in enumerate(scenes):
@@ -66,7 +71,7 @@ def _detect_scene_cuts(video_path: str, start_sec: float, end_sec: float) -> Lis
         rel = scene_start.get_seconds() - start_sec
         if rel > 0.05:  # drop near-zero artifacts
             cuts.append(round(rel, 2))
-    return cuts
+    return cuts, None
 
 
 # ── Tool executor ─────────────────────────────────────────────────────────────
@@ -980,6 +985,7 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
         # returned array to something the prompt can actually fit.
         beats_list: List[float] = []
         tempo_bpm = 0.0
+        beat_warning: Optional[str] = None
         try:
             from src.pipelines.v2.music.beat_sync import detect_beats
             import numpy as np
@@ -995,6 +1001,12 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
             beats_list = [round(float(t), 3) for t in beat_times]
             logger.info(f"[MUSIC] Detected {len(beats_list)} beats at {tempo_bpm:.1f} BPM")
         except Exception as e:
+            raw = str(e)
+            brief = raw if len(raw) < 240 else raw[:240] + "…"
+            beat_warning = (
+                "librosa beat detection failed — you won't have a `beats` array "
+                f"to snap cuts to. Underlying error: {brief}"
+            )
             logger.warning(f"[MUSIC] Beat detection failed (non-fatal): {e}")
 
         result_payload: Dict[str, Any] = {
@@ -1017,6 +1029,8 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
                 f"are an editorial choice — align when it serves the edit, break "
                 f"intentionally when you want dissonance or emphasis."
             )
+        if beat_warning:
+            result_payload.setdefault("warnings", []).append(beat_warning)
         return result_payload
 
     async def _get_audio_duration(self, path: str) -> Optional[float]:
@@ -1151,6 +1165,7 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
             # Step 3: Transcribe segment audio with ElevenLabs STT (word-level timestamps)
             clip_transcript = ""
             transcript_segments = []
+            stt_warning: Optional[str] = None
             try:
                 import os as _os
                 el_key = _os.environ.get("ELEVENLABS_API_KEY", "")
@@ -1177,20 +1192,45 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
                             f"[{s['rel_start']:.2f}s–{s['rel_end']:.2f}s] {s['text']}"
                             for s in transcript_segments
                         )
+                    else:
+                        # STT ran but returned nothing — either silence (OK) or a
+                        # 401/400 that the client swallowed. Flag it softly.
+                        stt_warning = (
+                            "ElevenLabs STT returned 0 words for this clip. If the "
+                            "clip is speech-heavy, word-level cut points were not "
+                            "verifiable — dialogue boundaries may be imprecise."
+                        )
                 else:
+                    stt_warning = (
+                        "ElevenLabs API key not configured, so this clip was cut "
+                        "using only the video frames (no word-level transcript). "
+                        "Dialogue boundaries may be imprecise."
+                    )
                     logger.warning("[AGENT] ELEVENLABS_API_KEY not set — skipping STT for refinement")
             except Exception as e:
+                # Most common: quota_exceeded (401). Keep the reason short but real
+                # so the main LLM can relay it to the user.
+                raw = str(e)
+                brief = raw if len(raw) < 240 else raw[:240] + "…"
+                stt_warning = (
+                    "ElevenLabs STT failed for this clip — probably quota exceeded, "
+                    "network down, or service outage. Word-level transcript is "
+                    "missing, so dialogue-accurate cuts could not be verified. "
+                    f"Underlying error: {brief}"
+                )
                 logger.warning(f"[AGENT] Could not transcribe segment: {e}")
 
             # Step 3b: Detect scene cuts in the padded window. Runs on the original
             # source (not the downsampled file — 2 fps is too coarse for ContentDetector's
             # 12-frame minimum). Gemini uses these to avoid sloppy edits near a cut.
-            scene_cuts = await asyncio.get_event_loop().run_in_executor(
+            scene_cuts, scene_cuts_error = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: _detect_scene_cuts(str(source_path), padded_start, padded_end),
             )
             if scene_cuts:
                 logger.info(f"[AGENT] Scene cuts in padded window: {scene_cuts}")
+            if scene_cuts_error:
+                logger.warning(f"[AGENT] Scene-cut detection degraded: {scene_cuts_error}")
 
             # Step 4: Send to Gemini for analysis
             await self._emit("refine_progress", {
@@ -1380,6 +1420,19 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
                     {"text": s["text"], "start": s["start"], "end": s["end"]}
                     for s in transcript_segments
                 ]
+
+            # Collect soft failures so the main LLM can surface them to the
+            # user instead of the clip silently degrading.
+            warnings: List[str] = []
+            if stt_warning:
+                warnings.append(stt_warning)
+            if scene_cuts_error:
+                warnings.append(
+                    "PySceneDetect could not analyze this clip — scene-boundary "
+                    f"hints were unavailable. ({scene_cuts_error})"
+                )
+            if warnings:
+                result_dict["warnings"] = warnings
 
             return result_dict
 

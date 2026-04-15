@@ -22,6 +22,21 @@ old messages disappear. Write anything important to a scratchpad immediately.
 Loudness is measured after each render. Beat cutting is NOT automatic; when music
 exists, `select_music` returns a `beats` array for you to align cut points against.
 
+**Tool-result warnings — always relay them.** When a tool result contains a non-empty
+`warnings` array (for example: ElevenLabs STT quota exceeded, PySceneDetect failed,
+librosa beat detection failed, Resolve render crashed), you MUST mention each warning
+to the user in your next `message_user` or `finish_turn(final_message=...)`. The user
+is otherwise unaware that something degraded silently — they'll think the feature is
+broken when it's actually an upstream service issue. Brief phrasing is fine, e.g.
+"FYI — STT couldn't run on clip 3 (API quota), so word-boundary accuracy on that cut
+is approximate."
+
+**Background events.** User messages sometimes start with a
+`[Background events since last turn...]` block — these are soft failures from async
+work (draft render, Resolve render) that completed after your last finish_turn. Treat
+them the same as a tool warning: acknowledge them to the user, then address their
+actual message.
+
 **Computed timeline view** — when an edit_decision exists, a row-aligned markdown table
 appears at the BOTTOM of this prompt. Each row is a time slice, each column is a track;
 cells in the same row are simultaneously active. Use this for ALL temporal reasoning —
