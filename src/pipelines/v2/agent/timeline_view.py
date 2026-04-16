@@ -25,6 +25,23 @@ def _truncate(s: str, n: int) -> str:
 
 def _fmt_clip_cell(item: dict) -> str:
     """Format a clip block for a timeline table cell."""
+    kind = item.get("kind", "clip")
+    if kind == "title":
+        return (
+            f"📝 {item['id']} "
+            f"({item['tl_start']:.2f}→{item['tl_end']:.2f}, {item['duration']:.2f}s)"
+        )
+    if kind == "narration":
+        meta_bits = []
+        if item.get("audio_start") is not None:
+            meta_bits.append(f"audio:[{item['audio_start']:.2f}-{item['audio_end']:.2f}s]")
+        if item.get("gain_db") is not None:
+            meta_bits.append(f"gain={item['gain_db']:+g}")
+        if item.get("lufs") is not None:
+            meta_bits.append(f"meas={item['lufs']}LUFS")
+        extent = f"({item['tl_start']:.2f}→{item['tl_end']:.2f}, {item['duration']:.2f}s)"
+        return f"{item['id']} {extent}" + (" " + " ".join(meta_bits) if meta_bits else "")
+
     parts = [item["id"]]
     if item.get("label"):
         parts.append(_truncate(item["label"], 28))
@@ -33,8 +50,18 @@ def _fmt_clip_cell(item: dict) -> str:
         meta.append(f"gain={item['gain_db']:+g}dB")
     if item.get("lufs") is not None:
         meta.append(f"meas={item['lufs']}LUFS")
+    if item.get("speed_rate") and abs(item["speed_rate"] - 1.0) > 0.001:
+        meta.append(f"speed={item['speed_rate']:g}x")
+    if item.get("source_start") is not None and item.get("source_end") is not None:
+        meta.append(f"src=[{item['source_start']:.1f}-{item['source_end']:.1f}s]")
+    if item.get("transform_mode") and item["transform_mode"] != "fit":
+        meta.append(f"crop={item['transform_mode']}")
+    tr = item.get("transition_after") or None
+    trail = ""
+    if tr:
+        trail = f" → {tr.get('type', '?')} {tr.get('duration_seconds', 0):.2f}s"
     extent = f"({item['tl_start']:.2f}→{item['tl_end']:.2f}, {item['duration']:.2f}s)"
-    return " · ".join(parts) + " " + extent + (" " + " ".join(meta) if meta else "")
+    return " · ".join(parts) + " " + extent + (" " + " ".join(meta) if meta else "") + trail
 
 
 # ── Item extraction ────────────────────────────────────────────────────────
@@ -55,14 +82,22 @@ def _extract_items(ed: dict) -> dict:
     t = 0.0
     for c in all_clips:
         track_num = c.get("track", 1) or 1
-        speed = (c.get("speed") or {}).get("rate", 1.0) or 1.0
-        dur = (c.get("source_end", 0) - c.get("source_start", 0)) / speed
+        speed_rate = (c.get("speed") or {}).get("rate", 1.0) or 1.0
+        src_start = c.get("source_start", 0)
+        src_end = c.get("source_end", 0)
+        dur = (src_end - src_start) / speed_rate
         item = {
+            "kind": "clip",
             "id": c.get("id", "?"),
             "label": c.get("label", ""),
             "duration": dur,
             "gain_db": c.get("gain_db"),
             "lufs": c.get("measured_loudness_lufs"),
+            "source_start": src_start,
+            "source_end": src_end,
+            "speed_rate": speed_rate,
+            "transform_mode": c.get("transform_mode"),
+            "transition_after": c.get("transition_after"),
         }
         if track_num == 1:
             item["tl_start"] = t
@@ -77,16 +112,41 @@ def _extract_items(ed: dict) -> dict:
 
     total_dur = t
 
+    # Titles render on V-tracks (lane=N maps to V(N+1), matching NLETimeline.tsx
+    # and FCPXML "lane above spine" semantics). Merge them into overlay_clips
+    # so they show up in the right column alongside overlay clips.
+    for tt in titles:
+        s = tt.get("timeline_offset", 0) or 0
+        d = tt.get("duration", 0) or 0
+        lane = tt.get("lane", 1) or 1
+        v_track = max(1, lane) + 1
+        title_item = {
+            "kind": "title",
+            "id": _truncate(tt.get("text", ""), 24),
+            "label": "",
+            "tl_start": s,
+            "tl_end": s + d,
+            "duration": d,
+            "gain_db": None,
+            "lufs": None,
+        }
+        overlay_clips.setdefault(v_track, []).append(title_item)
+
     narr_items = []
     for i, n in enumerate(narrations):
         s = n.get("timeline_offset", 0)
         d = n.get("duration", 0)
+        audio_start = n.get("start", 0)
         narr_items.append({
+            "kind": "narration",
             "id": f"narr_{i+1}",
             "label": "",
             "tl_start": s,
             "tl_end": s + d,
             "duration": d,
+            "audio_start": audio_start,
+            "audio_end": audio_start + d,
+            "track": n.get("track", 1) or 1,
             "gain_db": n.get("gain_db"),
             "lufs": n.get("measured_loudness_lufs"),
         })
@@ -96,35 +156,22 @@ def _extract_items(ed: dict) -> dict:
         m_start = music.get("start", 0) or 0
         m_dur = music.get("duration", 0) or total_dur
         music_item = {
+            "kind": "music",
             "id": "music",
             "label": _truncate((music.get("file") or "").split("/")[-1], 24),
             "tl_start": m_start,
             "tl_end": m_start + m_dur,
             "duration": m_dur,
+            "track": music.get("track", 2) or 2,
             "gain_db": music.get("gain_db"),
             "lufs": music.get("measured_loudness_lufs"),
         }
-
-    title_items = []
-    for tt in titles:
-        s = tt.get("timeline_offset", 0) or 0
-        d = tt.get("duration", 0) or 0
-        title_items.append({
-            "id": _truncate(tt.get("text", ""), 20),
-            "label": "",
-            "tl_start": s,
-            "tl_end": s + d,
-            "duration": d,
-            "gain_db": None,
-            "lufs": None,
-        })
 
     return {
         "v1_clips": v1_clips,
         "overlay_clips": overlay_clips,
         "narrations": narr_items,
         "music": music_item,
-        "titles": title_items,
         "total_duration": total_dur,
     }
 
@@ -137,12 +184,11 @@ def _build_table(items: dict) -> list[str]:
     overlay_clips = items["overlay_clips"]
     narr_items = items["narrations"]
     music_item = items["music"]
-    title_items = items["titles"]
     total_dur = items["total_duration"]
 
     # Collect unique event times across all tracks
     event_times = {0.0}
-    for grp in [v1_clips, narr_items, title_items] + list(overlay_clips.values()):
+    for grp in [v1_clips, narr_items] + list(overlay_clips.values()):
         for it in grp:
             event_times.add(round(it["tl_start"], 3))
             event_times.add(round(it["tl_end"], 3))
@@ -152,23 +198,35 @@ def _build_table(items: dict) -> list[str]:
     event_times = sorted(event_times)
     rows = [(a, b) for a, b in zip(event_times[:-1], event_times[1:]) if b - a > 0.001]
 
-    # Define columns
+    # Define columns:
+    #   V1 (spine), V2+ (overlays + titles merged via lane+1),
+    #   one A-column per narration track actually used, plus music on its own track.
     columns = [("V1", v1_clips)]
     for tn in sorted(overlay_clips.keys()):
         columns.append((f"V{tn}", overlay_clips[tn]))
-    if title_items:
-        columns.append(("T1 Titles", title_items))
-    if narr_items:
-        columns.append(("A1 Narration", narr_items))
+
+    # Narration: one column per distinct `track` so cross-track segments
+    # don't silently share a lane in the view.
+    narr_by_track: dict[int, list] = {}
+    for n in narr_items:
+        narr_by_track.setdefault(n.get("track", 1) or 1, []).append(n)
+    for tn in sorted(narr_by_track.keys()):
+        columns.append((f"A{tn} Narration", narr_by_track[tn]))
+
     if music_item:
-        columns.append(("A2 Music", [music_item]))
+        mt = music_item.get("track", 2) or 2
+        columns.append((f"A{mt} Music", [music_item]))
 
     def _active_in(items_list, row_start, row_end):
+        """Return every item active in [row_start, row_end). A V-column can
+        hold multiple items at once (e.g. a title over an overlay clip), so
+        we return a list and let the caller join them.
+        """
         eps = 0.005
-        for it in items_list:
-            if it["tl_start"] < row_end - eps and it["tl_end"] > row_start + eps:
-                return it
-        return None
+        return [
+            it for it in items_list
+            if it["tl_start"] < row_end - eps and it["tl_end"] > row_start + eps
+        ]
 
     lines = []
     lines.append(f"**Total V1 duration: {total_dur:.2f}s**")
@@ -177,21 +235,23 @@ def _build_table(items: dict) -> list[str]:
     lines.append("| " + " | ".join(header) + " |")
     lines.append("|" + "|".join(["---"] * len(header)) + "|")
 
-    prev_active = [None] * len(columns)
+    prev_active_ids: list[set] = [set() for _ in columns]
     for row_start, row_end in rows:
         time_cell = f"{row_start:.2f} → {row_end:.2f}"
         cells = [time_cell]
         for i, (_, col_items) in enumerate(columns):
-            it = _active_in(col_items, row_start, row_end)
-            if it is None:
+            active = _active_in(col_items, row_start, row_end)
+            if not active:
                 cells.append("—")
             else:
-                if prev_active[i] is not None and prev_active[i]["id"] == it["id"]:
-                    # Continuation: show id only so the model knows what's still playing
-                    cells.append(f"↓ {it['id']}")
-                else:
-                    cells.append(_fmt_clip_cell(it))
-            prev_active[i] = it
+                rendered = []
+                for it in active:
+                    if it["id"] in prev_active_ids[i]:
+                        rendered.append(f"↓ {it['id']}")
+                    else:
+                        rendered.append(_fmt_clip_cell(it))
+                cells.append(" + ".join(rendered))
+            prev_active_ids[i] = {it["id"] for it in active}
         lines.append("| " + " | ".join(cells) + " |")
 
     return lines
@@ -209,11 +269,14 @@ def _detect_audio_issues(items: dict) -> list[str]:
     """
     v1_clips = items["v1_clips"]
     narr_items = items["narrations"]
-    if not narr_items:
-        return []
+    music = items.get("music")
+    total_dur = items.get("total_duration") or 0.0
+    issues: list[str] = []
 
-    issues = []
+    # ── Per-V1-clip narration coverage checks ──────────────────────────────
     for c in v1_clips:
+        if not narr_items:
+            break
         cov_sec = 0.0
         for n in narr_items:
             ov_s = max(c["tl_start"], n["tl_start"])
@@ -240,6 +303,58 @@ def _detect_audio_issues(items: dict) -> list[str]:
                 f"⚠️ Clip `{c['id']}` is muted (-96) but has only {cov_pct:.0f}% narration coverage. "
                 f"Either restore nat sound (gain_db = -6 to -12) or extend narration to cover it."
             )
+
+    # ── Narration-vs-narration overlap (same timeline, two voices at once) ─
+    if narr_items:
+        by_start = sorted(narr_items, key=lambda n: n["tl_start"])
+        for a, b in zip(by_start, by_start[1:]):
+            overlap = a["tl_end"] - b["tl_start"]
+            if overlap > 0.01:  # ignore rounding slop
+                issues.append(
+                    f"❌ **Narration segments overlap by {overlap:.2f}s** on the timeline "
+                    f"(`{a['id']}` ends at {a['tl_end']:.2f}s, `{b['id']}` starts at {b['tl_start']:.2f}s). "
+                    f"Two narrations playing simultaneously = garbled speech. Push the later "
+                    f"segment's `timeline_offset` to at least {a['tl_end']:.2f}, or shorten the "
+                    f"earlier one's `duration`."
+                )
+
+    # ── Narration extending past the spine (compiler will silently drop) ──
+    if narr_items and total_dur > 0:
+        for n in narr_items:
+            if n["tl_start"] > total_dur + 0.01:
+                issues.append(
+                    f"❌ Narration `{n['id']}` starts at {n['tl_start']:.2f}s, beyond the "
+                    f"spine end ({total_dur:.2f}s). The FCPXML compiler will DROP this segment "
+                    f"entirely. Either extend the spine, move the segment earlier, or remove it."
+                )
+            elif n["tl_end"] > total_dur + 0.5:
+                issues.append(
+                    f"⚠️ Narration `{n['id']}` ends at {n['tl_end']:.2f}s, past the spine end "
+                    f"({total_dur:.2f}s). The renderer will clamp it to the spine — trim its "
+                    f"`duration` to make the clamp explicit."
+                )
+
+    # ── Music tail / orphan checks ─────────────────────────────────────────
+    if music and total_dur > 0:
+        m_end = music["tl_end"]
+        m_start = music["tl_start"]
+        if m_end < total_dur - 0.5:
+            issues.append(
+                f"⚠️ Music ends at {m_end:.2f}s but the spine runs to {total_dur:.2f}s — "
+                f"there's ~{total_dur - m_end:.1f}s of silence at the end. Extend the music "
+                f"`duration` or accept the tail silence deliberately."
+            )
+        elif m_end > total_dur + 0.5:
+            issues.append(
+                f"⚠️ Music extends to {m_end:.2f}s, past the spine end ({total_dur:.2f}s). "
+                f"Trim `music.duration` so it ends on or before the last clip."
+            )
+        if m_start > 0.5:
+            issues.append(
+                f"⚠️ Music starts at {m_start:.2f}s — first {m_start:.1f}s of the edit has no "
+                f"music bed. Intentional, or move `music.start` to 0?"
+            )
+
     return issues
 
 

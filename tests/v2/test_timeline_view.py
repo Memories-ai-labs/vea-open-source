@@ -120,3 +120,213 @@ class TestOverlayClips:
         out = build_timeline_view(payload)
         assert "c1" in out
         assert "ov" in out
+
+
+# ─── Narration overlap + spine checks (new) ──────────────────────────────────
+
+class TestNarrationOverlapDetection:
+    def test_overlapping_narration_segments_flagged(self):
+        payload = json.dumps({
+            "clips": [{
+                "id": "c1", "source_file": "v.mp4",
+                "source_start": 0, "source_end": 20,
+            }],
+            "narration": [
+                {"file": "n.mp3", "timeline_offset": 0.0, "duration": 5.0},
+                {"file": "n.mp3", "timeline_offset": 3.0, "duration": 2.0},
+            ],
+        })
+        out = build_timeline_view(payload)
+        assert "Audio issues detected" in out
+        assert "Narration segments overlap" in out
+
+    def test_adjacent_non_overlapping_is_clean(self):
+        payload = json.dumps({
+            "clips": [{
+                "id": "c1", "source_file": "v.mp4",
+                "source_start": 0, "source_end": 20,
+            }],
+            "narration": [
+                {"file": "n.mp3", "timeline_offset": 0.0, "duration": 3.0},
+                {"file": "n.mp3", "timeline_offset": 3.0, "duration": 2.0},
+            ],
+        })
+        out = build_timeline_view(payload)
+        # Overlap exactly 0 — not flagged
+        assert "Narration segments overlap" not in out
+
+    def test_narration_past_spine_is_flagged(self):
+        payload = json.dumps({
+            "clips": [{
+                "id": "c1", "source_file": "v.mp4",
+                "source_start": 0, "source_end": 5,
+            }],
+            "narration": [
+                # Starts after the spine ends (at 5.0) → compiler will drop it
+                {"file": "n.mp3", "timeline_offset": 6.0, "duration": 2.0},
+            ],
+        })
+        out = build_timeline_view(payload)
+        assert "beyond the spine end" in out
+
+
+# ─── Music tail / orphan checks (new) ────────────────────────────────────────
+
+class TestMusicTailChecks:
+    def test_music_ends_before_spine_flagged(self):
+        payload = json.dumps({
+            "clips": [{
+                "id": "c1", "source_file": "v.mp4",
+                "source_start": 0, "source_end": 20,
+            }],
+            "music": {"file": "m.mp3", "start": 0.0, "duration": 5.0},
+        })
+        out = build_timeline_view(payload)
+        assert "Music ends at" in out
+        assert "silence" in out
+
+    def test_music_matches_spine_clean(self):
+        payload = json.dumps({
+            "clips": [{
+                "id": "c1", "source_file": "v.mp4",
+                "source_start": 0, "source_end": 20,
+            }],
+            "music": {"file": "m.mp3", "start": 0.0, "duration": 20.0},
+        })
+        out = build_timeline_view(payload)
+        assert "Music ends at" not in out
+
+    def test_music_extends_past_spine_flagged(self):
+        payload = json.dumps({
+            "clips": [{
+                "id": "c1", "source_file": "v.mp4",
+                "source_start": 0, "source_end": 20,
+            }],
+            "music": {"file": "m.mp3", "start": 0.0, "duration": 30.0},
+        })
+        out = build_timeline_view(payload)
+        assert "past the spine end" in out
+
+    def test_music_starts_late_flagged(self):
+        payload = json.dumps({
+            "clips": [{
+                "id": "c1", "source_file": "v.mp4",
+                "source_start": 0, "source_end": 20,
+            }],
+            "music": {"file": "m.mp3", "start": 5.0, "duration": 15.0},
+        })
+        out = build_timeline_view(payload)
+        assert "Music starts at" in out
+
+
+# ─── Title lane → V-track mapping (new) ──────────────────────────────────────
+
+class TestTitleLaneColumn:
+    def test_title_with_lane_1_appears_in_v2_column(self):
+        payload = json.dumps({
+            "clips": [{
+                "id": "c1", "source_file": "v.mp4",
+                "source_start": 0, "source_end": 10,
+            }],
+            "titles": [
+                {"text": "HELLO WORLD", "timeline_offset": 0, "duration": 3, "lane": 1},
+            ],
+        })
+        out = build_timeline_view(payload)
+        # V2 column must exist and the title text must land there, not in a
+        # stale "T1 Titles" column.
+        assert "| V2 |" in out
+        assert "T1 Titles" not in out
+        assert "HELLO WORLD" in out
+
+    def test_title_with_lane_2_appears_in_v3_column(self):
+        payload = json.dumps({
+            "clips": [{
+                "id": "c1", "source_file": "v.mp4",
+                "source_start": 0, "source_end": 10,
+            }],
+            "titles": [
+                {"text": "UPPER TITLE", "timeline_offset": 0, "duration": 3, "lane": 2},
+            ],
+        })
+        out = build_timeline_view(payload)
+        assert "V3" in out
+        assert "UPPER TITLE" in out
+
+
+# ─── Per-narration-track columns (new) ───────────────────────────────────────
+
+class TestNarrationTrackColumns:
+    def test_segments_on_different_tracks_get_different_columns(self):
+        payload = json.dumps({
+            "clips": [{
+                "id": "c1", "source_file": "v.mp4",
+                "source_start": 0, "source_end": 20,
+            }],
+            "narration": [
+                {"file": "n.mp3", "timeline_offset": 0.0, "duration": 3.0, "track": 1},
+                {"file": "n.mp3", "timeline_offset": 5.0, "duration": 3.0, "track": 2},
+            ],
+        })
+        out = build_timeline_view(payload)
+        assert "A1 Narration" in out
+        assert "A2 Narration" in out
+
+
+# ─── Extra clip metadata (new) ───────────────────────────────────────────────
+
+class TestClipMetadataFields:
+    def test_speed_shown_when_non_unity(self):
+        payload = json.dumps({
+            "clips": [{
+                "id": "c1", "source_file": "v.mp4",
+                "source_start": 0, "source_end": 10,
+                "speed": {"rate": 0.5},
+            }],
+        })
+        out = build_timeline_view(payload)
+        assert "speed=0.5x" in out
+
+    def test_speed_not_shown_at_1x(self):
+        payload = json.dumps({
+            "clips": [{
+                "id": "c1", "source_file": "v.mp4",
+                "source_start": 0, "source_end": 10,
+            }],
+        })
+        out = build_timeline_view(payload)
+        assert "speed=" not in out
+
+    def test_source_range_shown(self):
+        payload = json.dumps({
+            "clips": [{
+                "id": "c1", "source_file": "v.mp4",
+                "source_start": 214.5, "source_end": 224.8,
+            }],
+        })
+        out = build_timeline_view(payload)
+        assert "src=[214.5-224.8s]" in out
+
+    def test_transition_after_appears(self):
+        payload = json.dumps({
+            "clips": [{
+                "id": "c1", "source_file": "v.mp4",
+                "source_start": 0, "source_end": 5,
+                "transition_after": {"type": "cross-dissolve", "duration_seconds": 0.5},
+            }],
+        })
+        out = build_timeline_view(payload)
+        assert "cross-dissolve" in out
+
+    def test_narration_cell_shows_audio_range(self):
+        payload = json.dumps({
+            "clips": [{
+                "id": "c1", "source_file": "v.mp4",
+                "source_start": 0, "source_end": 10,
+            }],
+            "narration": [
+                {"file": "n.mp3", "timeline_offset": 0.0, "start": 3.4, "duration": 2.6},
+            ],
+        })
+        out = build_timeline_view(payload)
+        assert "audio:[3.40-6.00s]" in out
