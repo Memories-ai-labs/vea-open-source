@@ -1,8 +1,13 @@
 """System prompt for the agentic editing session."""
+from __future__ import annotations
+
+from typing import Optional
+
+from src.pipelines.v2.agent.modes import AgentMode
 from src.pipelines.v2.agent.timeline_view import build_timeline_view
 
 
-SYSTEM_PROMPT_TEMPLATE = """\
+_BASE_TEMPLATE = """\
 You are an expert video editor working inside an agentic editing tool. You collaborate
 with the user to understand their footage, plan an edit, and produce a Final Cut Pro XML
 (FCPXML) timeline.
@@ -366,22 +371,47 @@ in refine_clip_timestamps and generate_fcpxml.
 """
 
 
-_AUTONOMOUS_RIDER = """
+_COLLABORATIVE_ADDENDUM = ""
+"""Collaborative mode is the base prompt with no additions — a human is in the
+loop and will redirect the agent naturally through conversation."""
+
+
+_AUTONOMOUS_ADDENDUM = """
 
 ## Autonomous mode
 
-You are running non-interactively as part of an orchestrator pipeline. There is NO
-human reviewer between turns. Do NOT call `message_user` to ask clarifying questions
-or wait for approval — commit to the best interpretation of the brief and build the
-edit in a single turn. Call `finish_turn` with a one-line `final_message` describing
-what you shipped when complete.
+You are running without a human reviewer between turns. Two things follow:
 
-If the brief is genuinely ambiguous, pick a reasonable default:
-- duration: "short" = 30-60s, "medium" = 90-120s, "long" = 180s+
-- style: default to script-driven with narration + music
-- music: only generate if the brief asks for it; silent otherwise
-Don't stop to ask. Ship it.
+1. **Don't ask clarifying questions.** There is no one to answer. If the brief
+   is ambiguous, pick a reasonable default and note your choice in the
+   `planning` scratchpad. Defaults when not specified:
+   - duration: "short" = 30-60s, "medium" = 90-120s, "long" = 180s+
+   - style: script-driven narration when the brief asks for narration
+   - music: only generate if the brief asks for it; silent otherwise
+
+2. **Be a perfectionist.** `generate_fcpxml` is a checkpoint, not the goalpost.
+   After each call, read the computed timeline view below — any audio issues
+   flagged? Narration aligned to clip boundaries? Pacing varied? Measured LUFS
+   reasonable? If any answer is "could be better", iterate: adjust gain_db,
+   split narration, swap a clip, re-generate. Only call `finish_turn` when
+   you genuinely cannot improve the edit further.
+
+**`final_message` etiquette:** your closing message may go straight to an
+orchestrator agent with no human in between. Be decisive and factual. No
+"let me know if you want changes" — the orchestrator can re-invoke you with
+a new brief. Example shape: *"60s promo, 14 clips, narration in 6 segments
+(all word-aligned), music at -21 LUFS. Timeline clean, no warnings."*
+
+If the task is genuinely impossible (no usable footage, contradictory brief,
+required API down), call `finish_turn` with `final_message` stating exactly
+why — don't retry forever.
 """
+
+
+_MODE_ADDENDA: dict[AgentMode, str] = {
+    AgentMode.COLLABORATIVE: _COLLABORATIVE_ADDENDUM,
+    AgentMode.AUTONOMOUS: _AUTONOMOUS_ADDENDUM,
+}
 
 
 def build_system_prompt(
@@ -389,8 +419,18 @@ def build_system_prompt(
     video_list: str,
     scratchpads_text: str,
     current_edit_decision: str = "",
-    autonomous: bool = False,
+    mode: AgentMode = AgentMode.COLLABORATIVE,
+    autonomous: Optional[bool] = None,
 ) -> str:
+    """Assemble the agent's system instruction for the current turn.
+
+    ``mode`` selects which addendum (if any) is appended to the base template.
+    ``autonomous`` is a legacy kwarg kept for back-compat with older callers;
+    when set, it overrides ``mode``. Prefer passing ``mode`` directly.
+    """
+    if autonomous is not None:
+        mode = AgentMode.AUTONOMOUS if autonomous else AgentMode.COLLABORATIVE
+
     edit_block = ""
     if current_edit_decision:
         timeline_view = build_timeline_view(current_edit_decision)
@@ -402,12 +442,11 @@ def build_system_prompt(
             f"```json\n{current_edit_decision}\n```\n\n"
             f"{timeline_view}"
         )
-    prompt = SYSTEM_PROMPT_TEMPLATE.format(
+    prompt = _BASE_TEMPLATE.format(
         project_name=project_name,
         video_list=video_list,
         scratchpads=scratchpads_text,
         current_edit_decision=edit_block,
     )
-    if autonomous:
-        prompt += _AUTONOMOUS_RIDER
+    prompt += _MODE_ADDENDA[mode]
     return prompt

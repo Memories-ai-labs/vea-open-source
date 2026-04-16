@@ -11,6 +11,7 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional
 from google.genai.types import Content, Part, FunctionResponse, GenerateContentConfig
 from google.genai.types import SafetySetting, HarmCategory, HarmBlockThreshold
 
+from src.pipelines.v2.agent.modes import AgentMode, MAX_TOOL_ROUNDS_BY_MODE
 from src.pipelines.v2.agent.scratchpad import ScratchpadManager
 from src.pipelines.v2.agent.system_prompt import build_system_prompt
 from src.pipelines.v2.agent.tools import TOOL_DECLARATIONS, ToolExecutor
@@ -19,7 +20,8 @@ from src.pipelines.v2.workspace import _atomic_write_json
 logger = logging.getLogger(__name__)
 
 MAX_HISTORY_TURNS = 80  # keep last N turns (user + model + tool rounds)
-MAX_TOOL_ROUNDS = 40    # max tool call rounds per user message
+# Per-mode cap lives in src/pipelines/v2/agent/modes.py (MAX_TOOL_ROUNDS_BY_MODE).
+# Autonomous mode gets a much larger budget because there's no human to nudge it.
 
 
 @dataclass
@@ -52,15 +54,21 @@ class AgentSession:
         video_entries: list,
         emit: Callable[..., Coroutine],
         video_llm=None,
-        autonomous: bool = False,
+        mode: AgentMode = AgentMode.COLLABORATIVE,
+        autonomous: Optional[bool] = None,
     ):
         self.project_name = project_name
         self.workspace = workspace
         self.memories = memories_manager
-        # When True, the system prompt instructs the agent to run
-        # non-interactively (no message_user clarifying questions, commit to a
-        # plan in one turn). Used by the one-shot CLI and MCP entrypoints.
-        self.autonomous = autonomous
+        # ``mode`` selects the agent's temperament (collaborative = deferential
+        # to a user in the loop; autonomous = perfectionist, non-interactive,
+        # used by the CLI/MCP). ``autonomous: bool`` is a legacy kwarg kept
+        # for back-compat with older callers; when set it overrides ``mode``.
+        if autonomous is not None:
+            mode = AgentMode.AUTONOMOUS if autonomous else AgentMode.COLLABORATIVE
+        self.mode = mode
+        # Legacy attribute for anyone reading ``session.autonomous`` directly.
+        self.autonomous = mode != AgentMode.COLLABORATIVE
         # ``gemini`` is the main text + tool-calling LLM (may be Claude/GPT via
         # OpenRouter despite the historical name). ``video_llm`` is the
         # Gemini-family manager used for tasks that need native video input
@@ -261,7 +269,13 @@ class AgentSession:
     async def _agent_loop(self) -> None:
         """Run Gemini in a loop until it signals completion."""
         last_message_user_text: str | None = None
-        for round_num in range(MAX_TOOL_ROUNDS):
+        max_rounds = MAX_TOOL_ROUNDS_BY_MODE[self.mode]
+        # Watchdog state — detects the same tool being called with identical
+        # args 3× in a row, which usually means the model is stuck. We only
+        # nudge in autonomous mode; in collaborative mode the user nudges.
+        recent_calls: list = []
+        watchdog_fired_this_turn = False
+        for round_num in range(max_rounds):
             message_user_this_round = False  # reset each round
             # Load current edit decision from disk (may have been modified by user in UI)
             current_edit_json = ""
@@ -280,7 +294,7 @@ class AgentSession:
                 video_list=self.video_list,
                 scratchpads_text=self.scratchpads.render_all(),
                 current_edit_decision=current_edit_json,
-                autonomous=self.autonomous,
+                mode=self.mode,
             )
 
             config = GenerateContentConfig(
@@ -355,6 +369,17 @@ class AgentSession:
                 fc = fc_part.function_call
                 tool_name = fc.name
                 tool_args = dict(fc.args) if fc.args else {}
+
+                # Watchdog tracking: rolling buffer of (tool, args) for the
+                # last three calls across the whole turn. Used below to
+                # detect stuck loops in autonomous mode.
+                try:
+                    call_key = (tool_name, json.dumps(tool_args, sort_keys=True, default=str))
+                except Exception:
+                    call_key = (tool_name, str(tool_args))
+                recent_calls.append(call_key)
+                if len(recent_calls) > 3:
+                    recent_calls.pop(0)
 
                 # Emit tool_call event
                 tool_call_data = {
@@ -463,6 +488,29 @@ class AgentSession:
             fn_content = Content(role="tool", parts=function_response_parts)
             self._history.append(fn_content)
 
+            # Watchdog: if the last 3 tool calls were identical and we're in
+            # autonomous mode, the model is probably stuck. Inject a synthetic
+            # user nudge so the next LLM turn sees it. Fire at most once per
+            # user message to avoid cascading nudges.
+            if (
+                self.mode == AgentMode.AUTONOMOUS
+                and not watchdog_fired_this_turn
+                and len(recent_calls) == 3
+                and recent_calls[0] == recent_calls[1] == recent_calls[2]
+            ):
+                stuck_tool = recent_calls[0][0]
+                nudge = (
+                    f"⚠️ Watchdog: you called `{stuck_tool}` 3× in a row with "
+                    "identical arguments. Something is stuck. Commit with what "
+                    "you have now (call `generate_fcpxml` if you haven't yet, "
+                    "then `finish_turn`), or explain the blocker in a "
+                    "`finish_turn(final_message=...)` call. Do not repeat the "
+                    "same tool call again."
+                )
+                logger.warning(f"[AGENT] Watchdog fired on `{stuck_tool}`")
+                self._history.append(Content(role="user", parts=[Part(text=nudge)]))
+                watchdog_fired_this_turn = True
+
             # Exit the loop if finish_turn was called in this batch
             if finish_after_batch:
                 # Fall back to any inline text when final_message is empty —
@@ -487,10 +535,27 @@ class AgentSession:
                 logger.info(f"[AGENT] Turn ended via finish_turn after {round_num + 1} rounds")
                 return
 
-        # If we hit the max rounds, notify
-        logger.warning(f"[AGENT] Hit max tool rounds ({MAX_TOOL_ROUNDS})")
+        # If we hit the max rounds, notify. Structured event so the CLI /
+        # orchestrator can detect exhaustion separately from a clean finish_turn.
+        logger.warning(f"[AGENT] Hit max tool rounds ({max_rounds}) in {self.mode.value} mode")
+        await self._emit("turn_exhausted", {
+            "mode": self.mode.value,
+            "rounds": max_rounds,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        if self.mode == AgentMode.COLLABORATIVE:
+            text = (
+                "I've completed this round of work. Let me know if you'd like "
+                "me to continue or adjust anything."
+            )
+        else:
+            text = (
+                f"Hit the per-turn tool cap ({max_rounds} rounds) without a "
+                "`finish_turn`. Stopping here. Inspect the scratchpads and "
+                "edit_decision.json to see how far the agent got."
+            )
         await self._emit("agent_message", {
-            "text": "I've completed this round of work. Let me know if you'd like me to continue or adjust anything.",
+            "text": text,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
 

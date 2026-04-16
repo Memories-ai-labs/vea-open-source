@@ -50,6 +50,7 @@ from typing import Any, Dict, Optional
 from src import config as _config
 from src import services
 from src.pipelines.v2.agent.agent_session import AgentSession
+from src.pipelines.v2.agent.modes import AgentMode
 from src.pipelines.v2.comprehension.lightweight_comprehension import (
     LightweightComprehension,
 )
@@ -289,7 +290,8 @@ async def _run(args: argparse.Namespace) -> int:
         _print_result({"status": "error", "error": "No videos in session after indexing", "project": args.project})
         return 4
 
-    # Build the agent session in autonomous mode.
+    # Build the agent session in autonomous mode — CLI runs are non-interactive
+    # by definition (no WebSocket back-channel for the agent to message).
     agent = AgentSession(
         project_name=args.project,
         workspace=workspace,
@@ -298,7 +300,7 @@ async def _run(args: argparse.Namespace) -> int:
         video_llm=services.video_llm,
         video_entries=session_data.videos,
         emit=emitter,
-        autonomous=True,
+        mode=AgentMode.AUTONOMOUS,
     )
 
     # One-shot: deliver the brief and wait.

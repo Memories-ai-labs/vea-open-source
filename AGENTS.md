@@ -263,13 +263,34 @@ python -m src.cli \
 Under the hood it:
 1. Symlinks videos from `--footage-dir` into `{workspace}/footage/`.
 2. Runs `LightweightComprehension` unless `--reuse-index` and a session exists.
-3. Builds an `AgentSession` with `autonomous=True` — the system prompt gains a
-   rider (`_AUTONOMOUS_RIDER` in `system_prompt.py`) telling the agent not to
-   call `message_user` for clarifications and to commit to defaults.
+3. Builds an `AgentSession` with `mode=AgentMode.AUTONOMOUS` — the system prompt
+   gains the `_AUTONOMOUS_ADDENDUM` (`system_prompt.py`) telling the agent to
+   skip clarifying questions, iterate perfectionist-style across multiple
+   `generate_fcpxml` calls, and ship a decisive factual `final_message`.
 4. Awaits `handle_user_message(brief)`, then waits for draft + Resolve
    background renders.
 5. Prints a final JSON line on stdout: `{"status":"ok","fcpxml":"...","draft_mp4":"...","final_mp4":"...","edit_decision":{...}}`.
    Exit 0 on success; non-zero + structured error JSON on failure.
+
+## Agent modes
+
+Two temperaments, both drive the same `_agent_loop`:
+
+| Mode | Where used | Temperament |
+|------|-----------|-------------|
+| `COLLABORATIVE` (default) | Dashboard / WebSocket | Deferential — proposes plans, asks questions, waits on feedback between iterations |
+| `AUTONOMOUS` | CLI / MCP / batch | Perfectionist, non-interactive — commits to reasonable defaults, self-iterates (`generate_fcpxml` is a checkpoint, not a goalpost), ships a decisive `final_message` |
+
+`src/pipelines/v2/agent/modes.py` defines the enum + per-mode `MAX_TOOL_ROUNDS`
+cap (collaborative 40 / autonomous 120). The addendum text lives in
+`system_prompt.py`. In autonomous mode, the loop also runs a **watchdog** —
+if the same tool is called 3× in a row with identical args, a synthetic
+user nudge is injected into history once per turn telling the agent to
+commit or explain the blocker. On max-rounds exhaustion, the loop emits
+a `turn_exhausted` event (separate from a clean `finish_turn`).
+
+Backcompat: the old `autonomous: bool` kwarg on `AgentSession` and
+`build_system_prompt` still works — `autonomous=True` maps to AUTONOMOUS.
 
 ## Things not to be confused by
 
