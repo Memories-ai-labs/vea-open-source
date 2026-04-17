@@ -1,22 +1,35 @@
 """
-FFmpeg preview renderer — EditDecision → MP4 without DaVinci Resolve.
+FFmpeg renderer — EditDecision → MP4 without DaVinci Resolve.
 
-Produces a fast 480p draft preview using FFmpeg filter graphs.
-Supports: clip concatenation, transforms/crops, audio mixing, speed changes,
-text overlays, and multi-shot crop transforms.
+Two quality modes:
+  - ``draft``  : 480p, ultrafast, crf 28.  For the background preview render
+                 that runs after every generate_fcpxml call.
+  - ``final``  : timeline-native resolution, preset slow, crf 18, 192k audio.
+                 Used as a Resolve fallback when DaVinci isn't installed.
 
-Two-pass approach:
-  Pass 1 (parallel): Extract + process each clip to temp files at 480p
-  Pass 2 (sequential): Concatenate clips + mix audio → final MP4
+Feature coverage — matches what the agent can express in EditDecision:
+  - V1 spine: sequencing, source in/out, per-clip gain, speed change,
+              transform (scale/pan/rotation), multi-shot crops.
+  - V2+:      overlay / picture-in-picture clips at their timeline_offset,
+              scaled and positioned via transform.
+  - Transitions (clip.transition_after): cross-dissolve, fade-in, fade-out.
+  - Audio:    narration + music mix with LUFS auto-gain, music fade in/out.
+  - Titles:   centered / top / bottom, subtitle box, fade-in/out alpha.
+
+Pipeline:
+  Pass 1 (parallel)    — extract + process each clip to a temp file.
+  Pass 2 (sequential)  — concat spine clips (with xfade if transitions).
+  Pass 3 (sequential)  — overlay V2+ clips, mix audio, draw titles.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import platform
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
 from src.pipelines.v2.schemas import (
     ClipDecision,
@@ -30,7 +43,30 @@ from src.pipelines.v2.schemas import (
 
 logger = logging.getLogger(__name__)
 
+QualityMode = Literal["draft", "final"]
+
+# Encoder + output settings per quality mode. Draft keeps the render cheap
+# enough for the agent loop to spawn after every generate_fcpxml call;
+# final matches what DaVinci would produce at native timeline resolution.
+QUALITY_PRESETS: Dict[str, Dict[str, object]] = {
+    "draft": {
+        "height": 480,                 # scale to 480p, width from aspect
+        "preset": "ultrafast",
+        "crf": 28,
+        "audio_bitrate": "128k",
+        "scale_flags": "bilinear",
+    },
+    "final": {
+        "height": None,                # use timeline native
+        "preset": "slow",
+        "crf": 18,
+        "audio_bitrate": "192k",
+        "scale_flags": "lanczos",
+    },
+}
+
 _drawtext_available: Optional[bool] = None
+_system_font_file: Optional[str] = None
 
 def _has_drawtext() -> bool:
     """Check if FFmpeg was built with the drawtext filter (requires libfreetype)."""
@@ -50,6 +86,47 @@ def _has_drawtext() -> bool:
     return _drawtext_available
 
 
+def _system_font() -> Optional[str]:
+    """Locate a sans-serif font file suitable for drawtext.
+
+    FFmpeg's drawtext can pick up a default font via fontconfig, but on
+    sandboxed / minimal systems that lookup silently fails. We prefer an
+    explicit fontfile so the title reliably renders on every machine.
+    Returns None if nothing workable is found; drawtext then relies on its
+    own default.
+    """
+    global _system_font_file
+    if _system_font_file is not None:
+        return _system_font_file or None  # empty string means "already searched, none found"
+
+    candidates: List[str] = []
+    sysname = platform.system()
+    if sysname == "Darwin":
+        candidates = [
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/HelveticaNeue.ttc",
+            "/Library/Fonts/Arial.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/SFNS.ttf",
+        ]
+    elif sysname == "Linux":
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ]
+    elif sysname == "Windows":
+        candidates = [r"C:\Windows\Fonts\Arial.ttf", r"C:\Windows\Fonts\arial.ttf"]
+
+    for c in candidates:
+        if Path(c).exists():
+            _system_font_file = c
+            return c
+    _system_font_file = ""
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -58,7 +135,8 @@ async def render_ffmpeg_preview(
     edit: EditDecision,
     footage_dir: Path,
     output_path: Path,
-    resolution: int = 480,
+    quality: QualityMode = "draft",
+    resolution: Optional[int] = None,
     progress_callback: Optional[Callable[[float], Awaitable[None]]] = None,
 ) -> str:
     """
@@ -68,7 +146,9 @@ async def render_ffmpeg_preview(
         edit: Complete edit decision with clips, narration, music, titles
         footage_dir: Directory containing source footage files
         output_path: Where to write the output MP4
-        resolution: Output height in pixels (width scales proportionally)
+        quality: "draft" (480p, ultrafast) or "final" (timeline-native, slow)
+        resolution: Deprecated override — explicit output height in pixels.
+            When set, overrides the quality preset's height.
         progress_callback: async callback receiving 0-100 progress
 
     Returns:
@@ -77,9 +157,12 @@ async def render_ffmpeg_preview(
     if not edit.clips:
         raise ValueError("No clips in edit decision")
 
-    # Ensure ffmpeg is available
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg not found on PATH")
+
+    if quality not in QUALITY_PRESETS:
+        raise ValueError(f"Unknown quality mode: {quality!r} (expected 'draft' or 'final')")
+    preset = QUALITY_PRESETS[quality]
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,99 +171,124 @@ async def render_ffmpeg_preview(
     tl_h = edit.timeline.height
     tl_fps = edit.timeline.fps
 
-    # Output dimensions (preserve aspect ratio, scale to target height)
-    out_h = resolution
-    out_w = int(tl_w * out_h / tl_h)
-    # Ensure even dimensions for H.264
-    out_w = out_w + (out_w % 2)
-    out_h = out_h + (out_h % 2)
+    target_h = resolution if resolution is not None else preset["height"]
+    if target_h is None:
+        out_w, out_h = tl_w, tl_h
+    else:
+        out_h = int(target_h)
+        out_w = int(tl_w * out_h / tl_h)
+    # H.264 requires even dimensions
+    out_w += out_w % 2
+    out_h += out_h % 2
 
-    track1_clips = [c for c in edit.clips if c.track == 1]
-    if not track1_clips:
+    spine_clips = [c for c in edit.clips if c.track == 1]
+    overlay_clips = [c for c in edit.clips if c.track > 1]
+    if not spine_clips:
         raise ValueError("No track-1 clips in edit decision")
 
-    tmpdir = Path(tempfile.mkdtemp(prefix="vea_preview_"))
+    logger.info(
+        f"[RENDER] quality={quality} out={out_w}x{out_h}@{tl_fps}fps "
+        f"spine={len(spine_clips)} overlays={len(overlay_clips)} "
+        f"narration={len(edit.narration)} music={'yes' if edit.music else 'no'} "
+        f"titles={len(edit.titles)}"
+    )
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="vea_render_"))
 
     try:
-        # ── Pass 1: Extract + process each clip in parallel ──
-        total_dur = sum(_clip_duration(c) for c in track1_clips)
+        # ── Pass 1: extract + process each V1 clip in parallel ────────────
+        total_dur = sum(_clip_duration(c) for c in spine_clips)
         completed_dur = 0.0
 
-        async def process_clip(idx: int, clip: ClipDecision) -> Path:
+        async def process_clip(
+            idx: int, clip: ClipDecision, prefix: str = "clip",
+        ) -> Path:
             nonlocal completed_dur
-            out_file = tmpdir / f"clip_{idx:03d}.mp4"
+            out_file = tmpdir / f"{prefix}_{idx:03d}.mp4"
             source = _resolve_source(clip, footage_dir)
             if not source.exists():
-                logger.warning(f"[PREVIEW] Source not found: {source}, skipping clip {clip.id}")
-                # Create a black placeholder
+                logger.warning(f"[RENDER] Source not found: {source}, skipping clip {clip.id}")
                 dur = _clip_duration(clip)
                 await _run_ffmpeg([
                     "-f", "lavfi", "-i", f"color=black:s={out_w}x{out_h}:d={dur:.3f}:r={tl_fps}",
                     "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo",
                     "-t", f"{dur:.3f}",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                    "-c:a", "aac", "-b:a", "128k",
+                    "-c:v", "libx264", "-preset", str(preset["preset"]), "-crf", str(preset["crf"]),
+                    "-c:a", "aac", "-b:a", str(preset["audio_bitrate"]),
                     str(out_file),
                 ])
                 return out_file
 
-            # Build clip segments (multi-shot or single)
             segments = _get_clip_segments(clip, tl_w, tl_h)
             if len(segments) == 1:
                 await _render_single_segment(
                     source, segments[0], clip, out_file,
-                    out_w, out_h, tl_fps,
+                    out_w, out_h, tl_fps, preset,
                 )
             else:
-                # Multi-shot: render each segment then concat
                 seg_files = []
                 for si, seg in enumerate(segments):
-                    seg_file = tmpdir / f"clip_{idx:03d}_shot_{si:02d}.mp4"
+                    seg_file = tmpdir / f"{prefix}_{idx:03d}_shot_{si:02d}.mp4"
                     await _render_single_segment(
                         source, seg, clip, seg_file,
-                        out_w, out_h, tl_fps,
+                        out_w, out_h, tl_fps, preset,
                     )
                     seg_files.append(seg_file)
                 await _concat_files(seg_files, out_file)
 
-            completed_dur += _clip_duration(clip)
-            if progress_callback:
-                pct = min(80.0, (completed_dur / total_dur) * 80.0)
-                await progress_callback(pct)
+            if prefix == "clip":
+                completed_dur += _clip_duration(clip)
+                if progress_callback:
+                    pct = min(70.0, (completed_dur / total_dur) * 70.0)
+                    await progress_callback(pct)
             return out_file
 
-        clip_tasks = [process_clip(i, c) for i, c in enumerate(track1_clips)]
+        clip_tasks = [process_clip(i, c) for i, c in enumerate(spine_clips)]
         clip_files = await asyncio.gather(*clip_tasks)
-
-        # Filter out any clips that failed
-        valid_clip_files = [f for f in clip_files if f.exists()]
+        valid_clip_files: List[Path] = [f for f in clip_files if f.exists()]
         if not valid_clip_files:
             raise RuntimeError("All clips failed to render")
 
-        if progress_callback:
-            await progress_callback(80.0)
+        # Upper-track clips — processed once, composited later via overlay.
+        overlay_tasks = [
+            process_clip(i, c, prefix="overlay")
+            for i, c in enumerate(overlay_clips)
+        ]
+        overlay_files = await asyncio.gather(*overlay_tasks) if overlay_tasks else []
 
-        # ── Pass 2: Concatenate clips + mix audio ──
+        if progress_callback:
+            await progress_callback(70.0)
+
+        # ── Pass 2: concat spine (with transitions if requested) ──────────
         concat_video = tmpdir / "concat.mp4"
-        await _concat_files(valid_clip_files, concat_video)
+        has_transitions = any(
+            c.transition_after is not None for c in spine_clips
+        )
+        if has_transitions:
+            await _concat_with_transitions(
+                valid_clip_files, spine_clips, concat_video,
+                out_w, out_h, tl_fps, preset,
+            )
+        else:
+            await _concat_files(valid_clip_files, concat_video)
 
         if progress_callback:
             await progress_callback(85.0)
 
-        # ── Pass 3: Mix in narration + music + titles ──
-        await _mix_audio_and_titles(
+        # ── Pass 3: overlay V2+, mix audio, draw titles ───────────────────
+        await _mix_and_finalize(
             concat_video, edit, footage_dir, output_path,
-            out_w, out_h, tl_fps, track1_clips,
+            out_w, out_h, tl_fps, spine_clips,
+            overlay_clips, overlay_files, preset,
         )
 
         if progress_callback:
             await progress_callback(100.0)
 
-        logger.info(f"[PREVIEW] FFmpeg render complete: {output_path}")
+        logger.info(f"[RENDER] FFmpeg {quality} render complete: {output_path}")
         return str(output_path)
 
     finally:
-        # Cleanup temp files
         try:
             shutil.rmtree(tmpdir, ignore_errors=True)
         except Exception:
@@ -338,41 +446,66 @@ def _build_transform_filter(
     src_w: int, src_h: int,
     tl_w: int, tl_h: int,
     out_w: int, out_h: int,
+    scale_flags: str = "bilinear",
 ) -> str:
-    """Convert TransformSettings to an FFmpeg crop+scale filter string.
+    """Convert TransformSettings to an FFmpeg crop+scale+rotate filter string.
 
-    Uses iw/ih (actual input dimensions) for crop bounds so the filter works
-    even when declared source dimensions don't match the real file.
+    Pipeline per clip:
+      1. Honour SAR — ``scale=iw*sar:ih,setsar=1`` so anamorphic sources
+         (e.g. 1920x1080 cinemascope stored with SAR≠1) display at correct
+         aspect. Without this step, ffmpeg renders the raw pixel grid
+         directly and a 2.40:1 source squeezes vertically, diverging from
+         how Resolve (which honours SAR) renders the same FCPXML.
+      2. Crop (if the agent specified a non-default scale_x/y/position).
+      3. Scale to the output canvas. For the fit case, preserve aspect and
+         crop the excess so we fully fill the frame — matches Resolve's
+         default "Scale to Frame Size" behaviour.
+      4. Rotate (if transform.rotation is set).
     """
     sx = transform.scale_x or 1.0
     sy = transform.scale_y or 1.0
+    rot_deg = getattr(transform, "rotation", 0.0) or 0.0
 
-    # If scale is close to default fit or 1.0 and no significant pan, just scale
+    # Step 1 — SAR normalization (always applied; no-op for square pixels).
+    chain = "scale=iw*sar:ih,setsar=1"
+
     default_scale = tl_w / max(src_w, 1)
-    is_fit = (abs(sx - default_scale) < 0.02 or abs(sx - 1.0) < 0.02) and abs(transform.position_x) < 1 and abs(transform.position_y) < 1
-    if is_fit:
-        return f"scale={out_w}:{out_h}:flags=bilinear"
-
-    # Compute crop as a fraction of the source, then apply using iw/ih
-    # so FFmpeg uses actual input dimensions, not the declared ones.
-    crop_frac_w = min(1.0, (tl_w / sx) / max(src_w, 1))
-    crop_frac_h = min(1.0, (tl_h / sy) / max(src_h, 1))
-
-    # Position offset as a fraction of source
-    norm = 19.2
-    off_frac_x = (transform.position_x * norm) / max(src_w * sx, 1)
-    off_frac_y = (transform.position_y * norm) / max(src_h * sy, 1)
-
-    # Build crop expression using iw/ih for runtime resolution
-    cw = f"iw*{crop_frac_w:.4f}"
-    ch = f"ih*{crop_frac_h:.4f}"
-    cx = f"(iw-iw*{crop_frac_w:.4f})/2-iw*{off_frac_x:.4f}"
-    cy = f"(ih-ih*{crop_frac_h:.4f})/2+ih*{off_frac_y:.4f}"
-
-    return (
-        f"crop={cw}:{ch}:{cx}:{cy},"
-        f"scale={out_w}:{out_h}:flags=bilinear"
+    is_fit = (
+        (abs(sx - default_scale) < 0.02 or abs(sx - 1.0) < 0.02)
+        and abs(transform.position_x) < 1
+        and abs(transform.position_y) < 1
     )
+    if is_fit:
+        # Scale-to-fit with aspect preservation, then pad black bars to fill
+        # the canvas. This matches Resolve's default "Spatial Conform: Fit"
+        # behaviour for FCPXML imports — all source content stays visible;
+        # mismatched aspects get letterbox or pillarbox bars.
+        chain += (
+            f",scale={out_w}:{out_h}:"
+            f"force_original_aspect_ratio=decrease:flags={scale_flags},"
+            f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black"
+        )
+    else:
+        # Agent-specified crop/pan inside the SAR-corrected source.
+        crop_frac_w = min(1.0, (tl_w / sx) / max(src_w, 1))
+        crop_frac_h = min(1.0, (tl_h / sy) / max(src_h, 1))
+        norm = 19.2
+        off_frac_x = (transform.position_x * norm) / max(src_w * sx, 1)
+        off_frac_y = (transform.position_y * norm) / max(src_h * sy, 1)
+        cw = f"iw*{crop_frac_w:.4f}"
+        ch = f"ih*{crop_frac_h:.4f}"
+        cx = f"(iw-iw*{crop_frac_w:.4f})/2-iw*{off_frac_x:.4f}"
+        cy = f"(ih-ih*{crop_frac_h:.4f})/2+ih*{off_frac_y:.4f}"
+        chain += (
+            f",crop={cw}:{ch}:{cx}:{cy},"
+            f"scale={out_w}:{out_h}:flags={scale_flags}"
+        )
+
+    if abs(rot_deg) > 0.01:
+        rad_expr = f"{rot_deg}*PI/180"
+        chain += f",rotate={rad_expr}:ow={out_w}:oh={out_h}:c=black@0"
+
+    return chain
 
 
 async def _render_single_segment(
@@ -382,30 +515,27 @@ async def _render_single_segment(
     out_file: Path,
     out_w: int, out_h: int,
     fps: float,
+    preset: Dict[str, object],
 ) -> None:
     """Render a single clip segment (one transform) to a temp file."""
     src_start, src_end, transform = segment
     duration = src_end - src_start
     speed_rate = clip.speed.rate if clip.speed else 1.0
+    scale_flags = str(preset.get("scale_flags", "bilinear"))
 
-    # Video filter chain
-    vf_parts = []
-
-    # Transform (crop + scale)
-    vf_parts.append(_build_transform_filter(
-        transform, clip.source_width, clip.source_height,
-        1920, 1080,  # Use full HD for crop math, we scale to out_w/out_h
-        out_w, out_h,
-    ))
-
-    # Speed change
+    vf_parts = [
+        _build_transform_filter(
+            transform, clip.source_width, clip.source_height,
+            1920, 1080,
+            out_w, out_h,
+            scale_flags=scale_flags,
+        )
+    ]
     if abs(speed_rate - 1.0) > 0.01:
         vf_parts.append(f"setpts=PTS/{speed_rate}")
-
     vf = ",".join(vf_parts)
 
-    # Audio filter chain
-    af_parts = []
+    af_parts: List[str] = []
     if clip.gain_db is not None and clip.gain_db != 0:
         af_parts.append(f"volume={clip.gain_db}dB")
     if abs(speed_rate - 1.0) > 0.01:
@@ -422,9 +552,14 @@ async def _render_single_segment(
     if af:
         cmd.extend(["-af", af])
     cmd.extend([
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+        "-c:v", "libx264",
+        "-preset", str(preset["preset"]),
+        "-crf", str(preset["crf"]),
+        "-pix_fmt", "yuv420p",
         "-r", str(fps),
-        "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000",
+        "-c:a", "aac",
+        "-b:a", str(preset["audio_bitrate"]),
+        "-ac", "2", "-ar", "48000",
         "-movflags", "+faststart",
         str(out_file),
     ])
@@ -453,7 +588,6 @@ async def _concat_files(files: List[Path], output: Path) -> None:
         shutil.copy2(files[0], output)
         return
 
-    # Write concat list
     list_file = output.parent / f"{output.stem}_list.txt"
     with open(list_file, "w") as f:
         for fp in files:
@@ -471,29 +605,194 @@ async def _concat_files(files: List[Path], output: Path) -> None:
     list_file.unlink(missing_ok=True)
 
 
-async def _mix_audio_and_titles(
+async def _probe_file_duration(path: Path) -> float:
+    """Return the media duration in seconds using ffprobe, or 0 on failure."""
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "quiet",
+        "-show_entries", "format=duration",
+        "-of", "csv=p=0",
+        str(path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    try:
+        return float(stdout.decode().strip())
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def _transition_to_xfade_type(spec_type: str) -> str:
+    """Map TransitionSpec.type → ffmpeg xfade transition name.
+
+    Schema exposes cross-dissolve, fade-in, fade-out. xfade handles the
+    cross-dissolve natively; fade-in/out are interpreted as fade-to-black
+    (fadeblack) which mimics Final Cut's 'Fade Out / Fade In' couple — both
+    clips briefly dip to black during the transition window.
+    """
+    mapping = {
+        "cross-dissolve": "fade",
+        "fade-in": "fadeblack",
+        "fade-out": "fadeblack",
+    }
+    return mapping.get(spec_type, "fade")
+
+
+async def _concat_with_transitions(
+    clip_files: List[Path],
+    clips: List[ClipDecision],
+    output: Path,
+    out_w: int, out_h: int, fps: float,
+    preset: Dict[str, object],
+) -> None:
+    """Concat spine clips with per-clip transitions via xfade + acrossfade.
+
+    Each ``clip.transition_after`` describes the transition BETWEEN that clip
+    and the next. cross-dissolve → ffmpeg xfade 'fade'; fade-in / fade-out →
+    'fadeblack'. Pairs without a transition fall through a plain concat
+    filter node so they remain hard cuts.
+    """
+    if len(clip_files) != len(clips):
+        raise ValueError("clip_files and clips must align 1:1")
+    if len(clip_files) == 1:
+        shutil.copy2(clip_files[0], output)
+        return
+
+    durations = [await _probe_file_duration(f) for f in clip_files]
+
+    inputs: List[str] = []
+    for f in clip_files:
+        inputs.extend(["-i", str(f)])
+
+    parts: List[str] = []
+    # Normalize every input's video + audio format and timebase before any
+    # concat / xfade. Two failures we're avoiding:
+    #   1. xfade: "main timebase (1/N) do not match … xfade timebase (1/M)" when
+    #      the first operand already went through concat (which outputs 1/1e6)
+    #      and the second operand is a fresh input (1/fps).
+    #   2. AAC encoder: "Could not open encoder before EOF" when chained audio
+    #      filters produce a sample fmt / channel layout the encoder rejects.
+    # Solution: force every input AND every intermediate concat/xfade output
+    # through settb=TB (a shared explicit timebase, here 1/90000 — the classic
+    # MPEG timing base, high enough to preserve sub-frame precision).
+    TB = 90000
+    for i in range(len(clip_files)):
+        parts.append(
+            f"[{i}:v]fps={fps},format=yuv420p,"
+            f"settb=1/{TB},setpts=PTS-STARTPTS[vn{i}]"
+        )
+        parts.append(
+            f"[{i}:a]aresample=48000:async=1,"
+            f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"asetpts=PTS-STARTPTS[an{i}]"
+        )
+
+    prev_v = "[vn0]"
+    prev_a = "[an0]"
+    prev_end_time = durations[0]
+
+    for i in range(1, len(clip_files)):
+        trans = clips[i - 1].transition_after
+        if trans and trans.duration_seconds > 0:
+            # Clamp transition to fit both clips
+            d = min(
+                trans.duration_seconds,
+                durations[i - 1] * 0.5,
+                durations[i] * 0.5,
+            )
+            if d <= 0.01:
+                trans = None  # transition too short, fall through to concat
+        if trans and trans.duration_seconds > 0:
+            d = min(
+                trans.duration_seconds,
+                durations[i - 1] * 0.5,
+                durations[i] * 0.5,
+            )
+            offset = prev_end_time - d
+            xf_type = _transition_to_xfade_type(trans.type)
+            v_raw = f"[vx{i}_raw]"
+            v_out = f"[vx{i}]"
+            a_out = f"[ax{i}]"
+            parts.append(
+                f"{prev_v}[vn{i}]xfade=transition={xf_type}:"
+                f"duration={d:.3f}:offset={offset:.3f}{v_raw}"
+            )
+            parts.append(f"{v_raw}settb=1/{TB}{v_out}")
+            parts.append(
+                f"{prev_a}[an{i}]acrossfade=d={d:.3f}{a_out}"
+            )
+            prev_end_time = prev_end_time + durations[i] - d
+        else:
+            v_raw = f"[vc{i}_raw]"
+            v_out = f"[vc{i}]"
+            a_out = f"[ac{i}]"
+            parts.append(f"{prev_v}[vn{i}]concat=n=2:v=1:a=0{v_raw}")
+            parts.append(f"{v_raw}settb=1/{TB}{v_out}")
+            parts.append(f"{prev_a}[an{i}]concat=n=2:v=0:a=1{a_out}")
+            prev_end_time = prev_end_time + durations[i]
+        prev_v = v_out
+        prev_a = a_out
+
+    filter_complex = ";\n".join(parts)
+
+    cmd = ["ffmpeg", "-y"]
+    cmd.extend(inputs)
+    cmd.extend([
+        "-filter_complex", filter_complex,
+        "-map", prev_v,
+        "-map", prev_a,
+        "-c:v", "libx264",
+        "-preset", str(preset["preset"]),
+        "-crf", str(preset["crf"]),
+        "-pix_fmt", "yuv420p",
+        "-r", str(fps),
+        "-c:a", "aac",
+        "-b:a", str(preset["audio_bitrate"]),
+        "-ac", "2", "-ar", "48000",
+        "-movflags", "+faststart",
+        str(output),
+    ])
+    logger.info(
+        f"[RENDER] Concat with transitions: {len(clip_files)} clips, "
+        f"total={prev_end_time:.2f}s, "
+        f"video_out={prev_v}, audio_out={prev_a}"
+    )
+    logger.debug(f"[RENDER] Transitions filter_complex:\n{filter_complex}")
+    await _run_ffmpeg(cmd, timeout=300.0)
+
+
+async def _mix_and_finalize(
     video_file: Path,
     edit: EditDecision,
     footage_dir: Path,
     output: Path,
     out_w: int, out_h: int,
     fps: float,
-    track1_clips: List[ClipDecision],
+    spine_clips: List[ClipDecision],
+    overlay_clips: List[ClipDecision],
+    overlay_files: List[Path],
+    preset: Dict[str, object],
 ) -> None:
-    """Mix narration + music audio and overlay titles onto concatenated video."""
+    """Mix narration + music, composite V2+ overlays, draw titles.
+
+    Title z-policy: titles are always drawn LAST, so they render on top of
+    every video layer. The FCPXML compiler mirrors this by bumping title
+    lanes into a reserved high range, keeping draft and final visually
+    identical regardless of what the agent set as ``title.lane``.
+    """
     has_narration = bool(edit.narration)
     has_music = edit.music is not None
     has_titles = bool(edit.titles)
+    has_overlays = bool(overlay_clips) and any(f.exists() for f in overlay_files)
 
-    # If nothing to mix, just copy
-    if not has_narration and not has_music and not has_titles:
+    if not has_narration and not has_music and not has_titles and not has_overlays:
         shutil.copy2(video_file, output)
         return
 
-    total_dur = sum(_clip_duration(c) for c in track1_clips)
+    total_dur = sum(_clip_duration(c) for c in spine_clips)
     inputs = ["-i", str(video_file)]
-    input_idx = 1  # [0] is the video
-    filter_parts = []
+    input_idx = 1  # [0] is the spine
+    filter_parts: List[str] = []
     audio_streams = ["[0:a]"]
 
     # Auto-target loudness for music/narration. The agent has been bad at writing
@@ -514,6 +813,64 @@ async def _mix_audio_and_titles(
         gain = (target_lufs + agent_offset_db) - measured_lufs
         # Clamp to sane range to avoid extreme adjustments
         return max(-30.0, min(20.0, round(gain, 1)))
+
+    # ── Upper-track (V2+) overlay clips ─────────────────────────────────
+    # Processed first so their audio joins the mix alongside narration/music.
+    # The video overlay filter is added here but operates on [0:v] at composite
+    # time; filter_complex ignores the order of filter_parts since nodes link
+    # by named label, so adding them early is safe.
+    overlay_video_ops: List[Tuple[str, str]] = []  # (prep_filter, overlay_filter)
+    if has_overlays:
+        for oi, (ovc, of) in enumerate(zip(overlay_clips, overlay_files)):
+            if not of.exists():
+                continue
+            inputs.extend(["-i", str(of)])
+            ovly_idx = input_idx
+            input_idx += 1
+
+            t = ovc.transform or TransformSettings()
+            sx = max(0.01, min(1.0, float(t.scale_x or 1.0)))
+            sy = max(0.01, min(1.0, float(t.scale_y or 1.0)))
+            is_fullscreen = abs(sx - 1.0) < 0.02 and abs(sy - 1.0) < 0.02
+            scaled_w = int(out_w * sx); scaled_w += scaled_w % 2
+            scaled_h = int(out_h * sy); scaled_h += scaled_h % 2
+
+            norm = 19.2
+            pos_x_px = float(t.position_x or 0.0) * norm
+            pos_y_px = float(t.position_y or 0.0) * norm
+            ox = f"(W-w)/2+{pos_x_px:.1f}" if not is_fullscreen else "0"
+            oy = f"(H-h)/2+{pos_y_px:.1f}" if not is_fullscreen else "0"
+
+            start_t = float(ovc.timeline_offset or 0.0)
+            dur = _clip_duration(ovc)
+            end_t = start_t + dur
+
+            prep_label = f"[ovprep{oi}]"
+            if is_fullscreen:
+                prep_filter = (
+                    f"[{ovly_idx}:v]setpts=PTS-STARTPTS+{start_t:.3f}/TB{prep_label}"
+                )
+            else:
+                prep_filter = (
+                    f"[{ovly_idx}:v]scale={scaled_w}:{scaled_h},"
+                    f"setpts=PTS-STARTPTS+{start_t:.3f}/TB{prep_label}"
+                )
+            out_label = f"[vov{oi}]"
+            overlay_filter = (
+                f"__PREV__{prep_label}overlay=x={ox}:y={oy}:"
+                f"enable='between(t\\,{start_t:.3f}\\,{end_t:.3f})'{out_label}"
+            )
+            overlay_video_ops.append((prep_filter, overlay_filter))
+
+            # Audio: trim to clip duration, apply gain, delay into timeline.
+            clip_gain = float(ovc.gain_db or 0.0)
+            delay_ms = int(start_t * 1000)
+            gain_f = f"volume={clip_gain}dB," if clip_gain != 0 else ""
+            filter_parts.append(
+                f"[{ovly_idx}:a]atrim=duration={dur:.3f},asetpts=PTS-STARTPTS,"
+                f"{gain_f}adelay={delay_ms}|{delay_ms}[ova{oi}]"
+            )
+            audio_streams.append(f"[ova{oi}]")
 
     # Narration segments
     if has_narration:
@@ -561,14 +918,17 @@ async def _mix_audio_and_titles(
                 f"measured={getattr(mus, 'measured_loudness_lufs', '?')} → applied={actual_gain:+g}dB"
             )
             gain = f"volume={actual_gain}dB," if actual_gain != 0 else ""
-            # Clamp the fade length to the music length so very short tracks
-            # don't fade the entire track (and so st never goes negative).
-            fade_dur = min(2.0, max(0.0, mus_dur * 0.5))
-            fade_start = max(0.0, mus_dur - fade_dur)
+            # Symmetric fades — fade-in prevents the click that otherwise lands
+            # on the first sample of the music bed; fade-out avoids an abrupt
+            # cutoff when the music is longer than needed.
+            fade_in_dur = min(0.3, max(0.05, mus_dur * 0.1))
+            fade_out_dur = min(2.0, max(0.0, mus_dur * 0.5))
+            fade_out_start = max(0.0, mus_dur - fade_out_dur)
             filter_parts.append(
                 f"[{input_idx}:a]atrim={mus.start:.3f}:duration={mus_dur:.3f},"
                 f"asetpts=PTS-STARTPTS,{gain}"
-                f"afade=t=out:st={fade_start:.3f}:d={fade_dur:.3f}[mus]"
+                f"afade=t=in:st=0:d={fade_in_dur:.3f},"
+                f"afade=t=out:st={fade_out_start:.3f}:d={fade_out_dur:.3f}[mus]"
             )
             audio_streams.append("[mus]")
             input_idx += 1
@@ -584,11 +944,34 @@ async def _mix_audio_and_titles(
     else:
         audio_map = "0:a"
 
-    # Text overlays — requires FFmpeg built with --enable-libfreetype (drawtext filter)
+    # ── Video composition: spine → overlays → titles ───────────────────
     video_map = "0:v"
+
+    # Commit the pending overlay chain (video side) now. prep filters run on
+    # their own [:v] input; the overlay filter chains ``[prev_v] + [prep]`` →
+    # new label, cascaded so the last overlay becomes video_map.
+    if overlay_video_ops:
+        prev_v = "[0:v]"
+        for prep_filter, overlay_filter in overlay_video_ops:
+            filter_parts.append(prep_filter)
+            filter_parts.append(overlay_filter.replace("__PREV__", prev_v))
+            # The overlay filter's output label is the trailing [vov{oi}]
+            prev_v = overlay_filter.rsplit("[", 1)[-1]
+            prev_v = f"[{prev_v}"
+        video_map = prev_v
+
+    # Text overlays — requires FFmpeg built with --enable-libfreetype.
+    # Titles draw last so they sit above every video layer (z-policy).
     txt_files: List[Path] = []
+    fontfile = _system_font()
     if has_titles and _has_drawtext():
-        vf_chain = "[0:v]"
+        title_in = video_map if video_map != "0:v" else "[0:v]"
+        # Route through a null filter if we're starting from the raw input so
+        # we can chain drawtexts reliably.
+        if title_in == "[0:v]":
+            filter_parts.append(f"[0:v]null[vtxtin]")
+            title_in = "[vtxtin]"
+        vf_chain = title_in
         for ti, title in enumerate(edit.titles):
             scaled_size = max(12, int(title.font_size * out_h / edit.timeline.height))
             start_t = title.timeline_offset
@@ -602,19 +985,29 @@ async def _mix_audio_and_titles(
             else:
                 y_expr = "(h-text_h)/2"
             box_opts = ":box=1:boxcolor=black@0.5:boxborderw=6" if is_subtitle else ""
-            # Write text to a temp file to avoid FFmpeg filter escaping issues.
-            # We put the temp next to the output so FFmpeg can read it without
-            # caring about sandboxes on macOS.
+
+            # Fade-in/out via alpha expression. Cap at 25% of duration so very
+            # short titles don't spend all their time fading. Subtitles fade
+            # a bit faster so captions feel snappy.
+            fade = min(0.4 if not is_subtitle else 0.15, title.duration * 0.25)
+            alpha_expr = (
+                f"'if(lt(t,{start_t:.3f}+{fade:.3f}),"
+                f"(t-{start_t:.3f})/{fade:.3f},"
+                f"if(gt(t,{end_t:.3f}-{fade:.3f}),"
+                f"({end_t:.3f}-t)/{fade:.3f},1))'"
+            )
+
             import tempfile as _tf
             txt_file = Path(_tf.mktemp(suffix=".txt", dir=str(output.parent)))
             txt_file.write_text(title.text, encoding="utf-8")
             txt_files.append(txt_file)
-            # Escape single quotes in the path for the filter string
             txt_path_escaped = str(txt_file).replace("'", "\\'")
+            font_opt = f":fontfile='{fontfile}'" if fontfile else ""
             vf_chain += (
-                f"drawtext=textfile='{txt_path_escaped}':"
+                f"drawtext=textfile='{txt_path_escaped}'{font_opt}:"
                 f"fontsize={scaled_size}:fontcolor=white:"
                 f"x=(w-text_w)/2:y={y_expr}{box_opts}:"
+                f"alpha={alpha_expr}:"
                 f"enable='between(t\\,{start_t:.3f}\\,{end_t:.3f})'"
             )
             if ti < len(edit.titles) - 1:
@@ -628,35 +1021,36 @@ async def _mix_audio_and_titles(
 
     cmd = ["ffmpeg", "-y"] + inputs
 
-    logger.info(f"[PREVIEW] Mix pass: filter_parts={len(filter_parts)} video_map={video_map} audio_map={audio_map}")
+    logger.info(
+        f"[RENDER] Mix pass: filter_parts={len(filter_parts)} "
+        f"video_map={video_map} audio_map={audio_map}"
+    )
     if filter_parts:
         for i, fp in enumerate(filter_parts):
-            logger.info(f"[PREVIEW]   filter_part[{i}]: {fp[:120]}")
-        # If we have audio filters but video_map is still raw input,
-        # pipe video through the filter graph so -map works with -filter_complex
+            logger.debug(f"[RENDER]   filter_part[{i}]: {fp[:160]}")
         if video_map == "0:v":
             filter_parts.insert(0, "[0:v]null[vpass]")
             video_map = "[vpass]"
         filter_complex = ";\n".join(filter_parts)
         cmd.extend(["-filter_complex", filter_complex])
-        logger.info(f"[PREVIEW] filter_complex:\n{filter_complex}")
 
     cmd.extend([
         "-map", video_map,
         "-map", audio_map,
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-        "-c:a", "aac", "-b:a", "128k",
+        "-c:v", "libx264",
+        "-preset", str(preset["preset"]),
+        "-crf", str(preset["crf"]),
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", str(preset["audio_bitrate"]),
         "-t", f"{total_dur:.3f}",
         "-movflags", "+faststart",
         str(output),
     ])
-    logger.info(f"[PREVIEW] Mix cmd: {' '.join(str(c) for c in cmd)}")
 
     try:
-        await _run_ffmpeg(cmd)
+        await _run_ffmpeg(cmd, timeout=600.0)
     finally:
-        # Always clean up subtitle temp files — even on error — so the render
-        # directory doesn't accumulate orphans.
         for tf in txt_files:
             try:
                 tf.unlink(missing_ok=True)
@@ -699,5 +1093,10 @@ async def _run_ffmpeg(cmd: List[str], timeout: float = 120.0) -> None:
         raise RuntimeError(f"FFmpeg timed out after {timeout}s")
 
     if proc.returncode != 0:
-        err_text = stderr.decode()[-500:] if stderr else "unknown error"
+        # Log the full stderr at DEBUG so operators can opt in; truncate the
+        # exception to keep the raised string short for the agent's
+        # tool-result surface.
+        full_err = stderr.decode() if stderr else "(no stderr)"
+        logger.debug(f"[RENDER] FFmpeg stderr:\n{full_err}")
+        err_text = full_err[-500:]
         raise RuntimeError(f"FFmpeg failed (exit {proc.returncode}): {err_text}")

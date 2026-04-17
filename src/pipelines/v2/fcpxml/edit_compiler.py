@@ -476,7 +476,13 @@ def compile_edit_decision(
         )
         SubElement(mus_el, "adjust-volume", amount=f"{mus.gain_db:.1f}dB")
 
-    # --- Place titles (positive lanes, attached to spine clips) ---
+    # --- Place titles (reserved high lanes, attached to spine clips) ---
+    # Z-policy: titles always render ABOVE every video layer regardless of
+    # what the agent set as ``title.lane``. Overlay clips (V2/V3/...) use
+    # lanes 2, 3, …; we bump title lanes by +100 so they stay on top. The
+    # FFmpeg renderer mirrors this by drawing titles last. Relative title
+    # ordering among titles is preserved via the per-title ``lane`` value.
+    TITLE_LANE_BASE = 100
     for title in edit.titles:
         if not title_effect_id:
             break
@@ -495,11 +501,12 @@ def compile_edit_decision(
         title_parent_source_start = _get_clip_source_start(parent_clip)
         t_offset = title_parent_source_start + _fraction_from_seconds(rel_offset, fps_hint=fps)
 
+        effective_lane = TITLE_LANE_BASE + max(1, title.lane)
         title_el = SubElement(
             parent_clip, "title",
             name=title.text[:32],
             ref=title_effect_id,
-            lane=str(title.lane),
+            lane=str(effective_lane),
             offset=_format_fraction_seconds(t_offset),
             start="0s",
             duration=_format_fraction_seconds(t_tl_dur),

@@ -284,6 +284,28 @@ land on word boundaries from the refine_clip_timestamps transcript. Never cut mi
 - Use cross-dissolves sparingly for time passage or emotional beats, not between every clip.
 - Consider fade-in from black at the start and fade-out to black at the end.
 
+### Video layering and z-order
+
+Clips have a `track` field that controls which video layer they live on:
+- `track = 1` → the main spine (V1). Clips are laid out sequentially by array order.
+- `track = 2, 3, ...` → overlay layers above the spine. They need `timeline_offset`
+  set (absolute seconds) because they aren't sequential — they float freely on top of V1.
+
+**Z-order rule:** higher track number = drawn on top. A track-2 clip placed over a track-1
+clip at the same timeline position fully covers V1 during its window unless its
+`transform.scale_x/y < 1` (then it's rendered as a smaller picture-in-picture and V1 shows
+through around it). There is no `opacity` field — every clip is fully opaque.
+
+**Titles always win.** Titles render above every video layer regardless of their `lane`
+value. Don't worry about coordinating title `lane` with clip `track` numbers — a title
+placed at the same time as a V2/V3 overlay will always be visible.
+
+**Overlay use cases (track 2+):**
+- **Full-cover b-roll** over a dialogue clip on V1 (scale=1.0, position=0,0) — the V1 clip
+  still provides audio but its video is hidden during the overlay window.
+- **Picture-in-picture** (scale < 1.0) — e.g. a reaction shot scaled to 0.3 in the corner
+  while the main interview continues on V1.
+
 ### Avoiding common mistakes
 - **Jump cuts**: don't place consecutive clips from the same camera angle back-to-back
   unless intentional (e.g. interview with cutaway removal).

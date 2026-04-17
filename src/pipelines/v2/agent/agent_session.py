@@ -607,7 +607,7 @@ class AgentSession:
                 edit=edit,
                 footage_dir=footage_dir,
                 output_path=output_path,
-                resolution=480,
+                quality="draft",
                 progress_callback=progress_cb,
             )
 
@@ -697,6 +697,106 @@ class AgentSession:
                 )
                 self._subscribers.discard(sub)
 
+    async def _render_ffmpeg_final(
+        self,
+        resolve_missing: bool = False,
+        resolve_error: Optional[str] = None,
+    ) -> None:
+        """Render a timeline-native final MP4 via FFmpeg.
+
+        Used as a fallback when DaVinci Resolve isn't available or its render
+        failed. Slower than the draft but matches the timeline resolution and
+        uses a higher-quality encoder preset.
+        """
+        try:
+            import json as _json
+            from src.pipelines.v2.schemas import EditDecision
+            from src.pipelines.v2.preview.ffmpeg_renderer import render_ffmpeg_preview
+
+            ed_path = self.workspace.root / "fcpxml" / "edit_decision.json"
+            if not ed_path.exists():
+                ed_path = self.workspace.root / "edit_decision.json"
+            if not ed_path.exists():
+                logger.warning("[AGENT] No edit_decision.json for FFmpeg final render")
+                return
+
+            with open(ed_path) as f:
+                ed_data = _json.load(f)
+            edit = EditDecision.model_validate(ed_data)
+
+            footage_dir = self.workspace.get_footage_dir()
+            output_path = self.workspace.get_render_path("final")
+
+            self._render_state = {
+                "status": "rendering", "progress": 0,
+                "renderer": "ffmpeg", "quality": "final",
+            }
+            try:
+                await self._emit("render_start", {
+                    "renderer": "ffmpeg",
+                    "quality": "final",
+                    "reason": "resolve_missing" if resolve_missing else "resolve_failed",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass
+
+            async def progress_cb(pct: float):
+                self._render_state["progress"] = pct
+                try:
+                    await self._emit("render_progress", {
+                        "renderer": "ffmpeg",
+                        "quality": "final",
+                        "percent": pct,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+                except Exception:
+                    pass
+
+            rendered = await render_ffmpeg_preview(
+                edit=edit,
+                footage_dir=footage_dir,
+                output_path=output_path,
+                quality="final",
+                progress_callback=progress_cb,
+            )
+            self._render_state = {
+                "status": "complete", "filename": Path(rendered).name,
+                "renderer": "ffmpeg", "quality": "final",
+            }
+            try:
+                await self._emit("render_complete", {
+                    "renderer": "ffmpeg",
+                    "quality": "final",
+                    "output_path": rendered,
+                    "filename": Path(rendered).name,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass
+            logger.info(f"[AGENT] FFmpeg final render complete: {rendered}")
+
+        except Exception as e:
+            logger.warning(f"[AGENT] FFmpeg final render failed (non-fatal): {e}")
+            self._render_state = {"status": "error", "error": str(e)}
+            brief = str(e) if len(str(e)) < 240 else str(e)[:240] + "…"
+            # Only surface when BOTH paths failed — Resolve-missing + ffmpeg
+            # failure is the actually-broken case the agent should know about.
+            if not resolve_missing or resolve_error:
+                self._pending_background_warnings.append(
+                    f"Both DaVinci Resolve and FFmpeg final renders failed — "
+                    f"only the draft is available. FFmpeg error: {brief}"
+                )
+            try:
+                await self._emit("render_error", {
+                    "renderer": "ffmpeg",
+                    "quality": "final",
+                    "error": str(e),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass
+
     async def _auto_render_preview(self, fcpxml_result: Dict) -> None:
         """Kick off a Resolve preview render in the background after FCPXML generation."""
         # Start FFmpeg draft render first (fast, no Resolve dependency)
@@ -756,14 +856,10 @@ class AgentSession:
             logger.info(f"[AGENT] Auto-render complete: {rendered}")
 
         except Exception as e:
-            logger.warning(f"[AGENT] Auto-render failed (non-fatal): {e}")
+            logger.warning(f"[AGENT] Resolve final render failed (non-fatal): {e}")
             self._render_state = {"status": "error", "error": str(e)}
             raw = str(e)
             brief = raw if len(raw) < 240 else raw[:240] + "…"
-            # Resolve is optional; don't alarm the user if it's simply not
-            # installed. Only surface real failures (import ok, render ran, Resolve
-            # refused the file). The common "Resolve not running / not installed"
-            # case raises an ImportError or connection error with a known shape.
             lower = raw.lower()
             is_resolve_missing = (
                 "davinci" in lower or "resolve" in lower
@@ -771,11 +867,12 @@ class AgentSession:
                 "not running" in lower or "not found" in lower
                 or "connection" in lower or "no module" in lower
             )
-            if not is_resolve_missing:
-                self._pending_background_warnings.append(
-                    f"DaVinci Resolve final-render FAILED — only the FFmpeg "
-                    f"draft is available. Underlying error: {brief}"
-                )
+            # Fall back to an FFmpeg final render so users without DaVinci
+            # still get a timeline-native MP4 without having to install it.
+            self._spawn_bg_task(self._render_ffmpeg_final(
+                resolve_missing=is_resolve_missing,
+                resolve_error=brief if not is_resolve_missing else None,
+            ))
             try:
                 await self._emit("render_error", {
                     "renderer": "resolve",

@@ -151,10 +151,38 @@ Four markdown files in `{workspace}/scratchpads/` give the agent durable memory 
 
 ### Renders
 
-* **Draft** — `src/pipelines/v2/preview/ffmpeg_renderer.py` runs as a **background asyncio task** spawned by `AgentSession._auto_render_preview` after `generate_fcpxml` succeeds. Outputs `{workspace}/renders/draft.mp4`. Always available.
-* **Final** — DaVinci Resolve via `lib/utils/resolve_render.py`, also spawned in the same background task. Outputs `{workspace}/renders/final.mp4`. Optional; requires DaVinci Resolve Studio.
+`src/pipelines/v2/preview/ffmpeg_renderer.py:render_ffmpeg_preview(edit, footage_dir, output_path, quality=...)` is the single ffmpeg entrypoint with two modes:
 
-Because renders are async, callers that need the final file (e.g. the CLI) must `await` the session's `_bg_tasks`. The dashboard's preview tabs default to draft, with Final shown when available.
+| quality | resolution | preset | crf | used for |
+|---------|-----------|--------|-----|----------|
+| `draft` | 480p | ultrafast | 28 | fast background preview after every `generate_fcpxml` |
+| `final` | timeline native | slow | 18 | fallback when DaVinci isn't available |
+
+Feature coverage — matches the full EditDecision surface:
+
+- V1 spine sequencing, clip in/out, per-clip gain, constant speed change.
+- Transform: scale, pan, rotation, multi-shot crops (`shot_transforms`).
+- **SAR-correct fit** — applies `scale=iw*sar:ih,setsar=1` then letterboxes to the timeline aspect. Matches Resolve's default "Spatial Conform: Fit" behavior so ffmpeg + Resolve produce visually equivalent output.
+- Upper-track clips (`track >= 2`) composited via `overlay` at their `timeline_offset`. `transform.scale_x/y` acts as PIP size; `position_x/y` as canvas-center-relative offset. Overlay audio joins the mix.
+- Transitions (`clip.transition_after`): cross-dissolve → `xfade fade`; fade-in / fade-out → `xfade fadeblack`; audio paired with `acrossfade`. Non-transition clip pairs use plain concat.
+- Narration + music mix with LUFS auto-gain. Music gets symmetric fade-in and fade-out.
+- Titles drawn as the LAST video layer (z-policy: always on top), with fade-in/out alpha. `drawtext` uses a resolved system font (Helvetica on macOS, DejaVu on Linux).
+
+Orchestration in `AgentSession`:
+
+1. `_render_ffmpeg_draft` — always spawned after `generate_fcpxml`.
+2. `_auto_render_preview` then tries DaVinci Resolve.
+3. If Resolve fails / isn't installed → `_render_ffmpeg_final` runs as fallback so users without DaVinci still get a final MP4.
+
+Outputs: `{workspace}/renders/draft.mp4` always; `{workspace}/renders/final.mp4` from Resolve when available, else ffmpeg-final. Because renders are async, callers that need the final file (e.g. the CLI) must `await` the session's `_bg_tasks`.
+
+### Z-order policy
+
+No `opacity` field — every video layer is fully opaque. Render order:
+
+1. V1 spine (bottom).
+2. V2+ overlay clips (higher `track` = on top).
+3. Titles — always drawn LAST, above every video layer, regardless of their `lane` value. FCPXML compiler enforces this by bumping title lanes into a reserved `100+lane` range; ffmpeg renderer enforces this by drawing titles last. Both renderers agree on title visibility.
 
 ### Title lane rendering
 
