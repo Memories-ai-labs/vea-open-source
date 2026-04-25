@@ -328,10 +328,15 @@ Each project lives in `data/workspaces/{project_name}/`:
 |   +-- edit_v1.fcpxml          # Compiled FCPXML 1.10
 |
 +-- renders/
-|   +-- draft.mp4               # Auto-rendered FFmpeg draft (always available)
-|   +-- final.mp4               # DaVinci Resolve final render (optional)
+|   +-- ffmpeg.mp4              # FFmpeg render, always (480p preview or timeline-native)
+|   +-- resolve.mp4             # DaVinci Resolve render, optional (timeline-native)
 |
-+-- logs/run.log
++-- logs/                       # Per-project debug bundle (see "Logging" below)
+    +-- manifest.json           # Git SHA, ffmpeg version, platform, model IDs
+    +-- backend.jsonl           # JSONL: every [AGENT]/[RENDER]/[COMPILER] log line
+    +-- llm.jsonl               # JSONL: every LLM request+response (redacted)
+    +-- renders/                # One ffmpeg stderr log per render pass
+    +-- refine_clips/           # PySceneDetect + STT intermediates
 ```
 
 > **Note:** The legacy V1 planning loop wrote additional files (`storyboard.json`, `clips.json`, `iterations/`, `context.md`). The V2 agent flow does not produce these. You may see them in older workspaces; they are safe to ignore or delete.
@@ -535,12 +540,30 @@ DaVinci Resolve support is implemented but optional. It provides rendering of FC
 
 ### Auto-Render
 
-After FCPXML generation, the agent session kicks off two renders:
+After FCPXML generation, the agent session kicks off two parallel renders:
 
-- **Draft** (always): `src/pipelines/v2/preview/ffmpeg_renderer.py` runs an FFmpeg-based render to `{workspace}/renders/draft.mp4`. Fast, low-resolution (480p shorter dimension, aspect-aware), no Resolve needed.
-- **Final** (optional): If DaVinci Resolve is available, `lib/utils/resolve_render.py` produces `{workspace}/renders/final.mp4` at the timeline's native resolution.
+- **FFmpeg** (always): `src/pipelines/v2/preview/ffmpeg_renderer.py` runs an FFmpeg-based render to `{workspace}/renders/ffmpeg.mp4`. Two quality modes — `"draft"` (480p shorter dimension, ultrafast preset, default) and `"full"` (timeline-native, slow preset). The mode is per-session and can be toggled from the dashboard render tab or via `set_ffmpeg_quality`.
+- **Resolve** (optional): If DaVinci Resolve is available, `lib/utils/resolve_render.py` produces `{workspace}/renders/resolve.mp4` at the timeline's native resolution. Otherwise the resolve tab shows an idle message.
 
-Both emit `render_start`, `render_progress`, and `render_complete` (or `render_error`) events. The dashboard preview tabs default to the draft and switch to final when ready.
+Both emit `render_start`, `render_progress`, and `render_complete` (or `render_error`) events. The dashboard shows both tabs side-by-side; UI edits (drag/gain/undo) call `schedule_ffmpeg_rerender()`, a debounced (~1.5s) auto-rerender so the preview always reflects the current edit.
+
+### Logging
+
+Every agent session writes a structured debug bundle to `{workspace}/logs/`. The goal is that a single zip of that folder gives someone else (you, a teammate, or the person who filed the bug report) everything they need to diagnose a broken run.
+
+**How it's wired** — `src/pipelines/v2/logging_setup.py` defines a `WorkspaceLogScope` context manager backed by Python's `contextvars`. `AgentSession.handle_user_message`, `_render_ffmpeg`, and `_render_resolve` each enter the scope around their work, which activates a single root-logger JSONL handler for the duration. Any `logger.info(...)` call inside the scope (including inside asyncio tasks spawned from within it — contextvars are preserved across `asyncio.create_task`) routes to `logs/backend.jsonl` of the right project. Outside a scope, records are dropped rather than leaking to an unrelated project's bundle.
+
+**What's captured**:
+
+| File | Written by | Cleared on `clear/planning` |
+|------|-----------|------------------------------|
+| `manifest.json` | `logging_setup.write_manifest()` at `AgentSession.__init__` | yes (rewritten next session) |
+| `backend.jsonl` | `_WorkspaceHandler` attached to root logger | yes |
+| `llm.jsonl` | `append_llm_event()` at every main_llm call site in `agent_session.py` and video_llm call sites in `tools.py` | yes |
+| `renders/ffmpeg-<ts>.log` | `_run_ffmpeg` via `_render_log_path` contextvar scoped by `render_ffmpeg_preview` | yes |
+| `refine_clips/*` | `refine_clip_timestamps` tool (pre-existing, segment MP4s + `refine_debug.jsonl`) | yes |
+
+**Redaction** — `redact()` in `logging_setup.py` masks dict keys matching `api_key`, `secret`, `authorization`, `password`, `access_token`, `auth_token`, `refresh_token`, or a standalone `token`, plus any `Bearer <...>` substring in free-form strings. The legitimate `tokens` field (LLM usage counts) is preserved.
 
 ### API Endpoints
 

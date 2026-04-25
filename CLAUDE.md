@@ -170,11 +170,11 @@ Feature coverage — matches the full EditDecision surface:
 
 Orchestration in `AgentSession`:
 
-1. `_render_ffmpeg_draft` — always spawned after `generate_fcpxml`.
-2. `_auto_render_preview` then tries DaVinci Resolve.
-3. If Resolve fails / isn't installed → `_render_ffmpeg_final` runs as fallback so users without DaVinci still get a final MP4.
+1. `_render_ffmpeg` — always spawned after `generate_fcpxml`; honors `_ffmpeg_quality_pref` (`"draft"` 480p by default, `"full"` = timeline-native).
+2. `_render_resolve` — spawned in parallel; tries DaVinci Resolve and silently no-ops if Resolve isn't installed.
+3. Writable from the dashboard on demand via the render tab toggle. UI edits (drag/gain/undo) trigger `schedule_ffmpeg_rerender()` which debounces for ~1.5s before re-rendering.
 
-Outputs: `{workspace}/renders/draft.mp4` always; `{workspace}/renders/final.mp4` from Resolve when available, else ffmpeg-final. Because renders are async, callers that need the final file (e.g. the CLI) must `await` the session's `_bg_tasks`.
+Outputs: `{workspace}/renders/ffmpeg.mp4` always; `{workspace}/renders/resolve.mp4` when Resolve is available. Because renders are async, callers that need the final file (e.g. the CLI) must `await` the session's `_bg_tasks`.
 
 ### Z-order policy
 
@@ -212,6 +212,19 @@ Tagged prefixes make backend logs easy to grep:
 ### Tool result protocol
 
 Tool executors return a `dict` that gets serialized into the LLM `FunctionResponse`. Always include either `success`/`result` or `error`. Side effects that the dashboard should react to are emitted as separate WebSocket events from `agent_session.py` (e.g. `timeline_update`, `scratchpad_update`, `render_start/progress/complete`).
+
+### Per-project logging
+
+`src/pipelines/v2/logging_setup.py` installs a contextvar-scoped JSONL file handler on the root logger. `AgentSession.handle_user_message`, `_render_ffmpeg`, and `_render_resolve` each wrap their work in a `WorkspaceLogScope`, which routes every `logger.info` / `logger.warning` into `{workspace}/logs/backend.jsonl`. Contextvars propagate through `asyncio.create_task`, so bg renders inherit the scope. Outside a scope, records are dropped rather than leaking between projects.
+
+Bundle contents (all cleared on `clear/planning`, regenerated on next session):
+- `manifest.json` — git SHA + ffmpeg version + platform + model IDs (written once per session)
+- `backend.jsonl` — Python logger output, one JSON record per line, ISO ts
+- `llm.jsonl` — every `main_llm.generate_content` call (and video_llm calls from tools): prompt turn count, response text, function_calls, token usage, duration. Secrets redacted via `redact()` in `logging_setup.py`
+- `renders/ffmpeg-<quality>-<ts>.log` — full ffmpeg subprocess stderr for each render pass, commands included; written via `_render_log_path` contextvar in `ffmpeg_renderer.py`
+- `refine_clips/` — PySceneDetect / STT intermediates from `refine_clip_timestamps`
+
+When adding new LLM call sites or subprocess invocations, wire them to the bundle — `append_llm_event(workspace.root, {...})` for LLM calls, `open_render_log(workspace.root, "name")` for subprocess stderr — so support zips stay comprehensive.
 
 ### Don't
 
@@ -295,10 +308,11 @@ Under the hood it:
    gains the `_AUTONOMOUS_ADDENDUM` (`system_prompt.py`) telling the agent to
    skip clarifying questions, iterate perfectionist-style across multiple
    `generate_fcpxml` calls, and ship a decisive factual `final_message`.
-4. Awaits `handle_user_message(brief)`, then waits for draft + Resolve
-   background renders.
-5. Prints a final JSON line on stdout: `{"status":"ok","fcpxml":"...","draft_mp4":"...","final_mp4":"...","edit_decision":{...}}`.
-   Exit 0 on success; non-zero + structured error JSON on failure.
+4. Awaits `handle_user_message(brief)`, then waits for ffmpeg + Resolve
+   background renders (cap: `DEFAULT_RENDER_WAIT_SECONDS` = 300s).
+5. Prints a final JSON line on stdout: `{"status":"ok","fcpxml":"...","ffmpeg_mp4":"...","resolve_mp4":"...","edit_decision":{...}}`.
+   Exit 0 on success; non-zero + structured error JSON on failure
+   (2=no footage, 3=indexing, 4=empty session, 5=timeout, 6=agent error, 7=no FCPXML produced).
 
 ## Agent modes
 

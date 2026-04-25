@@ -151,10 +151,10 @@ Four markdown files in `{workspace}/scratchpads/` give the agent durable memory 
 
 ### Renders
 
-* **Draft** — `src/pipelines/v2/preview/ffmpeg_renderer.py` runs as a **background asyncio task** spawned by `AgentSession._auto_render_preview` after `generate_fcpxml` succeeds. Outputs `{workspace}/renders/draft.mp4`. Always available.
-* **Final** — DaVinci Resolve via `lib/utils/resolve_render.py`, also spawned in the same background task. Outputs `{workspace}/renders/final.mp4`. Optional; requires DaVinci Resolve Studio.
+* **FFmpeg** — `src/pipelines/v2/preview/ffmpeg_renderer.py` runs as a **background asyncio task** spawned by `AgentSession._render_ffmpeg` after `generate_fcpxml` succeeds. Outputs `{workspace}/renders/ffmpeg.mp4`. Always available. Two quality modes: `"draft"` (480p, ultrafast preset — default) and `"full"` (timeline-native, slow preset). Toggle per-session via the dashboard render tab or `set_ffmpeg_quality` WebSocket message.
+* **Resolve** — DaVinci Resolve via `lib/utils/resolve_render.py`, spawned in parallel to the ffmpeg render. Outputs `{workspace}/renders/resolve.mp4`. Optional; requires DaVinci Resolve Studio.
 
-Because renders are async, callers that need the final file (e.g. the CLI) must `await` the session's `_bg_tasks`. The dashboard's preview tabs default to draft, with Final shown when available.
+Because renders are async, callers that need the final file (e.g. the CLI) must `await` the session's `_bg_tasks`. The dashboard's preview tabs show ffmpeg (with the 480p/full toggle) and resolve side-by-side; resolve shows an idle message when unavailable. UI edits (drag/gain/undo) call `schedule_ffmpeg_rerender()` which debounces for ~1.5s before re-rendering.
 
 ### Title lane rendering
 
@@ -184,6 +184,19 @@ Tagged prefixes make backend logs easy to grep:
 ### Tool result protocol
 
 Tool executors return a `dict` that gets serialized into the LLM `FunctionResponse`. Always include either `success`/`result` or `error`. Side effects that the dashboard should react to are emitted as separate WebSocket events from `agent_session.py` (e.g. `timeline_update`, `scratchpad_update`, `render_start/progress/complete`).
+
+### Per-project logging
+
+`src/pipelines/v2/logging_setup.py` installs a contextvar-scoped JSONL file handler on the root logger. `AgentSession.handle_user_message`, `_render_ffmpeg`, and `_render_resolve` each wrap their work in a `WorkspaceLogScope`, which routes every `logger.info` / `logger.warning` into `{workspace}/logs/backend.jsonl`. Contextvars propagate through `asyncio.create_task`, so bg renders inherit the scope. Outside a scope, records are dropped rather than leaking between projects.
+
+Bundle contents (all cleared on `clear/planning`, regenerated on next session):
+- `manifest.json` — git SHA + ffmpeg version + platform + model IDs (written once per session)
+- `backend.jsonl` — Python logger output, one JSON record per line, ISO ts
+- `llm.jsonl` — every `main_llm.generate_content` call (and video_llm calls from tools): prompt turn count, response text, function_calls, token usage, duration. Secrets redacted via `redact()` in `logging_setup.py`
+- `renders/ffmpeg-<quality>-<ts>.log` — full ffmpeg subprocess stderr for each render pass, commands included; written via `_render_log_path` contextvar in `ffmpeg_renderer.py`
+- `refine_clips/` — PySceneDetect / STT intermediates from `refine_clip_timestamps`
+
+When adding new LLM call sites or subprocess invocations, wire them to the bundle — `append_llm_event(workspace.root, {...})` for LLM calls, `open_render_log(workspace.root, "name")` for subprocess stderr — so support zips stay comprehensive.
 
 ### Don't
 
@@ -267,10 +280,11 @@ Under the hood it:
    gains the `_AUTONOMOUS_ADDENDUM` (`system_prompt.py`) telling the agent to
    skip clarifying questions, iterate perfectionist-style across multiple
    `generate_fcpxml` calls, and ship a decisive factual `final_message`.
-4. Awaits `handle_user_message(brief)`, then waits for draft + Resolve
-   background renders.
-5. Prints a final JSON line on stdout: `{"status":"ok","fcpxml":"...","draft_mp4":"...","final_mp4":"...","edit_decision":{...}}`.
-   Exit 0 on success; non-zero + structured error JSON on failure.
+4. Awaits `handle_user_message(brief)`, then waits for ffmpeg + Resolve
+   background renders (cap: `DEFAULT_RENDER_WAIT_SECONDS` = 300s).
+5. Prints a final JSON line on stdout: `{"status":"ok","fcpxml":"...","ffmpeg_mp4":"...","resolve_mp4":"...","edit_decision":{...}}`.
+   Exit 0 on success; non-zero + structured error JSON on failure
+   (2=no footage, 3=indexing, 4=empty session, 5=timeout, 6=agent error, 7=no FCPXML produced).
 
 ## Agent modes
 

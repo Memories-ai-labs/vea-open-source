@@ -240,6 +240,17 @@ The backend prints structured log lines prefixed with tags:
 - `[COMPREHENSION]` -- Indexing pipeline
 - `[COMPILER]` -- FCPXML compilation
 - `[MUSIC]` -- Lyria 3 music generation (via OpenRouter)
+- `[RENDER]` -- FFmpeg render pipeline
+- `[RESOLVE]` -- DaVinci Resolve renders
+
+All of these are ALSO captured per-project into `data/workspaces/{project}/logs/backend.jsonl` as one JSON record per line, with ISO timestamps. Pipe to `jq` for filtering, e.g. errors only:
+
+```bash
+jq -c 'select(.level=="ERROR" or .level=="WARNING")' \
+   "data/workspaces/{project}/logs/backend.jsonl"
+```
+
+Every LLM call goes to `logs/llm.jsonl` with its prompt, response, tool calls, tokens, and duration (secrets redacted). Each `generate_fcpxml` also produces `logs/renders/ffmpeg-<ts>.log` with the full ffmpeg subprocess stderr. See the "Debugging / support bundles" section of the README for the full file layout.
 
 ### WebSocket connection issues
 

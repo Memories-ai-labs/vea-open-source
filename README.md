@@ -189,7 +189,7 @@ The agent updates the plan, regenerates the edit, and re-renders.
 
 When you're happy:
 
-* **MP4** — `data/workspaces/my-project/renders/draft.mp4` (FFmpeg) or `final.mp4` (DaVinci Resolve, if installed)
+* **MP4** — `data/workspaces/my-project/renders/ffmpeg.mp4` (FFmpeg, always available) or `resolve.mp4` (DaVinci Resolve, if installed)
 * **FCPXML** — `data/workspaces/my-project/fcpxml/edit_v1.fcpxml`, importable into Final Cut Pro, DaVinci Resolve, or Premiere Pro
 
 ---
@@ -205,15 +205,28 @@ python -m src.cli \
   --footage-dir ./clips
 ```
 
-The CLI symlinks your footage into the workspace, indexes if needed, runs the agent in autonomous mode (no clarifying questions — it commits to a reasonable interpretation of the brief), and prints a single JSON line on the last stdout row with the rendered artifact paths:
+The CLI symlinks your footage into the workspace, indexes if needed, runs the agent in **autonomous mode**, and prints a single JSON line on the last stdout row with the rendered artifact paths:
 
 ```json
 {"status":"ok","project":"promo","fcpxml":"/abs/edit_v1.fcpxml",
- "draft_mp4":"/abs/draft.mp4","final_mp4":"/abs/final.mp4",
+ "ffmpeg_mp4":"/abs/ffmpeg.mp4","resolve_mp4":"/abs/resolve.mp4",
  "edit_decision":{...}}
 ```
 
-Flags: `--reuse-index` (skip re-indexing if a session already exists), `--log-format jsonl` (structured progress events for programmatic parsing), `--timeout N` (hard cap on the agent loop, default 900s). Non-zero exit on any unrecoverable failure, with a `status: "error"` JSON still printed so the caller gets structured feedback.
+Autonomous mode vs. the dashboard's collaborative mode — same agent loop, different temperament (`src/pipelines/v2/agent/modes.py`):
+
+| Behavior | Collaborative (dashboard) | Autonomous (CLI) |
+|----------|---------------------------|------------------|
+| Clarifying questions | Asks before editing | Commits to a reasonable interpretation |
+| Iteration | Waits for human feedback | Self-iterates (`generate_fcpxml` → self-critique → adjust) |
+| Tool-round cap | 40 | 120 |
+| Stuck-loop watchdog | Off (human nudges) | On — after 3× identical tool calls, injects a synthetic nudge |
+| Turn end | `finish_turn` or text reply | `finish_turn` with a decisive `final_message` |
+| Round exhaustion | Surfaces error | Emits `turn_exhausted` event |
+
+Flags: `--reuse-index` (skip re-indexing if a session already exists), `--log-format jsonl` (structured progress events for programmatic parsing), `--timeout N` (hard cap on the agent loop in seconds, default 900). Non-zero exit on any unrecoverable failure, with a `status: "error"` JSON still printed so the caller gets structured feedback.
+
+Exit codes: `0` ok · `2` no footage · `3` indexing failed · `4` empty session · `5` timeout · `6` agent error · `7` finished without an FCPXML.
 
 ---
 
@@ -240,10 +253,17 @@ Each project is self-contained under `data/workspaces/{project_name}/`:
 │   ├── edit_decision.json   # Structured edit (LLM output)
 │   └── edit_v1.fcpxml       # Compiled FCPXML 1.10
 ├── renders/
-│   ├── draft.mp4            # Quick FFmpeg draft
-│   └── final.mp4            # DaVinci Resolve final (optional)
-└── logs/run.log
+│   ├── ffmpeg.mp4           # FFmpeg render (always; 480p preview or timeline-native)
+│   └── resolve.mp4          # DaVinci Resolve render (optional, timeline-native)
+└── logs/                    # Per-project debug bundle (see Debugging below)
+    ├── manifest.json        # Env fingerprint at session start (git SHA, ffmpeg, platform, models)
+    ├── backend.jsonl        # Python logger output (one JSON record per line, ISO timestamps)
+    ├── llm.jsonl            # Every main_llm / video_llm call: prompt, response, tokens, duration
+    ├── renders/             # ffmpeg subprocess stderr, one file per render pass
+    └── refine_clips/        # PySceneDetect + STT intermediates (existing)
 ```
+
+Everything under `logs/` is wiped on **clear/planning** (or the dashboard's "Clear planning and chat" menu). Nothing in `logs/` contains footage itself, so you can safely zip and share it for a bug report.
 
 ---
 
@@ -282,6 +302,24 @@ V2 (current, agent-driven) is at `/video-edit/v2`. The most useful endpoints:
 | `POST` | `/v2/projects/{project}/clear/memories` | Delete uploaded videos from Memories.ai |
 
 A legacy V1 pipeline-style API still lives at `/video-edit/v1` (index → flexible_respond). It's the original system from the paper and is kept for reproducibility, but the dashboard and agent flow only use V2. The original V1-only codebase is preserved on the [`legacy/v1-main`](https://github.com/Memories-ai-labs/vea-open-source/tree/legacy/v1-main) branch.
+
+---
+
+## 🪵 Debugging / support bundles
+
+Every agent session writes a structured debug bundle to `data/workspaces/{project}/logs/`. It's designed so that when someone says "VEA blew up on my machine," you can ask for a zip of that folder and have everything you need in one place:
+
+| File | What it contains |
+|------|------------------|
+| `manifest.json` | Git SHA, ffmpeg version, Python version, platform, and the exact `main_llm` / `video_llm` model IDs active at session start |
+| `backend.jsonl` | Every `logger.info` / `warning` / `error` line from the agent loop, FCPXML compiler, and ffmpeg renderer. One JSON record per line with ISO timestamps — pipe to `jq` |
+| `llm.jsonl` | Every LLM call: prompt turn count, full response text, function-call names + args, token usage, duration, finish reason. API keys / bearer tokens are auto-redacted |
+| `renders/ffmpeg-*.log` | Full ffmpeg subprocess stderr for each render pass, one file per `_render_ffmpeg` invocation with the exact command line |
+| `refine_clips/*` | PySceneDetect and STT intermediates produced by `refine_clip_timestamps` |
+
+Contents are scoped per-project via a Python `contextvars`-based log handler, so two concurrent sessions don't cross-contaminate. The bundle is cleared whenever you hit **Clear planning and chat** in the dashboard (or `POST /v2/projects/{project}/clear/planning`), and the next session re-creates `manifest.json` automatically.
+
+Sharing a bundle: `cd data/workspaces/{project} && zip -r ../../../{project}-logs.zip logs/`. No footage or API keys leave your machine.
 
 ---
 
