@@ -19,7 +19,6 @@ from src.pipelines.v2.schemas import (
     TextOverlay,
     TimelineSettings,
     TransformSettings,
-    TransitionSpec,
 )
 
 
@@ -54,17 +53,11 @@ def test_clip_decision_roundtrip_preserves_all_fields():
         transform=TransformSettings(scale_x=1.2, position_x=0.1),
         transform_mode="custom",
         source_width=3840, source_height=2160,
-        transition_after=TransitionSpec(type="cross-dissolve", duration_seconds=1.0),
         track=2, timeline_offset=7.5,
     )
     dumped = original.model_dump()
     rehydrated = ClipDecision.model_validate(dumped)
     assert rehydrated.model_dump() == dumped
-
-
-def test_clip_decision_transition_spec_validates_type():
-    with pytest.raises(ValidationError):
-        TransitionSpec(type="morph-cube", duration_seconds=1.0)  # type: ignore
 
 
 # ─── NarrationSegment ────────────────────────────────────────────────────────

@@ -15,6 +15,12 @@ from src.pipelines.v2.agent.modes import AgentMode, MAX_TOOL_ROUNDS_BY_MODE
 from src.pipelines.v2.agent.scratchpad import ScratchpadManager
 from src.pipelines.v2.agent.system_prompt import build_system_prompt
 from src.pipelines.v2.agent.tools import TOOL_DECLARATIONS, ToolExecutor
+from src.pipelines.v2.logging_setup import (
+    WorkspaceLogScope,
+    append_llm_event,
+    install as install_workspace_logging,
+    write_manifest,
+)
 from src.pipelines.v2.workspace import _atomic_write_json
 
 logger = logging.getLogger(__name__)
@@ -22,6 +28,45 @@ logger = logging.getLogger(__name__)
 MAX_HISTORY_TURNS = 80  # keep last N turns (user + model + tool rounds)
 # Per-mode cap lives in src/pipelines/v2/agent/modes.py (MAX_TOOL_ROUNDS_BY_MODE).
 # Autonomous mode gets a much larger budget because there's no human to nudge it.
+
+
+def _summarize_llm_response(response) -> Dict[str, Any]:
+    """Flatten a google.genai response into a log-friendly dict.
+
+    Captures token counts, finish reason, text output, and function-call
+    names/args — enough to replay or debug without dumping the raw SDK
+    objects (which don't JSON-serialize cleanly).
+    """
+    out: Dict[str, Any] = {}
+    try:
+        usage = getattr(response, "usage_metadata", None)
+        if usage:
+            out["tokens"] = {
+                "prompt": getattr(usage, "prompt_token_count", None),
+                "output": getattr(usage, "candidates_token_count", None),
+                "total": getattr(usage, "total_token_count", None),
+            }
+        cands = getattr(response, "candidates", None) or []
+        if cands:
+            c0 = cands[0]
+            out["finish_reason"] = str(getattr(c0, "finish_reason", "") or "")
+            parts = getattr(getattr(c0, "content", None), "parts", None) or []
+            texts = [p.text for p in parts if getattr(p, "text", None)]
+            if texts:
+                out["text"] = "\n".join(texts)
+            calls = []
+            for p in parts:
+                fc = getattr(p, "function_call", None)
+                if fc is not None:
+                    calls.append({
+                        "name": fc.name,
+                        "args": dict(fc.args) if fc.args else {},
+                    })
+            if calls:
+                out["function_calls"] = calls
+    except Exception as _e:
+        out["_summarize_error"] = str(_e)
+    return out
 
 
 @dataclass
@@ -96,7 +141,9 @@ class AgentSession:
         # Probe each footage file's actual duration via ffprobe so the agent
         # never invents source_start/source_end values past the file end.
         import subprocess
+        from src.pipelines.v2.timing import probe_fps, dominant_fps
         footage_durations: Dict[str, float] = {}
+        footage_fps: Dict[str, float] = {}
         for fp in footage_files:
             try:
                 out = subprocess.run(
@@ -108,8 +155,17 @@ class AgentSession:
                 footage_durations[fp.name] = round(dur, 2)
             except Exception:
                 footage_durations[fp.name] = 0.0
+            # Probe frame rate too — used to auto-match timeline fps and to
+            # frame-snap source_start/source_end values at render time.
+            fps_val = probe_fps(fp)
+            if fps_val is not None:
+                footage_fps[fp.name] = fps_val
         # Cache for use elsewhere (e.g. _generate_fcpxml validation)
         self.footage_durations = footage_durations
+        self.footage_fps = footage_fps
+        # Dominant fps across all footage — used as the default timeline fps
+        # so no frame-rate conversion is needed for single-source edits.
+        self.source_fps = dominant_fps(footage_files)
 
         def _dur_label(name: str) -> str:
             d = footage_durations.get(name, 0)
@@ -139,9 +195,23 @@ class AgentSession:
                 video_lines.append(f"- (unmatched footage file: `{fn}`, {_dur_label(fn)})")
         self.video_list = "\n".join(video_lines)
 
-        # Render state — persists across WebSocket reconnects
-        self._render_state: Dict = {"status": "idle"}
-        self._draft_render_state: Dict = {"status": "idle"}
+        # Render state — persists across WebSocket reconnects.
+        # Two parallel renderers: ffmpeg (always available, default 480p
+        # draft; user can toggle to "full" for timeline-native) and Resolve
+        # (only when DaVinci is installed).
+        self._ffmpeg_render_state: Dict = {"status": "idle", "quality": "draft"}
+        self._resolve_render_state: Dict = {"status": "idle"}
+        # User-selectable quality preference for the ffmpeg render. Persists
+        # for the lifetime of the session and drives auto-renders kicked off
+        # after each generate_fcpxml call.
+        self._ffmpeg_quality_pref: str = "draft"
+
+        # Debounce timer for auto-rerender after UI edits. Every
+        # edit_decision_update schedules (or reschedules) an ffmpeg render
+        # a short delay later, so rapid drags coalesce into one render
+        # instead of thrashing the CPU.
+        self._rerender_debounce_task: Optional[asyncio.Task] = None
+        self._rerender_debounce_seconds: float = 1.5
 
         # Background tasks spawned from the agent loop (auto-render, etc.)
         # We track them so the session can await them before being released —
@@ -192,6 +262,8 @@ class AgentSession:
             scratchpads=self.scratchpads,
             video_nos=self.video_nos,
             event_callback=_tool_emit,
+            footage_fps=self.footage_fps,
+            source_fps=self.source_fps,
         )
 
         # Conversation history (Gemini Content objects)
@@ -212,6 +284,22 @@ class AgentSession:
             SafetySetting(category=HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold=HarmBlockThreshold.BLOCK_NONE),
         ]
 
+        # Per-workspace logging. Attaches a root-logger handler (idempotent)
+        # that routes records to {workspace}/logs/backend.jsonl while this
+        # session is in scope. Manifest captures the runtime env for every
+        # new session so a failed support-bundle tells you exactly which
+        # code + ffmpeg + model combo produced it.
+        install_workspace_logging()
+        write_manifest(
+            workspace.root,
+            project_name=project_name,
+            mode=self.mode.value,
+            models={
+                "main_llm": getattr(gemini_manager, "model", "?"),
+                "video_llm": getattr(self.video_llm, "model", "?"),
+            },
+        )
+
     # ── Public API ────────────────────────────────────────────────────────
 
     async def handle_user_message(self, text: str) -> None:
@@ -223,7 +311,15 @@ class AgentSession:
         3. Call Gemini with tools
         4. Execute tool calls, feed results back, repeat
         5. When Gemini responds with text only, emit as agent message
+
+        Scoped inside ``WorkspaceLogScope`` so every log line (and any
+        bg render task spawned from this turn) lands in this project's
+        logs/ bundle.
         """
+        with WorkspaceLogScope(self.workspace.root):
+            await self._handle_user_message_inner(text)
+
+    async def _handle_user_message_inner(self, text: str) -> None:
         try:
             timestamp = datetime.now(timezone.utc).isoformat()
             print(f"[AGENT] User message: {text[:100]}", flush=True)
@@ -304,6 +400,8 @@ class AgentSession:
             )
 
             # Call Gemini
+            import time as _time
+            _llm_start = _time.time()
             try:
                 response = await asyncio.get_event_loop().run_in_executor(
                     None,
@@ -316,8 +414,24 @@ class AgentSession:
             except Exception as e:
                 import traceback; traceback.print_exc()
                 print(f"[AGENT] Gemini call failed: {e}", flush=True)
+                append_llm_event(self.workspace.root, {
+                    "role": "main_llm",
+                    "model": self.gemini.model,
+                    "mode": self.mode.value,
+                    "duration_s": round(_time.time() - _llm_start, 3),
+                    "history_turns": len(self._history),
+                    "error": str(e),
+                })
                 await self._emit("error", {"message": f"Gemini error: {e}"})
                 return
+            append_llm_event(self.workspace.root, {
+                "role": "main_llm",
+                "model": self.gemini.model,
+                "mode": self.mode.value,
+                "duration_s": round(_time.time() - _llm_start, 3),
+                "history_turns": len(self._history),
+                "response": _summarize_llm_response(response),
+            })
 
             if not response.candidates or not response.candidates[0].content.parts:
                 logger.warning("[AGENT] Empty response from Gemini")
@@ -561,8 +675,25 @@ class AgentSession:
 
     # ── Auto-render ─────────────────────────────────────────────────────
 
-    async def _render_ffmpeg_draft(self) -> None:
-        """Render a draft 480p preview via FFmpeg."""
+    async def _render_ffmpeg(self, quality: str = "draft") -> None:
+        """Render an FFmpeg preview at the given quality.
+
+        Output always lands at ``renders/ffmpeg.mp4`` (overwriting any prior
+        render). ``quality="draft"`` produces a fast 480p preview; ``"full"``
+        produces a timeline-native render for when the user wants the
+        highest-fidelity ffmpeg output (e.g. no DaVinci installed, or just
+        wants to preview at full res).
+
+        Scope the workspace log so renders triggered from a websocket
+        (schedule_ffmpeg_rerender) land in backend.jsonl + renders/*.log
+        even when the caller isn't in the agent loop.
+        """
+        if quality not in ("draft", "full"):
+            quality = "draft"
+        with WorkspaceLogScope(self.workspace.root):
+            await self._render_ffmpeg_inner(quality)
+
+    async def _render_ffmpeg_inner(self, quality: str) -> None:
         try:
             import json as _json
             from src.pipelines.v2.schemas import EditDecision
@@ -572,7 +703,7 @@ class AgentSession:
             if not ed_path.exists():
                 ed_path = self.workspace.root / "edit_decision.json"
             if not ed_path.exists():
-                logger.warning("[AGENT] No edit_decision.json for FFmpeg draft render")
+                logger.warning("[AGENT] No edit_decision.json for FFmpeg render")
                 return
 
             with open(ed_path) as f:
@@ -580,23 +711,26 @@ class AgentSession:
             edit = EditDecision.model_validate(ed_data)
 
             footage_dir = self.workspace.get_footage_dir()
-            output_path = self.workspace.get_render_path("draft")
+            output_path = self.workspace.get_render_path("ffmpeg")
 
-            self._draft_render_state = {"status": "rendering", "progress": 0}
+            self._ffmpeg_render_state = {
+                "status": "rendering", "progress": 0, "quality": quality,
+            }
             try:
                 await self._emit("render_start", {
                     "renderer": "ffmpeg",
-                    "quality": "draft",
+                    "quality": quality,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
             except Exception:
                 pass  # client may be disconnected
 
             async def progress_cb(pct: float):
-                self._draft_render_state["progress"] = pct
+                self._ffmpeg_render_state["progress"] = pct
                 try:
                     await self._emit("render_progress", {
                         "renderer": "ffmpeg",
+                        "quality": quality,
                         "percent": pct,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     })
@@ -607,54 +741,66 @@ class AgentSession:
                 edit=edit,
                 footage_dir=footage_dir,
                 output_path=output_path,
-                quality="draft",
+                quality=quality,
                 progress_callback=progress_cb,
             )
 
-            # Measure loudness of each clip/narration/music and save back
-            try:
-                from src.pipelines.v2.audio.loudness import measure_edit_loudness
-                loudness_summary = await asyncio.get_event_loop().run_in_executor(
-                    None, measure_edit_loudness, edit, footage_dir,
-                )
-                # Save updated edit decision with loudness measurements
-                _atomic_write_json(ed_path, edit.model_dump())
-                # Emit updated edit decision to dashboard
+            # Loudness measurement runs on the first render after each
+            # generate_fcpxml so the agent can read measured_loudness_lufs
+            # and adjust gain. Skip it when the user is just re-rendering
+            # at a different quality — the measurements haven't changed.
+            if quality == "draft":
                 try:
-                    await self._emit("timeline_update", {
-                        "edit_decision": edit.model_dump(),
-                        "loudness": loudness_summary,
-                    })
-                except Exception:
-                    pass
-                logger.info(f"[AGENT] Loudness measured: {len(loudness_summary.get('clips', []))} clips")
-            except Exception as e:
-                logger.warning(f"[AGENT] Loudness measurement failed (non-fatal): {e}")
+                    from src.pipelines.v2.audio.loudness import measure_edit_loudness
+                    loudness_summary = await asyncio.get_event_loop().run_in_executor(
+                        None, measure_edit_loudness, edit, footage_dir,
+                    )
+                    _atomic_write_json(ed_path, edit.model_dump())
+                    try:
+                        await self._emit("timeline_update", {
+                            "edit_decision": edit.model_dump(),
+                            "loudness": loudness_summary,
+                        })
+                    except Exception:
+                        pass
+                    logger.info(f"[AGENT] Loudness measured: {len(loudness_summary.get('clips', []))} clips")
+                except Exception as e:
+                    logger.warning(f"[AGENT] Loudness measurement failed (non-fatal): {e}")
 
-            self._draft_render_state = {"status": "complete", "filename": Path(rendered).name}
+            self._ffmpeg_render_state = {
+                "status": "complete",
+                "filename": Path(rendered).name,
+                "output_path": str(rendered),
+                "quality": quality,
+            }
             try:
                 await self._emit("render_complete", {
                     "renderer": "ffmpeg",
+                    "quality": quality,
                     "filename": Path(rendered).name,
+                    "output_path": str(rendered),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
             except Exception:
                 pass  # client may be disconnected
-            logger.info(f"[AGENT] FFmpeg draft render complete: {rendered}")
+            logger.info(f"[AGENT] FFmpeg render complete ({quality}): {rendered}")
 
         except Exception as e:
-            logger.warning(f"[AGENT] FFmpeg draft render failed (non-fatal): {e}")
-            self._draft_render_state = {"status": "error", "error": str(e)}
+            logger.warning(f"[AGENT] FFmpeg render failed (non-fatal): {e}")
+            self._ffmpeg_render_state = {
+                "status": "error", "error": str(e), "quality": quality,
+            }
             raw = str(e)
             brief = raw if len(raw) < 240 else raw[:240] + "…"
             self._pending_background_warnings.append(
-                f"FFmpeg draft render FAILED after the last generate_fcpxml "
-                f"call — there is no draft.mp4 for the user to preview. "
+                f"FFmpeg {quality} render FAILED after the last generate_fcpxml "
+                f"call — there is no ffmpeg.mp4 for the user to preview. "
                 f"Underlying error: {brief}"
             )
             try:
                 await self._emit("render_error", {
                     "renderer": "ffmpeg",
+                    "quality": quality,
                     "error": str(e),
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
@@ -697,112 +843,20 @@ class AgentSession:
                 )
                 self._subscribers.discard(sub)
 
-    async def _render_ffmpeg_final(
-        self,
-        resolve_missing: bool = False,
-        resolve_error: Optional[str] = None,
-    ) -> None:
-        """Render a timeline-native final MP4 via FFmpeg.
+    async def _render_resolve(self, fcpxml_result: Dict) -> None:
+        """Render a timeline-native MP4 via DaVinci Resolve.
 
-        Used as a fallback when DaVinci Resolve isn't available or its render
-        failed. Slower than the draft but matches the timeline resolution and
-        uses a higher-quality encoder preset.
+        Lands at ``renders/resolve.mp4``. Fails non-fatally if Resolve isn't
+        installed or not running — users without DaVinci can still preview
+        via the ffmpeg tab (toggleable to full resolution).
+
+        Scoped for per-workspace logging so Resolve's ``[RESOLVE]`` log
+        lines end up in backend.jsonl regardless of caller.
         """
-        try:
-            import json as _json
-            from src.pipelines.v2.schemas import EditDecision
-            from src.pipelines.v2.preview.ffmpeg_renderer import render_ffmpeg_preview
+        with WorkspaceLogScope(self.workspace.root):
+            await self._render_resolve_inner(fcpxml_result)
 
-            ed_path = self.workspace.root / "fcpxml" / "edit_decision.json"
-            if not ed_path.exists():
-                ed_path = self.workspace.root / "edit_decision.json"
-            if not ed_path.exists():
-                logger.warning("[AGENT] No edit_decision.json for FFmpeg final render")
-                return
-
-            with open(ed_path) as f:
-                ed_data = _json.load(f)
-            edit = EditDecision.model_validate(ed_data)
-
-            footage_dir = self.workspace.get_footage_dir()
-            output_path = self.workspace.get_render_path("final")
-
-            self._render_state = {
-                "status": "rendering", "progress": 0,
-                "renderer": "ffmpeg", "quality": "final",
-            }
-            try:
-                await self._emit("render_start", {
-                    "renderer": "ffmpeg",
-                    "quality": "final",
-                    "reason": "resolve_missing" if resolve_missing else "resolve_failed",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-            except Exception:
-                pass
-
-            async def progress_cb(pct: float):
-                self._render_state["progress"] = pct
-                try:
-                    await self._emit("render_progress", {
-                        "renderer": "ffmpeg",
-                        "quality": "final",
-                        "percent": pct,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    })
-                except Exception:
-                    pass
-
-            rendered = await render_ffmpeg_preview(
-                edit=edit,
-                footage_dir=footage_dir,
-                output_path=output_path,
-                quality="final",
-                progress_callback=progress_cb,
-            )
-            self._render_state = {
-                "status": "complete", "filename": Path(rendered).name,
-                "renderer": "ffmpeg", "quality": "final",
-            }
-            try:
-                await self._emit("render_complete", {
-                    "renderer": "ffmpeg",
-                    "quality": "final",
-                    "output_path": rendered,
-                    "filename": Path(rendered).name,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-            except Exception:
-                pass
-            logger.info(f"[AGENT] FFmpeg final render complete: {rendered}")
-
-        except Exception as e:
-            logger.warning(f"[AGENT] FFmpeg final render failed (non-fatal): {e}")
-            self._render_state = {"status": "error", "error": str(e)}
-            brief = str(e) if len(str(e)) < 240 else str(e)[:240] + "…"
-            # Only surface when BOTH paths failed — Resolve-missing + ffmpeg
-            # failure is the actually-broken case the agent should know about.
-            if not resolve_missing or resolve_error:
-                self._pending_background_warnings.append(
-                    f"Both DaVinci Resolve and FFmpeg final renders failed — "
-                    f"only the draft is available. FFmpeg error: {brief}"
-                )
-            try:
-                await self._emit("render_error", {
-                    "renderer": "ffmpeg",
-                    "quality": "final",
-                    "error": str(e),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                })
-            except Exception:
-                pass
-
-    async def _auto_render_preview(self, fcpxml_result: Dict) -> None:
-        """Kick off a Resolve preview render in the background after FCPXML generation."""
-        # Start FFmpeg draft render first (fast, no Resolve dependency)
-        self._spawn_bg_task(self._render_ffmpeg_draft())
-
-        # Then attempt Resolve render
+    async def _render_resolve_inner(self, fcpxml_result: Dict) -> None:
         try:
             from lib.utils.resolve_render import ResolveRenderer
 
@@ -811,20 +865,19 @@ class AgentSession:
                 return
 
             media_dir = str(self.workspace.get_footage_dir())
-            output_path = str(self.workspace.get_render_path("final"))
+            output_path = str(self.workspace.get_render_path("resolve"))
 
-            self._render_state = {"status": "rendering", "progress": 0}
+            self._resolve_render_state = {"status": "rendering", "progress": 0}
             try:
                 await self._emit("render_start", {
                     "renderer": "resolve",
-                    "quality": "final",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
             except Exception:
                 pass  # client may be disconnected
 
             async def progress_cb(pct: float):
-                self._render_state["progress"] = pct
+                self._resolve_render_state["progress"] = pct
                 try:
                     await self._emit("render_progress", {
                         "renderer": "resolve",
@@ -843,7 +896,11 @@ class AgentSession:
                 progress_callback=progress_cb,
             )
 
-            self._render_state = {"status": "complete", "filename": Path(rendered).name}
+            self._resolve_render_state = {
+                "status": "complete",
+                "filename": Path(rendered).name,
+                "output_path": str(rendered),
+            }
             try:
                 await self._emit("render_complete", {
                     "renderer": "resolve",
@@ -853,26 +910,11 @@ class AgentSession:
                 })
             except Exception:
                 pass  # client may be disconnected
-            logger.info(f"[AGENT] Auto-render complete: {rendered}")
+            logger.info(f"[AGENT] Resolve render complete: {rendered}")
 
         except Exception as e:
-            logger.warning(f"[AGENT] Resolve final render failed (non-fatal): {e}")
-            self._render_state = {"status": "error", "error": str(e)}
-            raw = str(e)
-            brief = raw if len(raw) < 240 else raw[:240] + "…"
-            lower = raw.lower()
-            is_resolve_missing = (
-                "davinci" in lower or "resolve" in lower
-            ) and (
-                "not running" in lower or "not found" in lower
-                or "connection" in lower or "no module" in lower
-            )
-            # Fall back to an FFmpeg final render so users without DaVinci
-            # still get a timeline-native MP4 without having to install it.
-            self._spawn_bg_task(self._render_ffmpeg_final(
-                resolve_missing=is_resolve_missing,
-                resolve_error=brief if not is_resolve_missing else None,
-            ))
+            logger.warning(f"[AGENT] Resolve render failed (non-fatal): {e}")
+            self._resolve_render_state = {"status": "error", "error": str(e)}
             try:
                 await self._emit("render_error", {
                     "renderer": "resolve",
@@ -881,6 +923,48 @@ class AgentSession:
                 })
             except Exception:
                 pass  # client may be disconnected
+
+    async def _auto_render_preview(self, fcpxml_result: Dict) -> None:
+        """Fire both renderers in parallel after FCPXML generation.
+
+        - FFmpeg: always runs, at the session's current quality preference
+          (default 480p draft; "full" if the user toggled full res).
+        - Resolve: runs in parallel and silently no-ops if DaVinci isn't
+          available. Users without Resolve rely on the ffmpeg tab.
+        """
+        self._spawn_bg_task(self._render_ffmpeg(self._ffmpeg_quality_pref))
+        self._spawn_bg_task(self._render_resolve(fcpxml_result))
+
+    def schedule_ffmpeg_rerender(self, delay: Optional[float] = None) -> None:
+        """Debounced auto-rerender for UI edits.
+
+        Called from the ``edit_decision_update`` / ``crop_complete`` paths so
+        the preview stays current without the user having to click re-render.
+        Rapid drags coalesce: each call cancels the prior timer and restarts
+        it, so only the *trailing* edit actually triggers a render.
+
+        Resolve is intentionally not re-triggered here — it's slow and users
+        who want a Resolve render should click the button explicitly.
+        """
+        if delay is None:
+            delay = self._rerender_debounce_seconds
+
+        if self._rerender_debounce_task and not self._rerender_debounce_task.done():
+            self._rerender_debounce_task.cancel()
+
+        async def _debounced():
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+            # If a render is already in flight, skip — it's about to produce
+            # output and the user will see the current state in ~a beat. The
+            # next edit will schedule another pass.
+            if self._ffmpeg_render_state.get("status") == "rendering":
+                return
+            await self._render_ffmpeg(self._ffmpeg_quality_pref)
+
+        self._rerender_debounce_task = self._spawn_bg_task(_debounced())
 
     # ── History management ────────────────────────────────────────────────
 

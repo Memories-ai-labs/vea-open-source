@@ -23,7 +23,6 @@ _EDIT_DECISION_SCHEMA = (
     '    "shot_transforms": [ShotCropResult, ...],  // set by Dynamic Crop tool\n'
     '    "source_width": int,\n'
     '    "source_height": int,\n'
-    '    "transition_after": {"type": "cross-dissolve" | "fade-in" | "fade-out", "duration_seconds": number},\n'
     '    "track": int,                 // 1 = V1 spine (default, sequential), 2+ = overlay tracks\n'
     '    "timeline_offset": number,    // absolute timeline position in seconds (REQUIRED for track 2+)\n'
     '  }],\n'

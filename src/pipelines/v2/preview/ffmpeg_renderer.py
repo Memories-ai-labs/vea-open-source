@@ -2,23 +2,23 @@
 FFmpeg renderer — EditDecision → MP4 without DaVinci Resolve.
 
 Two quality modes:
-  - ``draft``  : 480p, ultrafast, crf 28.  For the background preview render
-                 that runs after every generate_fcpxml call.
-  - ``final``  : timeline-native resolution, preset slow, crf 18, 192k audio.
-                 Used as a Resolve fallback when DaVinci isn't installed.
+  - ``draft`` : 480p, ultrafast, crf 28.  Default — runs after every
+                generate_fcpxml call so the user sees a preview quickly.
+  - ``full``  : timeline-native resolution, preset slow, crf 18, 192k audio.
+                Produced on demand when the user toggles full-resolution
+                playback in the dashboard's ffmpeg tab.
 
 Feature coverage — matches what the agent can express in EditDecision:
   - V1 spine: sequencing, source in/out, per-clip gain, speed change,
               transform (scale/pan/rotation), multi-shot crops.
   - V2+:      overlay / picture-in-picture clips at their timeline_offset,
               scaled and positioned via transform.
-  - Transitions (clip.transition_after): cross-dissolve, fade-in, fade-out.
   - Audio:    narration + music mix with LUFS auto-gain, music fade in/out.
   - Titles:   centered / top / bottom, subtitle box, fade-in/out alpha.
 
 Pipeline:
   Pass 1 (parallel)    — extract + process each clip to a temp file.
-  Pass 2 (sequential)  — concat spine clips (with xfade if transitions).
+  Pass 2 (sequential)  — concat spine clips.
   Pass 3 (sequential)  — overlay V2+ clips, mix audio, draw titles.
 """
 from __future__ import annotations
@@ -28,6 +28,7 @@ import logging
 import platform
 import shutil
 import tempfile
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
@@ -43,11 +44,20 @@ from src.pipelines.v2.schemas import (
 
 logger = logging.getLogger(__name__)
 
-QualityMode = Literal["draft", "final"]
+# Per-render stderr log file. Set by ``render_ffmpeg_preview`` for the
+# duration of one render pass; ``_run_ffmpeg`` appends its command +
+# exit code + stderr to the path pointed at here. Contextvar keeps this
+# scoped to the current asyncio task so two parallel renders don't mix
+# their output.
+_render_log_path: ContextVar[Optional[Path]] = ContextVar(
+    "vea_ffmpeg_render_log", default=None
+)
+
+QualityMode = Literal["draft", "full"]
 
 # Encoder + output settings per quality mode. Draft keeps the render cheap
 # enough for the agent loop to spawn after every generate_fcpxml call;
-# final matches what DaVinci would produce at native timeline resolution.
+# full matches what DaVinci would produce at native timeline resolution.
 QUALITY_PRESETS: Dict[str, Dict[str, object]] = {
     "draft": {
         "height": 480,                 # scale to 480p, width from aspect
@@ -56,7 +66,7 @@ QUALITY_PRESETS: Dict[str, Dict[str, object]] = {
         "audio_bitrate": "128k",
         "scale_flags": "bilinear",
     },
-    "final": {
+    "full": {
         "height": None,                # use timeline native
         "preset": "slow",
         "crf": 18,
@@ -146,7 +156,7 @@ async def render_ffmpeg_preview(
         edit: Complete edit decision with clips, narration, music, titles
         footage_dir: Directory containing source footage files
         output_path: Where to write the output MP4
-        quality: "draft" (480p, ultrafast) or "final" (timeline-native, slow)
+        quality: "draft" (480p, ultrafast) or "full" (timeline-native, slow)
         resolution: Deprecated override — explicit output height in pixels.
             When set, overrides the quality preset's height.
         progress_callback: async callback receiving 0-100 progress
@@ -161,11 +171,21 @@ async def render_ffmpeg_preview(
         raise RuntimeError("ffmpeg not found on PATH")
 
     if quality not in QUALITY_PRESETS:
-        raise ValueError(f"Unknown quality mode: {quality!r} (expected 'draft' or 'final')")
+        raise ValueError(f"Unknown quality mode: {quality!r} (expected 'draft' or 'full')")
     preset = QUALITY_PRESETS[quality]
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # If we're inside an active workspace log scope, open a fresh per-render
+    # stderr file. Every _run_ffmpeg call during this render appends to it.
+    from src.pipelines.v2.logging_setup import _active_workspace, open_render_log
+    _ws = _active_workspace.get()
+    _log_token = None
+    if _ws is not None:
+        render_log = open_render_log(_ws, f"ffmpeg-{quality}")
+        _log_token = _render_log_path.set(render_log)
+        logger.info(f"[RENDER] stderr → {render_log}")
 
     tl_w = edit.timeline.width
     tl_h = edit.timeline.height
@@ -259,18 +279,9 @@ async def render_ffmpeg_preview(
         if progress_callback:
             await progress_callback(70.0)
 
-        # ── Pass 2: concat spine (with transitions if requested) ──────────
+        # ── Pass 2: concat spine ──────────────────────────────────────────
         concat_video = tmpdir / "concat.mp4"
-        has_transitions = any(
-            c.transition_after is not None for c in spine_clips
-        )
-        if has_transitions:
-            await _concat_with_transitions(
-                valid_clip_files, spine_clips, concat_video,
-                out_w, out_h, tl_fps, preset,
-            )
-        else:
-            await _concat_files(valid_clip_files, concat_video)
+        await _concat_files(valid_clip_files, concat_video)
 
         if progress_callback:
             await progress_callback(85.0)
@@ -293,6 +304,11 @@ async def render_ffmpeg_preview(
             shutil.rmtree(tmpdir, ignore_errors=True)
         except Exception:
             pass
+        if _log_token is not None:
+            try:
+                _render_log_path.reset(_log_token)
+            except ValueError:
+                pass
 
 
 async def extract_frame(
@@ -519,6 +535,14 @@ async def _render_single_segment(
 ) -> None:
     """Render a single clip segment (one transform) to a temp file."""
     src_start, src_end, transform = segment
+    # Frame-snap to the source file's frame rate so ffmpeg -ss/-to land on
+    # real frames. Probe once per source file; if probe fails, fall back to
+    # the timeline fps (still better than raw decimal seconds).
+    from src.pipelines.v2.timing import probe_fps as _probe_fps, snap_to_frame as _snap
+    src_fps = _probe_fps(source) or fps
+    if src_fps and src_fps > 0:
+        src_start = _snap(src_start, src_fps)
+        src_end = _snap(src_end, src_fps)
     duration = src_end - src_start
     speed_rate = clip.speed.rate if clip.speed else 1.0
     scale_flags = str(preset.get("scale_flags", "bilinear"))
@@ -603,162 +627,6 @@ async def _concat_files(files: List[Path], output: Path) -> None:
     ]
     await _run_ffmpeg(cmd)
     list_file.unlink(missing_ok=True)
-
-
-async def _probe_file_duration(path: Path) -> float:
-    """Return the media duration in seconds using ffprobe, or 0 on failure."""
-    proc = await asyncio.create_subprocess_exec(
-        "ffprobe", "-v", "quiet",
-        "-show_entries", "format=duration",
-        "-of", "csv=p=0",
-        str(path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, _ = await proc.communicate()
-    try:
-        return float(stdout.decode().strip())
-    except (ValueError, AttributeError):
-        return 0.0
-
-
-def _transition_to_xfade_type(spec_type: str) -> str:
-    """Map TransitionSpec.type → ffmpeg xfade transition name.
-
-    Schema exposes cross-dissolve, fade-in, fade-out. xfade handles the
-    cross-dissolve natively; fade-in/out are interpreted as fade-to-black
-    (fadeblack) which mimics Final Cut's 'Fade Out / Fade In' couple — both
-    clips briefly dip to black during the transition window.
-    """
-    mapping = {
-        "cross-dissolve": "fade",
-        "fade-in": "fadeblack",
-        "fade-out": "fadeblack",
-    }
-    return mapping.get(spec_type, "fade")
-
-
-async def _concat_with_transitions(
-    clip_files: List[Path],
-    clips: List[ClipDecision],
-    output: Path,
-    out_w: int, out_h: int, fps: float,
-    preset: Dict[str, object],
-) -> None:
-    """Concat spine clips with per-clip transitions via xfade + acrossfade.
-
-    Each ``clip.transition_after`` describes the transition BETWEEN that clip
-    and the next. cross-dissolve → ffmpeg xfade 'fade'; fade-in / fade-out →
-    'fadeblack'. Pairs without a transition fall through a plain concat
-    filter node so they remain hard cuts.
-    """
-    if len(clip_files) != len(clips):
-        raise ValueError("clip_files and clips must align 1:1")
-    if len(clip_files) == 1:
-        shutil.copy2(clip_files[0], output)
-        return
-
-    durations = [await _probe_file_duration(f) for f in clip_files]
-
-    inputs: List[str] = []
-    for f in clip_files:
-        inputs.extend(["-i", str(f)])
-
-    parts: List[str] = []
-    # Normalize every input's video + audio format and timebase before any
-    # concat / xfade. Two failures we're avoiding:
-    #   1. xfade: "main timebase (1/N) do not match … xfade timebase (1/M)" when
-    #      the first operand already went through concat (which outputs 1/1e6)
-    #      and the second operand is a fresh input (1/fps).
-    #   2. AAC encoder: "Could not open encoder before EOF" when chained audio
-    #      filters produce a sample fmt / channel layout the encoder rejects.
-    # Solution: force every input AND every intermediate concat/xfade output
-    # through settb=TB (a shared explicit timebase, here 1/90000 — the classic
-    # MPEG timing base, high enough to preserve sub-frame precision).
-    TB = 90000
-    for i in range(len(clip_files)):
-        parts.append(
-            f"[{i}:v]fps={fps},format=yuv420p,"
-            f"settb=1/{TB},setpts=PTS-STARTPTS[vn{i}]"
-        )
-        parts.append(
-            f"[{i}:a]aresample=48000:async=1,"
-            f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
-            f"asetpts=PTS-STARTPTS[an{i}]"
-        )
-
-    prev_v = "[vn0]"
-    prev_a = "[an0]"
-    prev_end_time = durations[0]
-
-    for i in range(1, len(clip_files)):
-        trans = clips[i - 1].transition_after
-        if trans and trans.duration_seconds > 0:
-            # Clamp transition to fit both clips
-            d = min(
-                trans.duration_seconds,
-                durations[i - 1] * 0.5,
-                durations[i] * 0.5,
-            )
-            if d <= 0.01:
-                trans = None  # transition too short, fall through to concat
-        if trans and trans.duration_seconds > 0:
-            d = min(
-                trans.duration_seconds,
-                durations[i - 1] * 0.5,
-                durations[i] * 0.5,
-            )
-            offset = prev_end_time - d
-            xf_type = _transition_to_xfade_type(trans.type)
-            v_raw = f"[vx{i}_raw]"
-            v_out = f"[vx{i}]"
-            a_out = f"[ax{i}]"
-            parts.append(
-                f"{prev_v}[vn{i}]xfade=transition={xf_type}:"
-                f"duration={d:.3f}:offset={offset:.3f}{v_raw}"
-            )
-            parts.append(f"{v_raw}settb=1/{TB}{v_out}")
-            parts.append(
-                f"{prev_a}[an{i}]acrossfade=d={d:.3f}{a_out}"
-            )
-            prev_end_time = prev_end_time + durations[i] - d
-        else:
-            v_raw = f"[vc{i}_raw]"
-            v_out = f"[vc{i}]"
-            a_out = f"[ac{i}]"
-            parts.append(f"{prev_v}[vn{i}]concat=n=2:v=1:a=0{v_raw}")
-            parts.append(f"{v_raw}settb=1/{TB}{v_out}")
-            parts.append(f"{prev_a}[an{i}]concat=n=2:v=0:a=1{a_out}")
-            prev_end_time = prev_end_time + durations[i]
-        prev_v = v_out
-        prev_a = a_out
-
-    filter_complex = ";\n".join(parts)
-
-    cmd = ["ffmpeg", "-y"]
-    cmd.extend(inputs)
-    cmd.extend([
-        "-filter_complex", filter_complex,
-        "-map", prev_v,
-        "-map", prev_a,
-        "-c:v", "libx264",
-        "-preset", str(preset["preset"]),
-        "-crf", str(preset["crf"]),
-        "-pix_fmt", "yuv420p",
-        "-r", str(fps),
-        "-c:a", "aac",
-        "-b:a", str(preset["audio_bitrate"]),
-        "-ac", "2", "-ar", "48000",
-        "-movflags", "+faststart",
-        str(output),
-    ])
-    logger.info(
-        f"[RENDER] Concat with transitions: {len(clip_files)} clips, "
-        f"total={prev_end_time:.2f}s, "
-        f"video_out={prev_v}, audio_out={prev_a}"
-    )
-    logger.debug(f"[RENDER] Transitions filter_complex:\n{filter_complex}")
-    await _run_ffmpeg(cmd, timeout=300.0)
 
 
 async def _mix_and_finalize(
@@ -1077,7 +945,12 @@ def _resolve_audio_file(file_path: str, footage_dir: Path) -> Path:
 
 
 async def _run_ffmpeg(cmd: List[str], timeout: float = 120.0) -> None:
-    """Run an ffmpeg command and raise on failure."""
+    """Run an ffmpeg command and raise on failure.
+
+    When a per-render log path is bound via ``_render_log_path`` (set by
+    ``render_ffmpeg_preview``), appends the command, exit code, and full
+    stderr there so a crash leaves a replayable trace on disk.
+    """
     if cmd[0] != "ffmpeg":
         cmd = ["ffmpeg"] + cmd
 
@@ -1090,13 +963,33 @@ async def _run_ffmpeg(cmd: List[str], timeout: float = 120.0) -> None:
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
+        _append_render_log(cmd, None, b"timed out")
         raise RuntimeError(f"FFmpeg timed out after {timeout}s")
 
+    full_err_bytes = stderr or b""
+    _append_render_log(cmd, proc.returncode, full_err_bytes)
+
     if proc.returncode != 0:
-        # Log the full stderr at DEBUG so operators can opt in; truncate the
-        # exception to keep the raised string short for the agent's
-        # tool-result surface.
-        full_err = stderr.decode() if stderr else "(no stderr)"
+        full_err = full_err_bytes.decode(errors="replace") if full_err_bytes else "(no stderr)"
         logger.debug(f"[RENDER] FFmpeg stderr:\n{full_err}")
         err_text = full_err[-500:]
         raise RuntimeError(f"FFmpeg failed (exit {proc.returncode}): {err_text}")
+
+
+def _append_render_log(cmd: List[str], returncode: Optional[int], stderr: bytes) -> None:
+    """Append one sub-ffmpeg invocation to the active render log, if any."""
+    path = _render_log_path.get()
+    if path is None:
+        return
+    try:
+        from datetime import datetime, timezone
+        header = (
+            f"\n===== {datetime.now(timezone.utc).isoformat()} "
+            f"exit={returncode if returncode is not None else 'timeout'} =====\n"
+        )
+        body = "$ " + " ".join(cmd) + "\n"
+        body += stderr.decode(errors="replace") if stderr else ""
+        with open(path, "a") as f:
+            f.write(header + body)
+    except Exception:
+        pass

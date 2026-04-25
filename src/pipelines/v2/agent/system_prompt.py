@@ -280,9 +280,9 @@ land on word boundaries from the refine_clip_timestamps transcript. Never cut mi
 - **Total duration budget**: work backwards. Total ÷ average_clip_length = shot count.
 
 ### Transitions
-- **Default to hard cuts** — they're clean and professional.
-- Use cross-dissolves sparingly for time passage or emotional beats, not between every clip.
-- Consider fade-in from black at the start and fade-out to black at the end.
+- **Hard cuts only.** There's no transition field on clips — every cut is a hard
+  cut between adjacent clips. Titles still fade in/out on their own, and music
+  fades in/out at timeline start/end, but clip-to-clip is always a hard cut.
 
 ### Video layering and z-order
 

@@ -122,18 +122,18 @@ class TestResolveRenderPaths:
         ws = WorkspaceManager("proj", tmp_path)
         ws.create()
         paths = _resolve_render_paths(ws)
-        assert paths == {"fcpxml": None, "draft_mp4": None, "final_mp4": None}
+        assert paths == {"fcpxml": None, "ffmpeg_mp4": None, "resolve_mp4": None}
 
     def test_returns_paths_for_present_artifacts(self, tmp_path):
         ws = WorkspaceManager("proj", tmp_path)
         ws.create()
         (ws.root / "fcpxml" / "edit_v1.fcpxml").parent.mkdir(exist_ok=True)
         (ws.root / "fcpxml" / "edit_v1.fcpxml").write_text("<fcpxml/>")
-        (ws.root / "renders" / "draft.mp4").write_bytes(b"x")
+        (ws.root / "renders" / "ffmpeg.mp4").write_bytes(b"x")
         paths = _resolve_render_paths(ws)
         assert paths["fcpxml"].endswith("edit_v1.fcpxml")
-        assert paths["draft_mp4"].endswith("draft.mp4")
-        assert paths["final_mp4"] is None
+        assert paths["ffmpeg_mp4"].endswith("ffmpeg.mp4")
+        assert paths["resolve_mp4"] is None
 
 
 # ─── StdoutEmitter ───────────────────────────────────────────────────────────

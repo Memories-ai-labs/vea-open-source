@@ -25,7 +25,7 @@ Flags:
 The last line of stdout is always a single JSON object with the final state:
 
     {"status": "ok", "project": "promo",
-     "fcpxml": "/abs/path", "draft_mp4": "/abs/path", "final_mp4": "/abs/path",
+     "fcpxml": "/abs/path", "ffmpeg_mp4": "/abs/path", "resolve_mp4": "/abs/path",
      "edit_decision": {...}}
 
 Non-zero exit on any unrecoverable failure; the JSON still prints with
@@ -237,12 +237,12 @@ async def _ensure_indexed(
 def _resolve_render_paths(workspace: WorkspaceManager) -> Dict[str, Optional[str]]:
     """Return absolute paths for fcpxml + renders if they exist."""
     fcpxml = workspace.root / "fcpxml" / "edit_v1.fcpxml"
-    draft = workspace.root / "renders" / "draft.mp4"
-    final = workspace.root / "renders" / "final.mp4"
+    ffmpeg_mp4 = workspace.root / "renders" / "ffmpeg.mp4"
+    resolve_mp4 = workspace.root / "renders" / "resolve.mp4"
     return {
         "fcpxml": str(fcpxml) if fcpxml.exists() else None,
-        "draft_mp4": str(draft) if draft.exists() else None,
-        "final_mp4": str(final) if final.exists() else None,
+        "ffmpeg_mp4": str(ffmpeg_mp4) if ffmpeg_mp4.exists() else None,
+        "resolve_mp4": str(resolve_mp4) if resolve_mp4.exists() else None,
     }
 
 

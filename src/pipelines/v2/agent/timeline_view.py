@@ -56,12 +56,8 @@ def _fmt_clip_cell(item: dict) -> str:
         meta.append(f"src=[{item['source_start']:.1f}-{item['source_end']:.1f}s]")
     if item.get("transform_mode") and item["transform_mode"] != "fit":
         meta.append(f"crop={item['transform_mode']}")
-    tr = item.get("transition_after") or None
-    trail = ""
-    if tr:
-        trail = f" → {tr.get('type', '?')} {tr.get('duration_seconds', 0):.2f}s"
     extent = f"({item['tl_start']:.2f}→{item['tl_end']:.2f}, {item['duration']:.2f}s)"
-    return " · ".join(parts) + " " + extent + (" " + " ".join(meta) if meta else "") + trail
+    return " · ".join(parts) + " " + extent + (" " + " ".join(meta) if meta else "")
 
 
 # ── Item extraction ────────────────────────────────────────────────────────
@@ -97,7 +93,6 @@ def _extract_items(ed: dict) -> dict:
             "source_end": src_end,
             "speed_rate": speed_rate,
             "transform_mode": c.get("transform_mode"),
-            "transition_after": c.get("transition_after"),
         }
         if track_num == 1:
             item["tl_start"] = t

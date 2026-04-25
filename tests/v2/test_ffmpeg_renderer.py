@@ -3,7 +3,7 @@
 We avoid running ffmpeg from the test process — those would be flaky without
 real media files. Instead we exercise the filter-graph builders and lookup
 helpers that do the interesting thinking, so a refactor that silently breaks
-rotation, overlay positioning, or transition mapping trips these tests.
+rotation or overlay positioning trips these tests.
 """
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from src.pipelines.v2.preview import ffmpeg_renderer as R
 from src.pipelines.v2.preview.ffmpeg_renderer import (
     QUALITY_PRESETS,
     _build_transform_filter,
-    _transition_to_xfade_type,
     render_ffmpeg_preview,
 )
 from src.pipelines.v2.schemas import TransformSettings
@@ -26,19 +25,19 @@ from src.pipelines.v2.schemas import TransformSettings
 
 class TestQualityPresets:
     def test_both_quality_modes_defined(self):
-        assert {"draft", "final"} <= set(QUALITY_PRESETS.keys())
+        assert {"draft", "full"} <= set(QUALITY_PRESETS.keys())
 
     def test_draft_is_cheap(self):
         # Draft must remain fast enough to run in the agent loop after every
         # generate_fcpxml call. The specific values are less important than
-        # the invariant that draft should be cheaper than final.
-        d, f = QUALITY_PRESETS["draft"], QUALITY_PRESETS["final"]
+        # the invariant that draft should be cheaper than full.
+        d, f = QUALITY_PRESETS["draft"], QUALITY_PRESETS["full"]
         assert d["height"] == 480
         assert f["height"] is None  # timeline native
         assert int(d["crf"]) > int(f["crf"])  # higher CRF = lower quality = cheaper
 
-    def test_final_uses_better_scaler(self):
-        assert QUALITY_PRESETS["final"]["scale_flags"] == "lanczos"
+    def test_full_uses_better_scaler(self):
+        assert QUALITY_PRESETS["full"]["scale_flags"] == "lanczos"
         assert QUALITY_PRESETS["draft"]["scale_flags"] == "bilinear"
 
 
@@ -110,20 +109,6 @@ class TestTransformFilter:
 
 
 # ─── Transition mapping ──────────────────────────────────────────────────
-
-
-class TestTransitionMapping:
-    def test_cross_dissolve_maps_to_fade(self):
-        assert _transition_to_xfade_type("cross-dissolve") == "fade"
-
-    def test_fade_in_and_fade_out_map_to_fadeblack(self):
-        # Both are interpreted as 'dip to black' between clips — fadeblack
-        # is the ffmpeg xfade name for that.
-        assert _transition_to_xfade_type("fade-in") == "fadeblack"
-        assert _transition_to_xfade_type("fade-out") == "fadeblack"
-
-    def test_unknown_type_falls_back_to_fade(self):
-        assert _transition_to_xfade_type("splat") == "fade"
 
 
 # ─── System font lookup ──────────────────────────────────────────────────

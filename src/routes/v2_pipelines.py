@@ -450,7 +450,7 @@ async def v2_render(request: V2RenderRequest):
             raise HTTPException(status_code=400, detail="No FCPXML found — run /v2/generate_fcpxml first.")
 
         media_dir = str(workspace.get_footage_dir())
-        output_path = str(workspace.get_render_path(quality))
+        output_path = str(workspace.get_render_path("resolve"))
 
         renderer = ResolveRenderer()
         rendered = await renderer.render(
@@ -482,6 +482,39 @@ async def v2_serve_render(project_name: str, filename: str):
     if not render_path.exists():
         raise HTTPException(status_code=404, detail=f"Render '{filename}' not found.")
     return FileResponse(str(render_path), media_type="video/mp4")
+
+
+@router.post(f"{_config.V2_API_PREFIX}/projects/{{project_name}}/renders/{{filename}}/reveal")
+async def v2_reveal_render(project_name: str, filename: str):
+    """Open the render file's parent folder in the OS file manager.
+
+    Only supported on macOS (``open -R``) and Linux (``xdg-open``). Scoped to
+    files inside the project's renders/ directory so a malicious filename
+    can't point elsewhere.
+    """
+    import platform as _platform
+    import subprocess as _subprocess
+
+    workspace = _workspace(project_name)
+    if not workspace.exists():
+        raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
+    render_path = _safe_child(workspace.root / "renders", filename)
+    if not render_path.exists():
+        raise HTTPException(status_code=404, detail=f"Render '{filename}' not found.")
+
+    system = _platform.system()
+    try:
+        if system == "Darwin":
+            _subprocess.run(["open", "-R", str(render_path)], check=False, timeout=5)
+        elif system == "Linux":
+            _subprocess.run(["xdg-open", str(render_path.parent)], check=False, timeout=5)
+        else:
+            raise HTTPException(status_code=501, detail=f"Reveal not supported on {system}")
+        return {"status": "ok", "path": str(render_path)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get(f"{_config.V2_API_PREFIX}/projects/{{project_name}}/footage/{{filename}}")

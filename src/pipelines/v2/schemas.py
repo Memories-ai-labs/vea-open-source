@@ -158,11 +158,6 @@ class SpeedChange(BaseModel):
     """Constant speed change. rate=0.5 → half speed, rate=2.0 → double speed."""
     rate: float = 1.0
 
-class TransitionSpec(BaseModel):
-    """Transition placed after a clip (between it and the next clip)."""
-    type: Literal["cross-dissolve", "fade-in", "fade-out"] = "cross-dissolve"
-    duration_seconds: float = 0.5
-
 class ClipDecision(BaseModel):
     """A single clip on the primary storyline (spine). Ordered by list index."""
     id: str
@@ -189,7 +184,6 @@ class ClipDecision(BaseModel):
     )
     source_width: int = 1920
     source_height: int = 1080
-    transition_after: Optional[TransitionSpec] = None
     track: int = Field(default=1, description="Video track number (1=V1, 2=V2, etc.)")
     timeline_offset: Optional[float] = Field(default=None, description="Absolute timeline position in seconds (track 2+ free placement; track 1 uses sequential array order)")
 
@@ -238,12 +232,11 @@ class EditDecision(BaseModel):
     Complete edit decision — the contract between the LLM and the FCPXML compiler.
 
     The LLM fills this out with creative decisions (which clips, what order,
-    transitions, narration, music). Deterministic code compiles it to valid
-    FCPXML 1.10. The dashboard reads the same JSON for the timeline view.
+    narration, music). Deterministic code compiles it to valid FCPXML 1.10.
+    The dashboard reads the same JSON for the timeline view.
     """
     timeline: TimelineSettings = TimelineSettings()
     clips: List[ClipDecision] = []
-    transitions: List[TransitionSpec] = []  # kept for backward compat; prefer clip.transition_after
     narration: List[NarrationSegment] = []
     music: Optional[MusicTrack] = None
     titles: List[TextOverlay] = []

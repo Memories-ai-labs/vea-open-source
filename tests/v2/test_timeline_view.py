@@ -307,17 +307,6 @@ class TestClipMetadataFields:
         out = build_timeline_view(payload)
         assert "src=[214.5-224.8s]" in out
 
-    def test_transition_after_appears(self):
-        payload = json.dumps({
-            "clips": [{
-                "id": "c1", "source_file": "v.mp4",
-                "source_start": 0, "source_end": 5,
-                "transition_after": {"type": "cross-dissolve", "duration_seconds": 0.5},
-            }],
-        })
-        out = build_timeline_view(payload)
-        assert "cross-dissolve" in out
-
     def test_narration_cell_shows_audio_range(self):
         payload = json.dumps({
             "clips": [{

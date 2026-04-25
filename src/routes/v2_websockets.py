@@ -4,7 +4,7 @@
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from fastapi import FastAPI
 from fastapi.websockets import WebSocket, WebSocketDisconnect
@@ -195,32 +195,29 @@ def register_websocket_routes(app: FastAPI):
             except Exception:
                 pass
 
-        # Get render state — if there's an agent, use its state; otherwise just check files
-        # Check both new "final.mp4" and legacy "preview.mp4" names for backwards compat.
-        def _find_existing_render() -> Optional[Path]:
-            for name in ("final", "preview"):
-                p = workspace.get_render_path(name)
-                if p.exists():
-                    return p
-            return None
+        # Render state — the session tracks ffmpeg + resolve independently.
+        # On reconnect, fall back to scanning the filesystem so the UI
+        # still shows an existing render even if no agent is loaded.
+        def _file_state(name: str) -> Optional[Dict]:
+            p = workspace.get_render_path(name)
+            return {"status": "complete", "filename": p.name} if p.exists() else None
 
-        render_state = None
         if agent is not None:
-            agent_rs = agent._render_state
-            is_resolve_error = (
-                agent_rs.get("status") == "error" and
-                "resolve" in str(agent_rs.get("error", "")).lower()
+            ffmpeg_render_state = (
+                agent._ffmpeg_render_state
+                if agent._ffmpeg_render_state.get("status") != "idle"
+                else _file_state("ffmpeg") or {"status": "idle", "quality": "draft"}
             )
-            if agent_rs.get("status") in ("rendering", "complete", "error") and not is_resolve_error:
-                render_state = agent_rs
-            else:
-                rp = _find_existing_render()
-                if rp:
-                    render_state = {"status": "complete", "filename": rp.name}
+            resolve_render_state = (
+                agent._resolve_render_state
+                if agent._resolve_render_state.get("status") != "idle"
+                else _file_state("resolve") or {"status": "idle"}
+            )
+            ffmpeg_quality_pref = agent._ffmpeg_quality_pref
         else:
-            rp = _find_existing_render()
-            if rp:
-                render_state = {"status": "complete", "filename": rp.name}
+            ffmpeg_render_state = _file_state("ffmpeg") or {"status": "idle", "quality": "draft"}
+            resolve_render_state = _file_state("resolve") or {"status": "idle"}
+            ffmpeg_quality_pref = "draft"
 
         # Send initial state on connect
         try:
@@ -251,17 +248,16 @@ def register_websocket_routes(app: FastAPI):
                 init_data["scratchpad_timestamps"] = agent.get_scratchpad_timestamps()
                 init_data["chat_history"] = agent.get_chat_history()
                 init_data["event_log"] = agent.get_event_log()
-                init_data["draft_render_state"] = agent._draft_render_state
             else:
                 init_data["scratchpads"] = {}
                 init_data["scratchpad_timestamps"] = {}
                 init_data["chat_history"] = []
                 init_data["event_log"] = []
-                init_data["draft_render_state"] = {"status": "idle"}
+            init_data["ffmpeg_render_state"] = ffmpeg_render_state
+            init_data["resolve_render_state"] = resolve_render_state
+            init_data["ffmpeg_quality_pref"] = ffmpeg_quality_pref
             if edit_decision_data:
                 init_data["edit_decision"] = edit_decision_data
-            if render_state:
-                init_data["render_state"] = render_state
             if indexing_state:
                 init_data["indexing_state"] = indexing_state
             await websocket.send_json({
@@ -340,14 +336,14 @@ def register_websocket_routes(app: FastAPI):
                         else:
                             asyncio.create_task(_run_indexing(project_name, workspace, only_files=only_files))
 
-                    elif msg_type == "render":
+                    elif msg_type == "render_resolve":
                         if agent is None:
                             await websocket.send_json({"type": "render_error", "data": {"error": "Project must be indexed first."}})
                         else:
                             fcpxml = agent.workspace.get_latest_fcpxml()
                             if fcpxml:
                                 agent._spawn_bg_task(
-                                    agent._auto_render_preview({"fcpxml_path": str(fcpxml)})
+                                    agent._render_resolve({"fcpxml_path": str(fcpxml)})
                                 )
                             else:
                                 await websocket.send_json({
@@ -355,11 +351,28 @@ def register_websocket_routes(app: FastAPI):
                                     "data": {"error": "No FCPXML found. Generate one first."},
                                 })
 
-                    elif msg_type == "render_draft":
+                    elif msg_type == "render_ffmpeg":
                         if agent is None:
                             await websocket.send_json({"type": "render_error", "data": {"error": "Project must be indexed first."}})
                         else:
-                            agent._spawn_bg_task(agent._render_ffmpeg_draft())
+                            quality = msg.get("quality", agent._ffmpeg_quality_pref)
+                            if quality not in ("draft", "full"):
+                                quality = "draft"
+                            agent._ffmpeg_quality_pref = quality
+                            agent._spawn_bg_task(agent._render_ffmpeg(quality))
+
+                    elif msg_type == "set_ffmpeg_quality":
+                        # Persist the user's quality preference without
+                        # kicking off a render — the next auto-render will
+                        # pick it up.
+                        if agent is not None:
+                            quality = msg.get("quality", "draft")
+                            if quality in ("draft", "full"):
+                                agent._ffmpeg_quality_pref = quality
+                                await websocket.send_json({
+                                    "type": "ffmpeg_quality_pref",
+                                    "data": {"quality": quality},
+                                })
 
                     elif msg_type == "crop_clip":
                         clip_id = msg.get("clip_id", "")
@@ -417,6 +430,13 @@ def register_websocket_routes(app: FastAPI):
                                     logger.warning(f"[AGENT WS] scratchpad breadcrumb failed: {e}")
 
                             await emit("timeline_update", {"edit_decision": ed})
+
+                            # Debounced auto-rerender of the ffmpeg preview
+                            # so the MP4 stays in sync with the edit without
+                            # the user having to click "Re-render". Resolve
+                            # is intentionally not auto-triggered.
+                            if agent is not None:
+                                agent.schedule_ffmpeg_rerender()
 
                 except asyncio.TimeoutError:
                     pass
@@ -644,6 +664,9 @@ def register_websocket_routes(app: FastAPI):
             })
             # Also send timeline_update so dashboard refreshes the full edit state
             await emit("timeline_update", {"edit_decision": ed_data})
+            # Crop changed the clip's transform — auto-rerender so the
+            # ffmpeg preview reflects the new framing.
+            agent.schedule_ffmpeg_rerender()
 
         except Exception as e:
             logger.error(f"[CROP] Error cropping clip {clip_id}: {e}", exc_info=True)

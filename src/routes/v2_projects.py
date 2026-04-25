@@ -125,7 +125,7 @@ async def v2_clear_gists(project_name: str):
 
 @router.post(f"{_config.V2_API_PREFIX}/projects/{{project_name}}/clear/planning")
 async def v2_clear_planning(project_name: str):
-    """Clear planning context: storyboard, clips, iterations, context.md, agent chat, scratchpads."""
+    """Clear planning context: storyboard, clips, iterations, context.md, agent chat, scratchpads, logs."""
     import shutil
     workspace = _workspace(project_name)
     if not workspace.exists():
@@ -136,7 +136,7 @@ async def v2_clear_planning(project_name: str):
         if p.exists():
             p.unlink()
 
-    for subdir in ["iterations", "scratchpads", "fcpxml", "renders"]:
+    for subdir in ["iterations", "scratchpads", "fcpxml", "renders", "logs"]:
         d = workspace.root / subdir
         if d.exists():
             shutil.rmtree(d)

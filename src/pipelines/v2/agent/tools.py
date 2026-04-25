@@ -35,6 +35,36 @@ def _refine_debug_log(workspace, entry: dict):
         logger.warning(f"[AGENT] Failed to write refine debug log: {e}")
 
 
+def _source_has_audio_stream(source_path: Path) -> bool:
+    """Return True if ``source_path`` contains at least one audio stream.
+
+    Silent stock footage has zero audio streams, and feeding such a file into
+    ``ffmpeg -vn -c:a aac`` fails with "Output file does not contain any
+    stream" — which previously bubbled into the broader STT except block and
+    got misattributed to ElevenLabs. We probe before extracting so the actual
+    cause shows up in the warning surfaced to the agent.
+
+    Returns False on any probe failure (missing file, ffprobe missing,
+    malformed media) — the caller will skip STT and fall back to video-only
+    refinement, which is the safe default.
+    """
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0",
+                str(source_path),
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        return bool((out.stdout or "").strip())
+    except Exception as e:
+        logger.warning(f"[AGENT] Could not probe audio stream for {source_path}: {e}")
+        return False
+
+
 def _detect_scene_cuts(
     video_path: str, start_sec: float, end_sec: float,
 ) -> Tuple[List[float], Optional[str]]:
@@ -93,6 +123,8 @@ class ToolExecutor:
         video_nos: List[str],
         event_callback=None,
         video_llm=None,
+        footage_fps: Optional[Dict[str, float]] = None,
+        source_fps: Optional[float] = None,
     ):
         self.memories = memories_manager
         # ``gemini`` is the main text LLM (may be Claude/GPT via OpenRouter).
@@ -105,6 +137,13 @@ class ToolExecutor:
         self.scratchpads = scratchpads
         self.video_nos = video_nos
         self._emit = event_callback or (lambda *a, **kw: None)
+        # Per-file source fps + project-wide dominant fps. Used in
+        # _generate_fcpxml to (a) auto-match timeline fps to source so no
+        # frame-rate conversion happens on single-source projects, and
+        # (b) snap source_start / source_end to source frame boundaries so
+        # ffmpeg's `-ss`/`-to` cuts land on exact frames.
+        self.footage_fps: Dict[str, float] = footage_fps or {}
+        self.source_fps: Optional[float] = source_fps
 
     async def execute(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool and return the result dict."""
@@ -320,6 +359,40 @@ class ToolExecutor:
             edit = EditDecision.model_validate(edit_data)
         except Exception as e:
             return {"error": f"Invalid EditDecision: {e}"}
+
+        # ── Auto-match timeline fps to the dominant source fps ──────────
+        # If the agent left timeline.fps at the schema default (24) but the
+        # source footage runs at a different rate (e.g. 29.97 NTSC), override
+        # so no frame-rate conversion happens at render time. That's the
+        # root cause of the ±1-frame audio drift we've seen at clip
+        # boundaries. Agent can still explicitly choose a non-default fps.
+        from src.pipelines.v2.schemas import TimelineSettings as _TS
+        from src.pipelines.v2.timing import snap_to_frame as _snap
+        schema_default_fps = _TS.model_fields["fps"].default
+        if (
+            self.source_fps
+            and abs(edit.timeline.fps - schema_default_fps) < 0.001
+            and abs(self.source_fps - schema_default_fps) > 0.05
+        ):
+            old_fps = edit.timeline.fps
+            edit.timeline.fps = float(self.source_fps)
+            logger.info(
+                f"[AGENT] Auto-matched timeline fps {old_fps} → "
+                f"{edit.timeline.fps:.4f} (source dominant)"
+            )
+
+        # ── Frame-snap clip source bounds ────────────────────────────────
+        # Round source_start / source_end to the source file's frame
+        # boundary so ffmpeg's `-ss`/`-to` land on real frames, not
+        # arbitrary decimals that round unpredictably.
+        for clip in edit.clips:
+            fps = self.footage_fps.get(clip.source_file) or self.source_fps
+            if fps and fps > 0:
+                clip.source_start = _snap(clip.source_start, fps)
+                clip.source_end = _snap(clip.source_end, fps)
+                for shot in (clip.shot_transforms or []):
+                    shot.source_start = _snap(shot.source_start, fps)
+                    shot.source_end = _snap(shot.source_end, fps)
 
         # Resolve source_path for clips that only have source_file
         footage_dir = self.workspace.get_footage_dir()
@@ -1139,18 +1212,35 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
             # Also extract a frame-accurate audio-only file for STT
             # (re-encode ensures exact start; audio-only is fast)
             segment_path = downsampled_path  # reuse for debug logging
-            audio_segment_path = tmp_dir / "segment_audio.m4a"
-            audio_extract_cmd = [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-ss", str(padded_start),
-                "-i", str(source_path),
-                "-t", str(padded_duration),
-                "-vn", "-c:a", "aac", "-b:a", "128k",
-                str(audio_segment_path),
-            ]
-            await asyncio.get_event_loop().run_in_executor(
-                None, lambda: subprocess.run(audio_extract_cmd, check=True)
+            # Probe for an audio stream first — silent stock footage has none,
+            # and `ffmpeg -vn -c:a aac` against such a file fails with
+            # "Output file does not contain any stream", which used to bubble
+            # into the broader except block and get misattributed to ElevenLabs.
+            audio_segment_path: Optional[Path] = None
+            no_audio_warning: Optional[str] = None
+            has_audio = await asyncio.get_event_loop().run_in_executor(
+                None, _source_has_audio_stream, source_path
             )
+            if has_audio:
+                audio_segment_path = tmp_dir / "segment_audio.m4a"
+                audio_extract_cmd = [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-ss", str(padded_start),
+                    "-i", str(source_path),
+                    "-t", str(padded_duration),
+                    "-vn", "-c:a", "aac", "-b:a", "128k",
+                    str(audio_segment_path),
+                ]
+                await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: subprocess.run(audio_extract_cmd, check=True)
+                )
+            else:
+                no_audio_warning = (
+                    "Source clip has no audio track (silent footage), so "
+                    "word-level STT was skipped. Dialogue boundaries are not "
+                    "applicable here; cuts were chosen from video frames alone."
+                )
+                logger.info(f"[AGENT] {source_file} has no audio track — skipping STT")
 
             # Save segment to workspace logs for manual inspection
             try:
@@ -1162,14 +1252,17 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
             except Exception:
                 pass
 
-            # Step 3: Transcribe segment audio with ElevenLabs STT (word-level timestamps)
+            # Step 3: Transcribe segment audio with ElevenLabs STT (word-level timestamps).
+            # Skipped entirely for silent footage (audio_segment_path is None) — the
+            # warning was already set during the probe above.
             clip_transcript = ""
             transcript_segments = []
-            stt_warning: Optional[str] = None
+            stt_warning: Optional[str] = no_audio_warning
+            run_stt = audio_segment_path is not None
             try:
                 import os as _os
                 el_key = _os.environ.get("ELEVENLABS_API_KEY", "")
-                if el_key:
+                if run_stt and el_key:
                     # Use the frame-accurate audio segment extracted earlier
                     words = await asyncio.get_event_loop().run_in_executor(
                         None, lambda: stt_word_timestamps(str(audio_segment_path), el_key)
@@ -1200,13 +1293,14 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
                             "clip is speech-heavy, word-level cut points were not "
                             "verifiable — dialogue boundaries may be imprecise."
                         )
-                else:
+                elif run_stt and not el_key:
                     stt_warning = (
                         "ElevenLabs API key not configured, so this clip was cut "
                         "using only the video frames (no word-level transcript). "
                         "Dialogue boundaries may be imprecise."
                     )
                     logger.warning("[AGENT] ELEVENLABS_API_KEY not set — skipping STT for refinement")
+                # else: run_stt is False — silent footage; warning already set, nothing to do.
             except Exception as e:
                 # Most common: quota_exceeded (401). Keep the reason short but real
                 # so the main LLM can relay it to the user.

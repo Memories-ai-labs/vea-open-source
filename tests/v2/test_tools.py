@@ -104,3 +104,58 @@ def test_transcript_total_duration_matches():
     transcript = _build_transcript(script, duration)
     total = sum(t["end"] - t["start"] for t in transcript)
     assert abs(total - duration) < 0.1, f"Total transcript duration {total}s should match {duration}s"
+
+
+# ---------------------------------------------------------------------------
+# Audio-stream probe — regression for silent stock footage.
+#
+# Prior bug: refine_clip_timestamps fed silent footage to `ffmpeg -vn -c:a aac`,
+# which fails with "Output file does not contain any stream". The error was
+# then misattributed to ElevenLabs in the user-facing warning. The fix probes
+# for an audio stream first; these tests pin that probe behavior.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def _ffmpeg_or_skip():
+    import shutil
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("ffmpeg/ffprobe not on PATH")
+
+
+def test_source_has_audio_stream_true_for_audio_video(tmp_path, _ffmpeg_or_skip):
+    """A 1-second clip with both a colored video stream and a sine audio stream
+    should be reported as having audio."""
+    import subprocess
+    from src.pipelines.v2.agent.tools import _source_has_audio_stream
+    av = tmp_path / "av.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "color=c=black:s=160x120:d=1",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-shortest", str(av)],
+        check=True,
+    )
+    assert _source_has_audio_stream(av) is True
+
+
+def test_source_has_audio_stream_false_for_silent_video(tmp_path, _ffmpeg_or_skip):
+    """A video-only clip (no audio stream at all) — the silent-stock-footage
+    case — must be reported as having no audio so STT is skipped cleanly."""
+    import subprocess
+    from src.pipelines.v2.agent.tools import _source_has_audio_stream
+    silent = tmp_path / "silent.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "color=c=black:s=160x120:d=1",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(silent)],
+        check=True,
+    )
+    assert _source_has_audio_stream(silent) is False
+
+
+def test_source_has_audio_stream_safe_on_missing_file(tmp_path):
+    """Probe failure must not raise — caller treats False as 'skip STT'."""
+    from src.pipelines.v2.agent.tools import _source_has_audio_stream
+    assert _source_has_audio_stream(tmp_path / "nope.mp4") is False

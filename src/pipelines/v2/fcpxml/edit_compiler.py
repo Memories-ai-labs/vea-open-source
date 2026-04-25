@@ -27,7 +27,6 @@ from src.pipelines.v2.schemas import (
     MusicTrack,
     NarrationSegment,
     TextOverlay,
-    TransitionSpec,
 )
 
 logger = logging.getLogger(__name__)
@@ -201,7 +200,7 @@ def compile_edit_decision(
         else:
             upper_track_clips.setdefault(track_num, []).append((i, clip))
 
-    # --- Build spine clips from track 1 + transitions ---
+    # --- Build spine clips from track 1 ---
     timeline_frames = 0
     clip_timeline_ranges: List[Tuple[int, int]] = []  # (start_frame, end_frame) per spine clip
 
@@ -311,15 +310,6 @@ def compile_edit_decision(
 
             clip_timeline_ranges.append((timeline_frames, timeline_frames + tl_frames))
             timeline_frames += tl_frames
-
-        # NOTE: Transitions disabled for now — hard cuts only.
-        # Cross-dissolve transitions cause audio overlap between adjacent clips.
-        # TODO: Re-enable with proper audio crossfade handling.
-        # if clip.transition_after and i < len(edit.clips) - 1:
-        #     trans_dur = _fraction_from_seconds(clip.transition_after.duration_seconds, fps_hint=fps)
-        #     _, trans_frames = _quantize_duration_to_timeline(trans_dur, fps)
-        #     _add_transition(spine, clip.transition_after, fps_frac, fps)
-        #     timeline_frames -= trans_frames
 
     # --- Place track 2+ clips as connected clips on spine ---
     # Each upper-track clip is sequenced within its track group and attached
@@ -616,25 +606,6 @@ def _add_audio_asset(
     )
     SubElement(asset, "media-rep", kind="original-media", src=uri)
 
-
-def _add_transition(
-    spine: Element,
-    spec: TransitionSpec,
-    fps_frac: Fraction,
-    fps: float,
-) -> None:
-    dur = _fraction_from_seconds(spec.duration_seconds, fps_hint=fps)
-    tl_dur, _ = _quantize_duration_to_timeline(dur, fps)
-    name_map = {
-        "cross-dissolve": "Cross Dissolve",
-        "fade-in": "Fade In",
-        "fade-out": "Fade Out",
-    }
-    SubElement(
-        spine, "transition",
-        name=name_map.get(spec.type, "Cross Dissolve"),
-        duration=_format_fraction_seconds(tl_dur),
-    )
 
 
 def _add_speed_remap(
