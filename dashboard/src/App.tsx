@@ -89,8 +89,9 @@ export default function App() {
         scratchpads={agent.scratchpads}
         scratchpadTimestamps={agent.scratchpadTimestamps}
         editDecision={agent.editDecision}
-        renderState={agent.renderState}
-        draftRenderState={agent.draftRenderState}
+        ffmpegRenderState={agent.ffmpegRenderState}
+        resolveRenderState={agent.resolveRenderState}
+        ffmpegQualityPref={agent.ffmpegQualityPref}
         cropStatuses={agent.cropStatuses}
         connected={agent.connected}
         busy={agent.busy}
@@ -99,8 +100,9 @@ export default function App() {
         videoMeta={agent.videoMeta}
         reindexingFiles={agent.reindexingFiles}
         onSend={agent.send}
-        onRequestRender={agent.requestRender}
-        onRequestDraftRender={agent.requestDraftRender}
+        onRequestResolveRender={agent.requestResolveRender}
+        onRequestFfmpegRender={agent.requestFfmpegRender}
+        onSetFfmpegQualityPref={agent.setFfmpegQualityPref}
         onTriggerIndex={agent.triggerIndex}
         onBack={handleBack}
         onClearState={agent.clearAndReconnect}

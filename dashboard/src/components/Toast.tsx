@@ -3,15 +3,26 @@ import { createPortal } from 'react-dom';
 
 type ToastLevel = 'success' | 'error' | 'info' | 'warning';
 
+interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 interface ToastItem {
   id: number;
   message: string;
   level: ToastLevel;
   detail?: string;
+  action?: ToastAction;
+}
+
+interface ToastOptions {
+  detail?: string;
+  action?: ToastAction;
 }
 
 interface ToastContextValue {
-  toast: (message: string, level?: ToastLevel, detail?: string) => void;
+  toast: (message: string, level?: ToastLevel, opts?: ToastOptions | string) => void;
 }
 
 const ToastContext = createContext<ToastContextValue>({ toast: () => {} });
@@ -25,12 +36,21 @@ let _toastId = 0;
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
-  const toast = useCallback((message: string, level: ToastLevel = 'info', detail?: string) => {
+  const toast = useCallback((
+    message: string,
+    level: ToastLevel = 'info',
+    opts?: ToastOptions | string,
+  ) => {
     const id = ++_toastId;
-    setToasts(prev => [...prev, { id, message, level, detail }]);
+    // Back-compat: old callers pass a plain `detail` string.
+    const detail = typeof opts === 'string' ? opts : opts?.detail;
+    const action = typeof opts === 'string' ? undefined : opts?.action;
+    setToasts(prev => [...prev, { id, message, level, detail, action }]);
+    // Longer timeout when there's an action button so the user has time to click.
+    const ttl = level === 'error' ? 6000 : action ? 10000 : 3500;
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id));
-    }, level === 'error' ? 6000 : 3500);
+    }, ttl);
   }, []);
 
   const dismiss = useCallback((id: number) => {
@@ -113,7 +133,7 @@ function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: () => void
       }}>
         {s.icon}
       </span>
-      <div style={{ minWidth: 0 }}>
+      <div style={{ minWidth: 0, flex: 1 }}>
         <div style={{
           color: 'var(--text-primary)',
           fontSize: '12px',
@@ -133,6 +153,26 @@ function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: () => void
           }}>
             {item.detail}
           </div>
+        )}
+        {item.action && (
+          <button
+            onClick={(e) => { e.stopPropagation(); item.action!.onClick(); onDismiss(); }}
+            style={{
+              marginTop: '6px',
+              padding: '3px 10px',
+              fontSize: '10px',
+              fontFamily: 'var(--font-mono)',
+              letterSpacing: '0.04em',
+              textTransform: 'uppercase',
+              color: s.color,
+              background: 'transparent',
+              border: `1px solid ${s.border}`,
+              borderRadius: '4px',
+              cursor: 'pointer',
+            }}
+          >
+            {item.action.label}
+          </button>
         )}
       </div>
     </div>

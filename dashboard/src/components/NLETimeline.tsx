@@ -262,7 +262,8 @@ function buildTracks(ed: EditDecision): { tracks: Track[]; totalDuration: number
   // single family ('video') covers every visual layer.
   //
   // Collect per-track items in a dict keyed by V-track number, then emit
-  // sorted by track (V1 at top, V2+ below).
+  // in NLE order — V1 at the bottom, V2/V3/… stacked upward. This matches
+  // DaVinci/Premiere/FCP: higher track number = visually on top = drawn above.
   const videoBuckets = new Map<number, TrackItem[]>();
 
   // Pass 1 — V1 is the primary spine: clips are sequential. Compute timeline
@@ -327,8 +328,10 @@ function buildTracks(ed: EditDecision): { tracks: Track[]; totalDuration: number
     totalDur = Math.max(totalDur, t.timeline_offset + t.duration);
   });
 
-  // Emit V-tracks in ascending order
-  for (const trackNum of [...videoBuckets.keys()].sort((a, b) => a - b)) {
+  // Emit V-tracks in descending order so V1 ends up at the visual BOTTOM
+  // (rendered last in the track column, NLE-style). tracks.map() below
+  // renders top-to-bottom, so the first emitted track is drawn at the top.
+  for (const trackNum of [...videoBuckets.keys()].sort((a, b) => b - a)) {
     const id = `V${trackNum}`;
     tracks.push({
       id, name: id, family: 'video', trackNum,
@@ -910,15 +913,21 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
     }
 
     // Pointer outside every family track. Pick above-all vs below-all based
-    // on comparison to the first and last track's bounding rects.
+    // on the first and last track's bounding rects — note "first" here is the
+    // *visually topmost* track, which for video is the HIGHEST trackNum (V3
+    // is drawn above V1, NLE-style). For audio the order is still ascending.
     const firstEl = el.querySelector(`[data-track-id="${familyTracks[0].id}"]`);
     const lastEl = el.querySelector(`[data-track-id="${familyTracks[familyTracks.length - 1].id}"]`);
-    if (lastEl && clientY > lastEl.getBoundingClientRect().bottom) {
-      // Below last track — create a new one
-      return Math.max(...familyTracks.map(t => t.trackNum)) + 1;
-    }
+    const maxNum = Math.max(...familyTracks.map(t => t.trackNum));
+    const minNum = Math.min(...familyTracks.map(t => t.trackNum));
+    // Dragging ABOVE the visual top: create a new higher-numbered track.
     if (firstEl && clientY < firstEl.getBoundingClientRect().top) {
-      return familyTracks[0].trackNum;
+      return family === 'video' ? maxNum + 1 : minNum;
+    }
+    // Dragging BELOW the visual bottom: create a new lower-numbered track
+    // for audio, or snap to V1 for video (can't go lower than V1).
+    if (lastEl && clientY > lastEl.getBoundingClientRect().bottom) {
+      return family === 'video' ? minNum : maxNum + 1;
     }
     return familyTracks[0].trackNum;
   }, [tracks]);

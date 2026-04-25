@@ -22,8 +22,9 @@ interface AgentChatProps {
   scratchpads: ScratchpadState;
   scratchpadTimestamps: ScratchpadTimestamps;
   editDecision: EditDecision | null;
-  renderState: RenderState;
-  draftRenderState: RenderState;
+  ffmpegRenderState: import('../hooks/useAgentChat').FfmpegRenderState;
+  resolveRenderState: RenderState;
+  ffmpegQualityPref: import('../hooks/useAgentChat').FfmpegQuality;
   cropStatuses: Record<string, CropStatus>;
   connected: boolean;
   busy: boolean;
@@ -42,8 +43,9 @@ interface AgentChatProps {
   }>;
   reindexingFiles?: Set<string>;
   onSend: (text: string) => void;
-  onRequestRender: () => void;
-  onRequestDraftRender: () => void;
+  onRequestResolveRender: () => void;
+  onRequestFfmpegRender: (quality: import('../hooks/useAgentChat').FfmpegQuality) => void;
+  onSetFfmpegQualityPref: (quality: import('../hooks/useAgentChat').FfmpegQuality) => void;
   onTriggerIndex?: (files?: string[]) => void;
   onBack: () => void;
   onClearState: () => void;
@@ -137,7 +139,7 @@ function useHorizontalDivider(
 }
 
 export function AgentChat({
-  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, connected, busy, needsIndexing, indexingState, videoMeta, reindexingFiles, onSend, onRequestRender, onRequestDraftRender, onTriggerIndex, onBack, onClearState, onEditDecisionChange, onEditDecisionPreview, onRequestCropClip, onUndo, onRedo, canUndo, canRedo,
+  project: initialProject, events, messages, scratchpads, scratchpadTimestamps, editDecision, ffmpegRenderState, resolveRenderState, ffmpegQualityPref, cropStatuses, connected, busy, needsIndexing, indexingState, videoMeta, reindexingFiles, onSend, onRequestResolveRender, onRequestFfmpegRender, onSetFfmpegQualityPref, onTriggerIndex, onBack, onClearState, onEditDecisionChange, onEditDecisionPreview, onRequestCropClip, onUndo, onRedo, canUndo, canRedo,
 }: AgentChatProps) {
   const { toast } = useToast();
   const [project, setProject] = useState(initialProject);
@@ -235,33 +237,69 @@ export function AgentChat({
     return () => window.removeEventListener('keydown', handler);
   }, [onUndo, onRedo]);
 
+  // Build a "Reveal in Finder" action bound to a specific render file.
+  // Calls the backend endpoint which runs `open -R <path>` on macOS (or
+  // `xdg-open` on Linux); ignored silently on other platforms.
+  const makeRevealAction = useCallback((filename: string | null) => {
+    if (!filename) return undefined;
+    return {
+      label: 'Reveal in Finder',
+      onClick: async () => {
+        try {
+          const url = `/video-edit/v2/projects/${encodeURIComponent(initialProject.project_name)}/renders/${encodeURIComponent(filename)}/reveal`;
+          const res = await fetch(url, { method: 'POST' });
+          if (!res.ok) {
+            toast('Could not reveal file', 'error');
+          }
+        } catch {
+          toast('Could not reveal file', 'error');
+        }
+      },
+    };
+  }, [initialProject.project_name, toast]);
+
   // Toast popups when renders finish or fail (transition-aware so we only fire once per render)
-  const prevDraftStatusRef = useRef<RenderState['status']>('idle');
-  const prevFinalStatusRef = useRef<RenderState['status']>('idle');
+  const prevFfmpegStatusRef = useRef<RenderState['status']>('idle');
+  const prevResolveStatusRef = useRef<RenderState['status']>('idle');
   useEffect(() => {
-    const prev = prevDraftStatusRef.current;
-    const curr = draftRenderState.status;
+    const prev = prevFfmpegStatusRef.current;
+    const curr = ffmpegRenderState.status;
+    if (prev !== curr) {
+      const qualityLabel = ffmpegRenderState.quality === 'full' ? 'full res' : '480p';
+      if (curr === 'complete' && prev === 'rendering') {
+        const path = ffmpegRenderState.outputPath || `renders/${ffmpegRenderState.filename ?? 'ffmpeg.mp4'}`;
+        toast(`ffmpeg render complete (${qualityLabel})`, 'success', {
+          detail: path,
+          action: makeRevealAction(ffmpegRenderState.filename),
+        });
+      } else if (curr === 'error' && prev === 'rendering') {
+        toast(
+          `ffmpeg render failed${ffmpegRenderState.error ? `: ${ffmpegRenderState.error.slice(0, 100)}` : ''}`,
+          'error',
+        );
+      }
+      prevFfmpegStatusRef.current = curr;
+    }
+  }, [ffmpegRenderState.status, ffmpegRenderState.error, ffmpegRenderState.quality, ffmpegRenderState.filename, ffmpegRenderState.outputPath, toast, makeRevealAction]);
+  useEffect(() => {
+    const prev = prevResolveStatusRef.current;
+    const curr = resolveRenderState.status;
     if (prev !== curr) {
       if (curr === 'complete' && prev === 'rendering') {
-        toast('Draft render complete', 'success');
+        const path = resolveRenderState.outputPath || `renders/${resolveRenderState.filename ?? 'resolve.mp4'}`;
+        toast('Resolve render complete', 'success', {
+          detail: path,
+          action: makeRevealAction(resolveRenderState.filename),
+        });
       } else if (curr === 'error' && prev === 'rendering') {
-        toast(`Draft render failed${draftRenderState.error ? `: ${draftRenderState.error.slice(0, 100)}` : ''}`, 'error');
+        toast(
+          `Resolve render failed${resolveRenderState.error ? `: ${resolveRenderState.error.slice(0, 100)}` : ''}`,
+          'error',
+        );
       }
-      prevDraftStatusRef.current = curr;
+      prevResolveStatusRef.current = curr;
     }
-  }, [draftRenderState.status, draftRenderState.error, toast]);
-  useEffect(() => {
-    const prev = prevFinalStatusRef.current;
-    const curr = renderState.status;
-    if (prev !== curr) {
-      if (curr === 'complete' && prev === 'rendering') {
-        toast('Final render complete', 'success');
-      } else if (curr === 'error' && prev === 'rendering') {
-        toast(`Final render failed${renderState.error ? `: ${renderState.error.slice(0, 100)}` : ''}`, 'error');
-      }
-      prevFinalStatusRef.current = curr;
-    }
-  }, [renderState.status, renderState.error, toast]);
+  }, [resolveRenderState.status, resolveRenderState.error, resolveRenderState.filename, resolveRenderState.outputPath, toast, makeRevealAction]);
 
   // Horizontal column drag divider for timeline/chat split in lower row
   const lowerRowRef = useRef<HTMLDivElement>(null);
@@ -1126,11 +1164,13 @@ export function AgentChat({
               <PreviewPanel
                 ref={previewPanelRef}
                 projectName={project.project_name}
-                draftRenderState={draftRenderState}
-                finalRenderState={renderState}
+                ffmpegRenderState={ffmpegRenderState}
+                resolveRenderState={resolveRenderState}
+                ffmpegQualityPref={ffmpegQualityPref}
                 editDecision={editDecision}
-                onRequestDraftRender={onRequestDraftRender}
-                onRequestFinalRender={onRequestRender}
+                onRequestFfmpegRender={onRequestFfmpegRender}
+                onSetFfmpegQualityPref={onSetFfmpegQualityPref}
+                onRequestResolveRender={onRequestResolveRender}
                 onTimeUpdate={setPlayheadTime}
                 playheadTime={playheadTime}
                 resolveRunning={resolveRunning}
@@ -1147,31 +1187,35 @@ export function AgentChat({
                 background: 'rgba(255,255,255,0.015)',
               }}>
                 <button
-                  onClick={onRequestDraftRender}
-                  disabled={draftRenderState.status === 'rendering'}
+                  onClick={() => onRequestFfmpegRender(ffmpegQualityPref)}
+                  disabled={ffmpegRenderState.status === 'rendering'}
                   style={{
                     flex: 1, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
                     borderRadius: '3px', color: 'var(--text-secondary)', fontSize: '9px', fontFamily: 'var(--font-mono)',
                     padding: '4px 8px', letterSpacing: '0.04em', textTransform: 'uppercase' as const,
-                    opacity: draftRenderState.status === 'rendering' ? 0.5 : 1,
-                    cursor: draftRenderState.status === 'rendering' ? 'not-allowed' : 'pointer',
+                    opacity: ffmpegRenderState.status === 'rendering' ? 0.5 : 1,
+                    cursor: ffmpegRenderState.status === 'rendering' ? 'not-allowed' : 'pointer',
                   }}
                 >
-                  {draftRenderState.status === 'rendering' ? 'Rendering...' : 'Render Draft'}
+                  {ffmpegRenderState.status === 'rendering'
+                    ? 'Rendering...'
+                    : `Render ffmpeg (${ffmpegQualityPref === 'full' ? 'full' : '480p'})`}
                 </button>
                 <button
-                  onClick={onRequestRender}
-                  disabled={renderState.status === 'rendering' || resolveRunning !== true}
+                  onClick={onRequestResolveRender}
+                  disabled={resolveRenderState.status === 'rendering' || resolveRunning !== true}
                   style={{
                     flex: 1, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
                     borderRadius: '3px', color: 'var(--text-secondary)', fontSize: '9px', fontFamily: 'var(--font-mono)',
                     padding: '4px 8px', letterSpacing: '0.04em', textTransform: 'uppercase' as const,
-                    opacity: (renderState.status === 'rendering' || resolveRunning !== true) ? 0.5 : 1,
-                    cursor: (renderState.status === 'rendering' || resolveRunning !== true) ? 'not-allowed' : 'pointer',
+                    opacity: (resolveRenderState.status === 'rendering' || resolveRunning !== true) ? 0.5 : 1,
+                    cursor: (resolveRenderState.status === 'rendering' || resolveRunning !== true) ? 'not-allowed' : 'pointer',
                   }}
                   title={resolveRunning !== true ? 'Requires DaVinci Resolve' : undefined}
                 >
-                  {renderState.status === 'rendering' ? 'Rendering...' : resolveRunning !== true ? 'Export Final (Resolve)' : 'Export Final'}
+                  {resolveRenderState.status === 'rendering'
+                    ? 'Rendering...'
+                    : resolveRunning !== true ? 'Render Resolve (unavailable)' : 'Render Resolve'}
                 </button>
               </div>
             )}
@@ -1237,21 +1281,23 @@ export function AgentChat({
                     {editDecision && editDecision.clips.length > 0 && (
                       <div style={{ padding: '8px 10px', borderTop: '1px solid var(--border)' }}>
                         <button
-                          onClick={onRequestRender}
-                          disabled={renderState.status === 'rendering'}
+                          onClick={() => onRequestFfmpegRender(ffmpegQualityPref)}
+                          disabled={ffmpegRenderState.status === 'rendering'}
                           style={{
                             width: '100%',
                             padding: '5px 10px',
-                            background: renderState.status === 'rendering' ? 'var(--surface-2)' : 'var(--accent-blue)',
+                            background: ffmpegRenderState.status === 'rendering' ? 'var(--surface-2)' : 'var(--accent-blue)',
                             color: '#fff',
                             border: 'none',
                             borderRadius: 'var(--radius-md)',
-                            cursor: renderState.status === 'rendering' ? 'not-allowed' : 'pointer',
+                            cursor: ffmpegRenderState.status === 'rendering' ? 'not-allowed' : 'pointer',
                             fontFamily: 'var(--font-mono)',
                             fontSize: 11,
                           }}
                         >
-                          {renderState.status === 'rendering' ? 'Rendering...' : '\u21BB Render Preview'}
+                          {ffmpegRenderState.status === 'rendering'
+                            ? 'Rendering...'
+                            : `\u21BB Render ffmpeg (${ffmpegQualityPref === 'full' ? 'full' : '480p'})`}
                         </button>
                       </div>
                     )}

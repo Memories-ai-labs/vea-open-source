@@ -52,7 +52,6 @@ export interface EditDecisionClip {
   transform_mode?: 'fit' | 'custom' | 'saliency';
   source_width?: number;
   source_height?: number;
-  transition_after?: { type: string; duration_seconds: number } | null;
   track?: number;
   timeline_offset?: number;
 }
@@ -99,6 +98,7 @@ export interface RenderState {
   status: 'idle' | 'rendering' | 'complete' | 'error';
   progress: number; // 0-100
   filename: string | null;
+  outputPath: string | null;
   error: string | null;
 }
 
@@ -109,14 +109,21 @@ export interface CropStatus {
   error?: string;
 }
 
+export type FfmpegQuality = 'draft' | 'full';
+
+export interface FfmpegRenderState extends RenderState {
+  quality: FfmpegQuality;
+}
+
 interface UseAgentChatResult {
   events: AgentEvent[];
   messages: ChatMessage[];
   scratchpads: ScratchpadState;
   scratchpadTimestamps: ScratchpadTimestamps;
   editDecision: EditDecision | null;
-  renderState: RenderState;
-  draftRenderState: RenderState;
+  ffmpegRenderState: FfmpegRenderState;
+  resolveRenderState: RenderState;
+  ffmpegQualityPref: FfmpegQuality;
   cropStatuses: Record<string, CropStatus>;
   footageFiles: string[];
   indexedFiles: string[];
@@ -137,8 +144,9 @@ interface UseAgentChatResult {
   connected: boolean;
   busy: boolean;
   send: (text: string) => void;
-  requestRender: () => void;
-  requestDraftRender: () => void;
+  requestResolveRender: () => void;
+  requestFfmpegRender: (quality: FfmpegQuality) => void;
+  setFfmpegQualityPref: (quality: FfmpegQuality) => void;
   triggerIndex: (files?: string[]) => void;
   clearAndReconnect: () => void;
   updateEditDecision: (updated: EditDecision) => void;
@@ -249,12 +257,13 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     },
     [],
   );
-  const [renderState, setRenderState] = useState<RenderState>({
-    status: 'idle', progress: 0, filename: null, error: null,
+  const [resolveRenderState, setResolveRenderState] = useState<RenderState>({
+    status: 'idle', progress: 0, filename: null, outputPath: null, error: null,
   });
-  const [draftRenderState, setDraftRenderState] = useState<RenderState>({
-    status: 'idle', progress: 0, filename: null, error: null,
+  const [ffmpegRenderState, setFfmpegRenderState] = useState<FfmpegRenderState>({
+    status: 'idle', progress: 0, filename: null, outputPath: null, error: null, quality: 'draft',
   });
+  const [ffmpegQualityPref, setFfmpegQualityPrefState] = useState<FfmpegQuality>('draft');
   const [cropStatuses, setCropStatuses] = useState<Record<string, CropStatus>>({});
   const [footageFiles, setFootageFiles] = useState<string[]>([]);
   const [indexedFiles, setIndexedFiles] = useState<string[]>([]);
@@ -332,23 +341,30 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
               // reconnected session starts with a clean undo stack.
               setEditDecision(event.data.edit_decision as EditDecision, { kind: 'replace' });
             }
-            if (event.data.render_state) {
-              const rs = event.data.render_state;
-              setRenderState({
-                status: rs.status || 'idle',
-                progress: rs.progress ?? (rs.status === 'complete' ? 100 : 0),
-                filename: rs.filename || null,
-                error: rs.error || null,
+            if (event.data.ffmpeg_render_state) {
+              const frs = event.data.ffmpeg_render_state;
+              setFfmpegRenderState({
+                status: frs.status || 'idle',
+                progress: frs.progress ?? (frs.status === 'complete' ? 100 : 0),
+                filename: frs.filename || null,
+                outputPath: frs.output_path || null,
+                error: frs.error || null,
+                quality: (frs.quality === 'full' ? 'full' : 'draft') as FfmpegQuality,
               });
             }
-            if (event.data.draft_render_state) {
-              const drs = event.data.draft_render_state;
-              setDraftRenderState({
-                status: drs.status || 'idle',
-                progress: drs.progress ?? (drs.status === 'complete' ? 100 : 0),
-                filename: drs.filename || null,
-                error: drs.error || null,
+            if (event.data.resolve_render_state) {
+              const rrs = event.data.resolve_render_state;
+              setResolveRenderState({
+                status: rrs.status || 'idle',
+                progress: rrs.progress ?? (rrs.status === 'complete' ? 100 : 0),
+                filename: rrs.filename || null,
+                outputPath: rrs.output_path || null,
+                error: rrs.error || null,
               });
+            }
+            if (event.data.ffmpeg_quality_pref) {
+              const q = event.data.ffmpeg_quality_pref;
+              setFfmpegQualityPrefState(q === 'full' ? 'full' : 'draft');
             }
             // Replay persisted events (tool calls, results, scratchpad updates)
             if (event.data.event_log && Array.isArray(event.data.event_log)) {
@@ -419,35 +435,64 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
             break;
 
           case 'render_start': {
-            const setter = event.data.renderer === 'ffmpeg' ? setDraftRenderState : setRenderState;
-            setter({ status: 'rendering', progress: 0, filename: null, error: null });
+            if (event.data.renderer === 'ffmpeg') {
+              const q = (event.data.quality === 'full' ? 'full' : 'draft') as FfmpegQuality;
+              setFfmpegRenderState({
+                status: 'rendering', progress: 0, filename: null, outputPath: null, error: null, quality: q,
+              });
+            } else {
+              setResolveRenderState({ status: 'rendering', progress: 0, filename: null, outputPath: null, error: null });
+            }
             break;
           }
 
           case 'render_progress': {
-            const setter = event.data.renderer === 'ffmpeg' ? setDraftRenderState : setRenderState;
-            setter(prev => ({ ...prev, progress: event.data.percent || 0 }));
+            if (event.data.renderer === 'ffmpeg') {
+              setFfmpegRenderState(prev => ({ ...prev, progress: event.data.percent || 0 }));
+            } else {
+              setResolveRenderState(prev => ({ ...prev, progress: event.data.percent || 0 }));
+            }
             break;
           }
 
           case 'render_complete': {
-            const setter = event.data.renderer === 'ffmpeg' ? setDraftRenderState : setRenderState;
-            setter({
-              status: 'complete',
-              progress: 100,
-              filename: event.data.filename || null,
-              error: null,
-            });
+            if (event.data.renderer === 'ffmpeg') {
+              const q = (event.data.quality === 'full' ? 'full' : 'draft') as FfmpegQuality;
+              setFfmpegRenderState({
+                status: 'complete', progress: 100,
+                filename: event.data.filename || null,
+                outputPath: event.data.output_path || null,
+                error: null, quality: q,
+              });
+            } else {
+              setResolveRenderState({
+                status: 'complete', progress: 100,
+                filename: event.data.filename || null,
+                outputPath: event.data.output_path || null,
+                error: null,
+              });
+            }
             break;
           }
 
           case 'render_error': {
-            const setter = event.data.renderer === 'ffmpeg' ? setDraftRenderState : setRenderState;
-            setter(prev => ({
-              ...prev,
-              status: 'error',
-              error: event.data.error || 'Render failed',
-            }));
+            if (event.data.renderer === 'ffmpeg') {
+              setFfmpegRenderState(prev => ({
+                ...prev, status: 'error',
+                error: event.data.error || 'Render failed',
+              }));
+            } else {
+              setResolveRenderState(prev => ({
+                ...prev, status: 'error',
+                error: event.data.error || 'Render failed',
+              }));
+            }
+            break;
+          }
+
+          case 'ffmpeg_quality_pref': {
+            const q = event.data.quality === 'full' ? 'full' : 'draft';
+            setFfmpegQualityPrefState(q as FfmpegQuality);
             break;
           }
 
@@ -532,8 +577,9 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
       setScratchpads({ comprehension: '', creative_direction: '', planning: '', fcpxml: '' });
       setScratchpadTimestamps({ comprehension: null, creative_direction: null, planning: null, fcpxml: null });
       setEditDecision(null);
-      setRenderState({ status: 'idle', progress: 0, filename: null, error: null });
-      setDraftRenderState({ status: 'idle', progress: 0, filename: null, error: null });
+      setResolveRenderState({ status: 'idle', progress: 0, filename: null, outputPath: null, error: null });
+      setFfmpegRenderState({ status: 'idle', progress: 0, filename: null, outputPath: null, error: null, quality: 'draft' });
+      setFfmpegQualityPrefState('draft');
       setConnected(false);
       setBusy(false);
       return;
@@ -585,17 +631,27 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     }
   }, []);
 
-  const requestRender = useCallback(() => {
+  const requestResolveRender = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      setRenderState({ status: 'rendering', progress: 0, filename: null, error: null });
-      wsRef.current.send(JSON.stringify({ type: 'render' }));
+      setResolveRenderState({ status: 'rendering', progress: 0, filename: null, outputPath: null, error: null });
+      wsRef.current.send(JSON.stringify({ type: 'render_resolve' }));
     }
   }, []);
 
-  const requestDraftRender = useCallback(() => {
+  const requestFfmpegRender = useCallback((quality: FfmpegQuality) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      setDraftRenderState({ status: 'rendering', progress: 0, filename: null, error: null });
-      wsRef.current.send(JSON.stringify({ type: 'render_draft' }));
+      setFfmpegRenderState(prev => ({
+        ...prev, status: 'rendering', progress: 0, filename: null, outputPath: null, error: null, quality,
+      }));
+      setFfmpegQualityPrefState(quality);
+      wsRef.current.send(JSON.stringify({ type: 'render_ffmpeg', quality }));
+    }
+  }, []);
+
+  const setFfmpegQualityPref = useCallback((quality: FfmpegQuality) => {
+    setFfmpegQualityPrefState(quality);
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'set_ffmpeg_quality', quality }));
     }
   }, []);
 
@@ -686,8 +742,9 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     setScratchpads({ comprehension: '', creative_direction: '', planning: '', fcpxml: '' });
     setScratchpadTimestamps({ comprehension: null, creative_direction: null, planning: null, fcpxml: null });
     setEditDecision(null);
-    setRenderState({ status: 'idle', progress: 0, filename: null, error: null });
-    setDraftRenderState({ status: 'idle', progress: 0, filename: null, error: null });
+    setResolveRenderState({ status: 'idle', progress: 0, filename: null, outputPath: null, error: null });
+    setFfmpegRenderState({ status: 'idle', progress: 0, filename: null, outputPath: null, error: null, quality: 'draft' });
+    setFfmpegQualityPrefState('draft');
     setCropStatuses({});
     setBusy(false);
     // Close and reconnect WebSocket so backend sends fresh init
@@ -706,5 +763,5 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     setTimeout(() => { if (mountedRef.current) connect(); }, 300);
   }, [connect]);
 
-  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, renderState, draftRenderState, cropStatuses, footageFiles, indexedFiles, videoMeta, reindexingFiles, needsIndexing, indexingState, connected, busy, send, requestRender, requestDraftRender, clearAndReconnect, updateEditDecision, previewEditDecision, requestCropClip, triggerIndex, undo, redo, canUndo, canRedo };
+  return { events, messages, scratchpads, scratchpadTimestamps, editDecision, ffmpegRenderState, resolveRenderState, ffmpegQualityPref, cropStatuses, footageFiles, indexedFiles, videoMeta, reindexingFiles, needsIndexing, indexingState, connected, busy, send, requestResolveRender, requestFfmpegRender, setFfmpegQualityPref, clearAndReconnect, updateEditDecision, previewEditDecision, requestCropClip, triggerIndex, undo, redo, canUndo, canRedo };
 }
