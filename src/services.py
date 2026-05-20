@@ -13,8 +13,13 @@ lvmm-core's local pipeline. Where this module used to expose
   * ``searcher``       — luci_memory.Searcher over the local vector DB
   * ``mavi_agent``     — MaviAgent for RAG-style chat over the local index
 
-GeminiGenaiManager / OpenRouterManager are untouched — VEA's own
-non-RAG LLM calls (planning, narration, decision-making) keep using them.
+VEA's LLM call sites also moved to lvmm-core: previously this module
+constructed VEA-local GeminiGenaiManager / OpenRouterManager singletons;
+now ``gemini_manager`` is a lvmm-core ILLM adapter (GeminiAdapter or
+OpenRouterAdapter). Per-site refactor: ``manager.LLM_request(...)``
+became ``await llm.generate(...)`` / ``await llm.generate_structured(...)``.
+The only Gemini-SDK-specific call site (agent_session.py's tool-use loop)
+reaches the raw client via the adapter's ``.client`` escape hatch.
 """
 
 import asyncio
@@ -23,7 +28,6 @@ import os
 from typing import Dict, Optional
 
 from lib.oss.storage_factory import get_storage_client
-from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from src.config import get_storage_mode, ensure_local_directories
 from src.pipelines.v2.agent.agent_session import AgentSession
 
@@ -131,26 +135,54 @@ async def close_lvmm() -> None:
 # uses internally). VEA's planning_prompts / narration / etc. drive Gemini
 # directly through this manager; that path is untouched by the port.
 
+# gemini_manager: lvmm-core ILLM-implementing adapter.
+#
+# PORT NOTE (2026-05-19): Replaces the in-VEA GeminiGenaiManager + OpenRouterManager
+# pair with lvmm-core's GeminiAdapter / OpenRouterAdapter. ``LLM_request``
+# was VEA-flavored and is gone; consumer code calls ILLM.generate /
+# generate_structured directly. agent_session.py reaches the raw Gemini SDK
+# via the adapter's ``.client`` escape hatch.
+#
+# Selection logic:
+#   * OPENROUTER_API_KEY set (and LLM_PROVIDER != "vertex") → OpenRouterAdapter
+#   * Otherwise → lvmm-core GeminiAdapter (API-key mode).
+#
+# CAVEAT: lvmm-core's GeminiAdapter uses API-key auth (AIstudio / public
+# Gemini API), not Vertex AI's project/location auth. Teams running on
+# Vertex AI need to set OPENROUTER_API_KEY or extend GeminiAdapter — the
+# old GeminiGenaiManager(vertexai=True, project=...) path is not preserved
+# in this port.
+
 gemini_manager = None  # type: ignore[assignment]
 _llm_provider = os.environ.get("LLM_PROVIDER", "").lower()
 _openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
+_gemini_key = os.environ.get("GEMINI_API_KEY", "")
 
 if _openrouter_key and _llm_provider != "vertex":
     try:
-        from lib.llm.OpenRouterManager import OpenRouterManager
+        from lvmm_core.adapters.llm.openai_compat import OpenRouterAdapter
         _or_model = os.environ.get("OPENROUTER_MODEL", "google/gemini-2.5-flash")
-        gemini_manager = OpenRouterManager(model=_or_model, api_key=_openrouter_key)  # type: ignore[assignment]
+        gemini_manager = OpenRouterAdapter(api_key=_openrouter_key, model=_or_model)
         logger.info(f"OpenRouter client initialized (model={_or_model})")
     except Exception as e:
         logger.warning(f"Failed to initialize OpenRouter client: {e}")
 
-if gemini_manager is None:
+if gemini_manager is None and _gemini_key:
     try:
-        gemini_manager = GeminiGenaiManager()
-        logger.info("Gemini Vertex AI client initialized")
+        from lvmm_core.adapters.llm.gemini import GeminiAdapter
+        _gemini_model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        gemini_manager = GeminiAdapter(api_key=_gemini_key, model=_gemini_model)
+        logger.info(f"Gemini client initialized (model={_gemini_model})")
     except Exception as e:
         gemini_manager = None
         logger.warning(f"Failed to initialize Gemini client: {e}")
+
+if gemini_manager is None:
+    logger.warning(
+        "No LLM client initialized — set OPENROUTER_API_KEY (preferred) or "
+        "GEMINI_API_KEY. Vertex AI auth requires extending lvmm-core's "
+        "GeminiAdapter; not supported in this port."
+    )
 
 # --- Active planning sessions (project_name -> asyncio state) ---
 # Each entry: {event_queue, pause_event, inject_queue, task}

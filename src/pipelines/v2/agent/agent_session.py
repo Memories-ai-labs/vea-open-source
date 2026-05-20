@@ -249,11 +249,20 @@ class AgentSession:
                 safety_settings=self._safety,
             )
 
-            # Call Gemini
+            # Call Gemini.
+            #
+            # PORT NOTE: was self.gemini.genai_client.models.generate_content(...).
+            # ``.genai_client`` was VEA's manager-specific name; lvmm-core's
+            # GeminiAdapter exposes the underlying ``google.genai.Client`` as
+            # ``.client`` (documented escape hatch). Same SDK call — function
+            # calling with FunctionDeclarations doesn't fit the generic ILLM
+            # contract, so we use the raw client here. The agent loop remains
+            # Gemini-specific; switching VEA to OpenRouter would require
+            # OpenAI tools-API support which isn't ported yet.
             try:
                 response = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda: self.gemini.genai_client.models.generate_content(
+                    lambda: self.gemini.client.models.generate_content(
                         model=self.gemini.model,
                         contents=self._history,
                         config=config,

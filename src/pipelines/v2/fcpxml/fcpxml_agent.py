@@ -18,7 +18,8 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional
 
-from lib.llm.GeminiGenaiManager import GeminiGenaiManager
+from lvmm_core.interfaces.llm import ILLM
+from lvmm_core.utils.llm import messages_from_prompts
 from src.pipelines.v2.fcpxml.fcpxml_compiler import ValidationResult, autofix, compile_fcpxml
 from src.pipelines.v2.fcpxml.fcpxml_scaffold import build_scaffold
 from src.pipelines.v2.planning.planning_prompts import (
@@ -48,7 +49,7 @@ class FcpxmlAgent:
 
     def __init__(
         self,
-        gemini: GeminiGenaiManager,
+        gemini: ILLM,
         workspace: WorkspaceManager,
         storyboard: Storyboard,
         clips_by_id: Dict[str, RetrievedClip],
@@ -182,13 +183,9 @@ class FcpxmlAgent:
         prompt_contents = [GENERATE_FCPXML_SYSTEM, user_content]
 
         try:
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: self.gemini.LLM_request(prompt_contents, schema=None),
-            )
-            text = result if isinstance(result, str) else str(result)
-            return text
+            # PORT NOTE: was sync VEA LLM_request wrapped in run_in_executor.
+            response = await self.gemini.generate(messages_from_prompts(prompt_contents))
+            return response.text
         except Exception as e:
             logger.error(f"[FCPXML AGENT] Enhancement LLM call failed: {e}")
             return scaffold_xml  # Return scaffold unchanged if LLM fails
@@ -202,13 +199,9 @@ class FcpxmlAgent:
         prompt_contents = [GENERATE_FCPXML_SYSTEM, user_content]
 
         try:
-            loop = asyncio.get_event_loop()
-            corrected = await loop.run_in_executor(
-                None,
-                lambda: self.gemini.LLM_request(prompt_contents, schema=None),
-            )
-            text = corrected if isinstance(corrected, str) else str(corrected)
-            return text
+            # PORT NOTE: was sync VEA LLM_request wrapped in run_in_executor.
+            response = await self.gemini.generate(messages_from_prompts(prompt_contents))
+            return response.text
         except Exception as e:
             logger.error(f"[FCPXML AGENT] Correction LLM call failed: {e}")
             return xml_text  # Return unchanged if LLM fails
@@ -219,7 +212,7 @@ class FcpxmlAgent:
 # ---------------------------------------------------------------------------
 
 async def generate_fcpxml(
-    gemini: GeminiGenaiManager,
+    gemini: ILLM,
     workspace: WorkspaceManager,
     *,
     frame_rate: float = 24.0,

@@ -24,7 +24,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from lib.llm.GeminiGenaiManager import GeminiGenaiManager
+from lvmm_core.interfaces.llm import ILLM
+from lvmm_core.utils.llm import messages_from_prompts
 from src.pipelines.v2.planning.clip_postprocess import (
     postprocess_clips,
     deduplicate_against_existing,
@@ -99,7 +100,7 @@ class IterativePlanningLoop:
         workspace: WorkspaceManager,
         searcher,                       # lvmm_core.core.retrieval.luci_memory.Searcher
         mavi_agent,                     # lvmm_core.agents.mavi_agent.MaviAgent
-        gemini: GeminiGenaiManager,
+        gemini: ILLM,
         video_nos: List[str],
         video_entries: List[VideoEntry],
         max_iterations: int = 5,
@@ -278,14 +279,14 @@ class IterativePlanningLoop:
         prompt_contents = [DECIDE_TOOL_CALLS_SYSTEM, user_content]
 
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.gemini.LLM_request(prompt_contents, schema=ToolCallPlan),
+            # PORT NOTE: was self.gemini.LLM_request wrapped in run_in_executor
+            # (sync VEA manager). Now using lvmm-core ILLM.generate_structured
+            # directly — natively async, returns (parsed, usage) tuple.
+            result, _usage = await self.gemini.generate_structured(
+                messages_from_prompts(prompt_contents),
+                ToolCallPlan,
             )
-            if isinstance(result, ToolCallPlan):
-                return result
-            # Fallback: parse raw JSON text
-            return ToolCallPlan.model_validate_json(result)
+            return result
         except Exception as e:
             logger.error(f"[PLAN] Call A failed at iteration {iteration}: {e}")
             return ToolCallPlan(
@@ -476,13 +477,11 @@ class IterativePlanningLoop:
         prompt_contents = [UPDATE_STORYBOARD_SYSTEM, user_content]
 
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.gemini.LLM_request(prompt_contents, schema=Storyboard),
+            result, _usage = await self.gemini.generate_structured(
+                messages_from_prompts(prompt_contents),
+                Storyboard,
             )
-            if isinstance(result, Storyboard):
-                return result
-            return Storyboard.model_validate_json(result)
+            return result
         except Exception as e:
             logger.error(f"[PLAN] Call B failed at iteration {iteration}: {e}")
             # Return existing storyboard unchanged

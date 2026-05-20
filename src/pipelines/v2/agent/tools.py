@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from lvmm_core.utils.llm import messages_from_prompts
 from src.pipelines.v2.agent.scratchpad import ScratchpadManager
 from src.pipelines.v2.agent.tool_definitions import TOOL_DECLARATIONS  # noqa: F401 — re-exported
 from src.pipelines.v2.agent.tool_helpers import (
@@ -557,15 +558,14 @@ Structure your critique as:
 
 Be concise but specific. Reference timestamps (MM:SS) when possible."""
 
-            loop = asyncio.get_event_loop()
-            critique = await loop.run_in_executor(
-                None,
-                lambda: self.gemini.LLM_request(
-                    prompt_contents=[Path(str(downsampled)), verification_prompt],
-                    schema=None,
-                    context="verify_preview",
-                ),
+            # PORT NOTE: was sync VEA LLM_request wrapped in run_in_executor.
+            # ``context=...`` (metrics tag) is dropped — lvmm-core ILLM doesn't
+            # carry that. If we need it back, plumb it through extra= on the
+            # generation call once ILLM supports passthrough.
+            critique_resp = await self.gemini.generate(
+                messages_from_prompts([Path(str(downsampled)), verification_prompt]),
             )
+            critique = critique_resp.text
 
             logger.info(f"[AGENT] verify_preview complete: {len(str(critique))} chars")
 
@@ -1155,14 +1155,10 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
             })
 
             # Step 5a: Gemini reasoning pass — free-text analysis with video
-            reasoning_text = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.gemini.LLM_request(
-                    prompt_contents=[downsampled_path, refinement_prompt],
-                    schema=None,  # free-text reasoning
-                    context="refine_clip_timestamps_reasoning",
-                ),
+            reasoning_resp = await self.gemini.generate(
+                messages_from_prompts([downsampled_path, refinement_prompt]),
             )
+            reasoning_text = reasoning_resp.text
 
             _refine_debug_log(self.workspace, {
                 "event": "gemini_reasoning",
@@ -1184,13 +1180,13 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
                 "- `speech_truncated_end`: true if speech is cut off at the end of the video\n"
             )
 
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.gemini.LLM_request(
-                    prompt_contents=[structured_prompt],
-                    schema=RefinedTimestamps,
-                    context="refine_clip_timestamps_structured",
-                ),
+            # PORT NOTE: lvmm-core generate_structured always returns the
+            # parsed Pydantic model, so the dict/unknown-type branches below
+            # are unreachable in practice — kept as a defensive fallback in
+            # case future ILLM impls return a less strict shape.
+            result, _usage = await self.gemini.generate_structured(
+                messages_from_prompts([structured_prompt]),
+                RefinedTimestamps,
             )
 
             if isinstance(result, RefinedTimestamps):

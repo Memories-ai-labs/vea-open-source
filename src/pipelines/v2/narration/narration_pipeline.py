@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
-from lib.llm.GeminiGenaiManager import GeminiGenaiManager
+from lvmm_core.interfaces.llm import ILLM
 from src.pipelines.v2.planning.planning_prompts import NARRATION_SCRIPT_SYSTEM, NARRATION_SCRIPT_USER
 from src.pipelines.v2.schemas import Shot, Storyboard
 from src.pipelines.v2.workspace import WorkspaceManager
@@ -36,7 +36,7 @@ class NarrationPipeline:
         audio_path = await pipeline.run(user_prompt="...", override_script=None)
     """
 
-    def __init__(self, gemini: GeminiGenaiManager, workspace: WorkspaceManager):
+    def __init__(self, gemini: ILLM, workspace: WorkspaceManager):
         self.gemini = gemini
         self.workspace = workspace
 
@@ -95,12 +95,11 @@ class NarrationPipeline:
         )
         prompt_contents = [NARRATION_SCRIPT_SYSTEM, user_content]
 
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: self.gemini.LLM_request(prompt_contents, schema=None),
-        )
-        return result if isinstance(result, str) else str(result)
+        # PORT NOTE: was sync VEA LLM_request wrapped in run_in_executor.
+        # Now using lvmm-core ILLM.generate (natively async).
+        from lvmm_core.utils.llm import messages_from_prompts
+        response = await self.gemini.generate(messages_from_prompts(prompt_contents))
+        return response.text
 
     async def _generate_audio(self, script: str, output_path: str) -> None:
         """Call ElevenLabs TTS to convert script to audio."""

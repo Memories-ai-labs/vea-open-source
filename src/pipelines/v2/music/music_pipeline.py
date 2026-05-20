@@ -14,7 +14,8 @@ import logging
 import os
 from typing import Optional
 
-from lib.llm.GeminiGenaiManager import GeminiGenaiManager
+from lvmm_core.interfaces.llm import ILLM
+from lvmm_core.utils.llm import messages_from_prompts
 from src.pipelines.v2.planning.planning_prompts import MUSIC_MOOD_SYSTEM, MUSIC_MOOD_USER
 from src.pipelines.v2.workspace import WorkspaceManager
 
@@ -32,7 +33,7 @@ class MusicPipeline:
         music_path = await pipeline.run(user_prompt="...", mood="upbeat")
     """
 
-    def __init__(self, gemini: GeminiGenaiManager, workspace: WorkspaceManager):
+    def __init__(self, gemini: ILLM, workspace: WorkspaceManager):
         self.gemini = gemini
         self.workspace = workspace
 
@@ -101,12 +102,9 @@ class MusicPipeline:
         )
         prompt_contents = [MUSIC_MOOD_SYSTEM, user_content]
 
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: self.gemini.LLM_request(prompt_contents, schema=None),
-        )
-        return (result if isinstance(result, str) else str(result)).strip()[:200]
+        # PORT NOTE: was sync VEA LLM_request wrapped in run_in_executor.
+        response = await self.gemini.generate(messages_from_prompts(prompt_contents))
+        return response.text.strip()[:200]
 
     async def _select_track(
         self, tracks: list, storyboard, user_prompt: str, mood: str

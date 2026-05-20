@@ -22,12 +22,16 @@ def client():
     async def _noop_init_lvmm():
         return None
 
+    # PORT NOTE: previously patched lib.llm.GeminiGenaiManager — that file
+    # has been deleted and VEA now uses lvmm_core.adapters.llm.gemini.GeminiAdapter
+    # (or OpenRouterAdapter). We patch the GeminiAdapter constructor in
+    # services so the FastAPI app starts without a real Gemini key.
     with (
         patch("lib.oss.storage_factory.get_storage_client") as mock_storage,
         patch("src.services.init_lvmm", _noop_init_lvmm),
-        patch("lib.llm.GeminiGenaiManager.GeminiGenaiManager") as mock_gemini,
+        patch("lvmm_core.adapters.llm.gemini.GeminiAdapter") as mock_gemini,
         patch.dict("os.environ", {
-            "GOOGLE_CLOUD_PROJECT": "test-project",
+            "GEMINI_API_KEY": "test-key",
         }),
     ):
         mock_storage.return_value = MagicMock()
