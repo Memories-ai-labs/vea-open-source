@@ -83,7 +83,16 @@ dependencies = [
     "pyloudnorm>=0.1.1",
     "torch>=2.0.0",
     "pydavinci>=0.3.0",
+    # PORT NOTE (2026-05-19): lvmm-core supplies the L2 index/retrieve/chat
+    # primitives (MaviAgent + Searcher + master_indexing pipeline) that used
+    # to be served by memories.ai's hosted API via MemoriesAiManager.
+    # Pinned as a path dep — assumes lvmm-core is checked out as a sibling
+    # directory. Override via [tool.uv.sources] for production installs.
+    "lvmm-core",
 ]
+
+[tool.uv.sources]
+lvmm-core = { path = "../lvmm-core", editable = true }
 
 [build-system]
 requires = ["setuptools", "wheel"]
