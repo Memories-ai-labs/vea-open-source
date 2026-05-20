@@ -106,8 +106,9 @@ def register_websocket_routes(app: FastAPI):
         logger.info(f"[AGENT WS] Client connected for project={project_name}")
 
         # Validate dependencies
-        if not services.memories_manager:
-            await websocket.send_json({"type": "error", "data": {"message": "Memories.ai not configured."}})
+        await services.init_lvmm()
+        if not services.mavi_agent or not services.searcher:
+            await websocket.send_json({"type": "error", "data": {"message": "lvmm-core not initialised (missing GEMINI_API_KEY?)."}})
             await websocket.close()
             return
         if not services.gemini_manager:
@@ -154,7 +155,9 @@ def register_websocket_routes(app: FastAPI):
                 agent = AgentSession(
                     project_name=project_name,
                     workspace=workspace,
-                    memories_manager=services.memories_manager,
+                    searcher=services.searcher,
+                    mavi_agent=services.mavi_agent,
+                    lvmm_ctx=services.lvmm_ctx,
                     gemini_manager=services.gemini_manager,
                     video_entries=session_data.videos,
                     emit=emit,
@@ -441,11 +444,12 @@ def register_websocket_routes(app: FastAPI):
             footage_files = workspace.scan_footage() if workspace.get_footage_dir().is_dir() else []
             total = len(only_files) if only_files else len(footage_files)
 
-            if not services.memories_manager:
+            await services.init_lvmm()
+            if not services.mavi_agent:
                 await _broadcast_index_progress(project_name, {
                     "status": "error",
                     "percent": 0,
-                    "message": "Memories.ai not configured. Set MEMORIES_API_KEY in config.json.",
+                    "message": "lvmm-core not initialised (missing GEMINI_API_KEY?).",
                 })
                 return
 
@@ -468,7 +472,8 @@ def register_websocket_routes(app: FastAPI):
             pipeline = LightweightComprehension(
                 project_name=project_name,
                 source_dir=str(workspace.get_footage_dir()),
-                memories=services.memories_manager,
+                lvmm_ctx=services.lvmm_ctx,
+                mavi_agent=services.mavi_agent,
                 workspace=workspace,
             )
 

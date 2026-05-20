@@ -120,9 +120,15 @@ async def v2_clear_session(project_name: str):
 
 @router.post(f"{_config.V2_API_PREFIX}/projects/{{project_name}}/clear/memories")
 async def v2_clear_memories(project_name: str):
-    """Delete uploaded videos from Memories.ai cloud. Irreversible."""
-    if not services.memories_manager:
-        raise HTTPException(status_code=500, detail="Memories.ai not configured.")
+    """Drop indexed video data from the local lvmm-core DB. Irreversible.
+
+    PORT NOTE (2026-05-19): previously deleted from memories.ai cloud via
+    ``memories_manager.delete_video``. Now wipes the matching rows from
+    the local SQLite tables that master_indexing populates.
+    """
+    await services.init_lvmm()
+    if not services.lvmm_ctx:
+        raise HTTPException(status_code=500, detail="lvmm-core not initialised.")
     workspace = WorkspaceManager(project_name, _config.WORKSPACES_DIR)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
@@ -130,10 +136,20 @@ async def v2_clear_memories(project_name: str):
     session = workspace.load_session()
     deleted = []
     errors = []
+    tables = [
+        "videos", "keyframes", "video_transcripts", "audio_transcripts",
+        "persons", "face_detections", "segments",
+        "keyframe_meta", "transcript_meta", "video_transcript_meta",
+    ]
     for v in session.videos:
         if v.video_no:
             try:
-                await services.memories_manager.delete_video(v.video_no)
+                for t in tables:
+                    try:
+                        await services.lvmm_ctx.database.delete(t, {"video_id": v.video_no})
+                    except Exception:
+                        # Table may not exist or schema may differ — best-effort wipe.
+                        pass
                 deleted.append(v.video_name)
                 v.video_no = ""
             except Exception as e:
