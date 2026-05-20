@@ -3,14 +3,26 @@
 Shared state and service initialization.
 
 All route modules import shared state from here to avoid circular imports.
+
+PORT NOTE (2026-05-19): Migrated from memories.ai-hosted indexing+chat to
+lvmm-core's local pipeline. Where this module used to expose
+``memories_manager`` (an HTTP client for memories.ai), it now exposes:
+
+  * ``lvmm_ctx``       — lvmm-core PipelineContext (adapters + DB + storage)
+  * ``lvmm_lifecycle`` — handle for clean shutdown of lvmm-core's DB
+  * ``searcher``       — luci_memory.Searcher over the local vector DB
+  * ``mavi_agent``     — MaviAgent for RAG-style chat over the local index
+
+GeminiGenaiManager / OpenRouterManager are untouched — VEA's own
+non-RAG LLM calls (planning, narration, decision-making) keep using them.
 """
 
+import asyncio
 import logging
 import os
 from typing import Dict, Optional
 
 from lib.oss.storage_factory import get_storage_client
-from lib.llm.MemoriesAiManager import MemoriesAiManager, create_memories_manager
 from lib.llm.GeminiGenaiManager import GeminiGenaiManager
 from src.config import get_storage_mode, ensure_local_directories
 from src.pipelines.v2.agent.agent_session import AgentSession
@@ -25,19 +37,100 @@ ensure_local_directories()
 # Alias for backward compatibility with existing code
 gcp_oss = storage_client
 
-# --- Initialize Memories.ai client (optional - only if API key is configured) ---
-memories_manager: Optional[MemoriesAiManager] = None
+# ---------------------------------------------------------------------------
+# lvmm-core wiring — local indexing, retrieval, and RAG chat
+# ---------------------------------------------------------------------------
+#
+# Replaces the previous memories.ai HTTP client. Three module-level
+# singletons:
+#   - lvmm_ctx        : lvmm-core PipelineContext (carries LLM, embedding,
+#                       storage, database, vector_db adapter instances).
+#   - searcher        : core/retrieval/luci_memory/Searcher — vector search
+#                       facade. Independent of any LLM. Used by Phase 2
+#                       planning and AgentSession's search_footage tool.
+#   - mavi_agent      : agents/MaviAgent — fixed-pipeline RAG agent.
+#                       query-rewrite → search → rerank → answer.
+#                       Used by Phase 1 gist + Phase 2 chat + AgentSession's
+#                       ask_memories tool.
+#
+# We initialise these lazily through an asyncio event loop because
+# build_local_context is async. Import-time eager construction would
+# require nest_asyncio or a sync wrapper; lazy init keeps the import
+# graph clean and the cost only paid when the app actually uses these
+# capabilities.
 
-try:
-    if os.environ.get("MEMORIES_API_KEY"):
-        memories_manager = create_memories_manager(debug=True)
-        logger.info("Memories.ai client initialized")
-    else:
-        logger.info("Memories.ai API key not configured - video understanding will use Gemini")
-except Exception as e:
-    logger.warning(f"Failed to initialize Memories.ai client: {e}")
+lvmm_ctx = None  # type: ignore[assignment]
+lvmm_lifecycle = None  # type: ignore[assignment]
+searcher = None  # type: ignore[assignment]
+mavi_agent = None  # type: ignore[assignment]
 
-# --- Initialize LLM client (OpenRouter or Vertex AI Gemini) ---
+
+async def init_lvmm() -> None:
+    """Construct lvmm-core context + Searcher + MaviAgent (idempotent).
+
+    Reads OPENROUTER_API_KEY / GEMINI_API_KEY etc. from the env (already
+    populated by config.py at startup). MobileCLIP defaults to the local
+    PyTorch adapter — fastest path with no VPN, no Ray dependency.
+    """
+    global lvmm_ctx, lvmm_lifecycle, searcher, mavi_agent
+    if lvmm_ctx is not None:
+        return
+
+    try:
+        from lvmm_core.services.local_dev import build_local_context
+        from lvmm_core.core.retrieval.luci_memory.searcher import Searcher
+        from lvmm_core.agents.mavi_agent import MaviAgent
+    except ImportError as e:
+        logger.error(
+            "lvmm-core not installed. From the vea-open-source repo root run: "
+            "pip install -e ../lvmm-core  (or whatever the relative path is). "
+            "See requirements.txt."
+        )
+        raise
+
+    # Provider/embedding choices match the team's standard local dev:
+    # Gemini for the LLM (via lvmm-core's GeminiAdapter, distinct from VEA's
+    # own gemini_manager); MobileCLIP-PyTorch for embeddings (in-process,
+    # no Ray endpoint required).
+    lvmm_ctx, lvmm_lifecycle = await build_local_context(
+        provider="gemini",
+        embedding="mobileclip",
+        face="none",
+        asr="none",
+        diarization="none",
+    )
+    searcher = Searcher(
+        vector_db=lvmm_ctx.vector_db,
+        text_embedding=lvmm_ctx.text_embedding,
+    )
+    mavi_agent = MaviAgent(llm=lvmm_ctx.llm, searcher=searcher)
+    logger.info("lvmm-core initialised (Gemini LLM + MobileCLIP embeddings + SQLite)")
+
+
+async def close_lvmm() -> None:
+    """Tear down the lvmm-core lifecycle (closes DB connection).
+
+    Safe to call from FastAPI's shutdown hook or any async exit path.
+    """
+    global lvmm_ctx, lvmm_lifecycle, searcher, mavi_agent
+    if lvmm_lifecycle is not None:
+        try:
+            await lvmm_lifecycle.close()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"lvmm-core shutdown raised: {e}")
+        lvmm_ctx = None
+        lvmm_lifecycle = None
+        searcher = None
+        mavi_agent = None
+
+
+# ---------------------------------------------------------------------------
+# LLM client for VEA's own non-RAG calls (planning, narration, decision)
+# ---------------------------------------------------------------------------
+# Note: this is SEPARATE from lvmm-core's GeminiAdapter (which mavi_agent
+# uses internally). VEA's planning_prompts / narration / etc. drive Gemini
+# directly through this manager; that path is untouched by the port.
+
 gemini_manager = None  # type: ignore[assignment]
 _llm_provider = os.environ.get("LLM_PROVIDER", "").lower()
 _openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
