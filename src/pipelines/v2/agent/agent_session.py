@@ -46,14 +46,22 @@ class AgentSession:
         self,
         project_name: str,
         workspace,
-        memories_manager,
+        searcher,                       # lvmm_core luci_memory.Searcher
+        mavi_agent,                     # lvmm_core MaviAgent
+        lvmm_ctx,                       # lvmm_core PipelineContext (DB access)
         gemini_manager,
         video_entries: list,
         emit: Callable[..., Coroutine],
     ):
+        # PORT NOTE (2026-05-19): single ``memories_manager`` arg replaced
+        # with three lvmm-core handles. The trio is forwarded to ToolExecutor
+        # for the agent's L2-touching tools (ask_memories, search_footage,
+        # transcript cache).
         self.project_name = project_name
         self.workspace = workspace
-        self.memories = memories_manager
+        self.searcher = searcher
+        self.mavi_agent = mavi_agent
+        self.lvmm_ctx = lvmm_ctx
         self.gemini = gemini_manager
         self.video_entries = video_entries
         self._emit = emit
@@ -146,7 +154,9 @@ class AgentSession:
                 self._event_log.append({"type": event_type, "data": data})
 
         self.tools = ToolExecutor(
-            memories_manager=memories_manager,
+            searcher=searcher,
+            mavi_agent=mavi_agent,
+            lvmm_ctx=lvmm_ctx,
             gemini_manager=gemini_manager,
             workspace=workspace,
             scratchpads=self.scratchpads,
