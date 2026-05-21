@@ -342,11 +342,13 @@ class IterativePlanningLoop:
     async def _run_chat(self, question: str, purpose: str, iteration: int) -> tuple[str, Any]:
         """Ask MaviAgent and return ("chat", context_text).
 
-        PORT NOTE: MaviAgent takes a single ``video_id`` (or None) rather than
-        memories.ai's video_nos list. If the project has exactly one video, we
-        scope to it; otherwise we pass None and let MaviAgent search across
-        all indexed videos (the RAG layer will pull hits from whichever video
-        is most relevant).
+        PORT NOTE: scope MaviAgent's retrieval to the current workspace's
+        videos via the explicit ``video_ids`` kwarg. An earlier draft of
+        this method only passed a single ``video_id`` (and fell back to
+        ``None`` for >1 video), which left MaviAgent searching the entire
+        shared ``~/lvmm-data/local.db`` — content from previous workspaces /
+        indexing runs would leak into the chat answers and contaminate the
+        storyboard. ``video_ids=self.video_nos`` makes the scope explicit.
         """
         await self._emit("tool_call", {
             "iteration": iteration,
@@ -355,8 +357,10 @@ class IterativePlanningLoop:
             "purpose": purpose,
         })
         try:
-            video_id = self.video_nos[0] if len(self.video_nos) == 1 else None
-            trace = await self.mavi_agent.ask(question, video_id=video_id)
+            trace = await self.mavi_agent.ask(
+                question,
+                video_ids=self.video_nos or None,
+            )
             text = trace.answer or ""
 
             context_block = (

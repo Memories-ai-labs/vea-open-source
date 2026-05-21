@@ -103,18 +103,17 @@ class ToolExecutor:
     async def _ask_memories(self, args: Dict) -> Dict:
         """RAG Q&A via lvmm-core MaviAgent.
 
-        PORT NOTE: MaviAgent takes a single ``video_id``; if the project has
-        multiple videos we pass None and let MaviAgent search across all
-        indexed videos. The returned ``MaviTrace`` has ``answer`` and counts
-        but no per-reference detail — references are surfaced indirectly
-        through ``search_hits``. Use ``search_footage`` for explicit clip
-        retrieval with timestamps.
+        PORT NOTE: scope retrieval to the current workspace's video ids.
+        Passing ``None`` for multi-video projects searches the shared local
+        database and can leak content from previous indexing runs.
         """
         question = args.get("question", "")
         logger.info(f"[AGENT] ask_memories: {question[:100]}")
 
-        video_id = self.video_nos[0] if len(self.video_nos) == 1 else None
-        trace = await self.mavi_agent.ask(question, video_id=video_id)
+        trace = await self.mavi_agent.ask(
+            question,
+            video_ids=self.video_nos or None,
+        )
 
         return {
             "answer": trace.answer or "",
@@ -170,12 +169,16 @@ class ToolExecutor:
             start = float(item.get("startTime", 0))
             end_raw = item.get("endTime")
             end = float(end_raw) if end_raw else start + target_duration
+            matching_transcripts = [
+                seg for seg in transcript_segments
+                if not video_no or seg.get("video_no") == video_no
+            ]
 
             # If clip is shorter than target, extend to nearest sentence boundary
             if end - start < target_duration:
                 desired_end = start + target_duration
                 end = self._snap_to_sentence_boundary(
-                    desired_end, transcript_segments, direction="forward"
+                    desired_end, matching_transcripts, direction="forward"
                 )
 
             score = float(item.get("score", 0))
@@ -186,7 +189,7 @@ class ToolExecutor:
             # window at all, even if it starts well before or ends well after.
             # This catches sentences that straddle the clip boundary.
             clip_transcript = []
-            for seg in transcript_segments:
+            for seg in matching_transcripts:
                 seg_text = seg.get("text", "").strip()
                 # Skip empty or metadata-only segments
                 if not seg_text or len(seg_text) < 3:
@@ -216,30 +219,32 @@ class ToolExecutor:
         return {"clips": clips, "count": len(clips), "query": query}
 
     async def _get_transcript_segments(self) -> List[Dict]:
-        """Fetch and cache audio transcripts for the first video.
+        """Fetch and cache local transcript-like segments for project videos.
 
         PORT NOTE: Replaces ``memories.get_audio_transcription`` HTTP call
-        with a direct read from the local ``audio_transcripts`` table that
-        master_indexing populates.
+        with a direct read from local LVMM tables. VEA currently indexes with
+        the visual-only pipeline, so ``video_transcripts.text`` is the common
+        fallback when ``audio_transcripts`` is empty.
         """
         if not hasattr(self, '_cached_transcript'):
             self._cached_transcript = []
             try:
-                video_no = self.video_nos[0] if self.video_nos else None
-                if video_no:
-                    rows = await self.lvmm_ctx.database.query(
-                        "audio_transcripts", {"video_id": video_no}
-                    )
-                    # lvmm-core's audio_transcripts schema: video_id, start_time,
-                    # end_time, speaker, transcript_text. Map to VEA's expected shape.
-                    self._cached_transcript = [
-                        {
-                            "text": (r.get("transcript_text") or "").strip(),
+                for video_no in self.video_nos:
+                    filters = {"video_id": video_no}
+                    rows = await self.lvmm_ctx.database.query("audio_transcripts", filters)
+                    if not rows:
+                        rows = await self.lvmm_ctx.database.query("video_transcripts", filters)
+
+                    for r in rows:
+                        text = (r.get("text") or r.get("transcript_text") or "").strip()
+                        if not text:
+                            continue
+                        self._cached_transcript.append({
+                            "video_no": video_no,
+                            "text": text,
                             "start": float(r.get("start_time") or 0),
                             "end": float(r.get("end_time") or 0),
-                        }
-                        for r in rows
-                    ]
+                        })
             except Exception as e:
                 logger.warning(f"[AGENT] Could not fetch transcript for caching: {e}")
         return self._cached_transcript
