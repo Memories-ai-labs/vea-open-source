@@ -37,9 +37,29 @@ import json
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+# lvmm-core structured-logging helpers.
+#
+# ``metric`` is a public helper for emitting a numeric value at the custom
+# METRIC log level (auto-aggregatable). Receives the standard pipeline /
+# stage / run_id / sample_id context tags via lvmm-core's ContextVars.
+#
+# ``_bind_pipeline_context`` / ``_release_pipeline_context`` are technically
+# private (underscore-prefixed) helpers re-exported because pipelines/base.py
+# uses them — but we lean on them here to scope an *entire* autonomous run
+# (Phase 2 + Phase 3 LLM calls that don't run inside Pipeline.execute) to
+# the same run_id ContextVar. If lvmm-core later adds a public context
+# manager / decorator for "bind these tags around a block of code", we
+# should migrate to that.
+from lvmm_core.utils.logging import (
+    metric,
+    _bind_pipeline_context,
+    _release_pipeline_context,
+)
 
 from src import services
 from src.pipelines.v2.comprehension.lightweight_comprehension import LightweightComprehension
@@ -121,6 +141,15 @@ class AutonomousResult:
     interactions_jsonl: Optional[Path] = None
     interactions: list[InteractionRecord] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)  # e.g. ["narration: no key"]
+    # Stable per-run identifier — auto-generated UUID hex prefix. Threaded
+    # into every L1 Pipeline.execute() and tagged onto every log line via
+    # lvmm-core's structured-logging ContextVars. Use to correlate logs +
+    # events across the run after the fact.
+    run_id: str = ""
+    # JSONL of L1 pipeline stage events (start / end / cost / errors), one
+    # record per stage. Sits alongside ``interactions_jsonl`` (L3 events) —
+    # together they give top-to-bottom observability of one run.
+    pipeline_events_jsonl: Optional[Path] = None
 
 
 # ---------------------------------------------------------------------------
@@ -189,10 +218,31 @@ async def run_autonomous(
         record_to = workspace.root / "artifacts" / f"run_{int(time.time())}.jsonl"
     recorder = JsonlRecorder(record_to)
 
+    # Stable per-run identifier — threaded into every lvmm-core
+    # ``Pipeline.execute()`` and bound onto lvmm-core's logging ContextVars
+    # so log lines from L1 stages (visual_transcriber, embedder, etc.) carry
+    # the same run_id as our L3 events. Lets you ``grep run_id=…`` and
+    # disentangle one run's logs from concurrent runs in the same DB.
+    run_id = uuid.uuid4().hex[:12]
+
+    # L1-side observability — these are passed to every Pipeline.execute()
+    # we drive in Phase 1. ConsoleHooks routes per-stage start/end through
+    # lvmm_core.hooks logger (picks up our setup_logging formatter).
+    # JSONFileHooks appends a structured record per stage event to a
+    # workspace-local JSONL so post-run analysis (``jq '.event'
+    # pipeline_events.jsonl``) is trivial. Sits alongside our own L3
+    # interactions JSONL — full top-to-bottom observability.
+    from lvmm_core._internal.hooks.hooks import ConsoleHooks, JSONFileHooks
+    pipeline_events_path = workspace.root / "logs" / "pipeline_events.jsonl"
+    pipeline_events_path.parent.mkdir(parents=True, exist_ok=True)
+    pipeline_hooks = [ConsoleHooks(), JSONFileHooks(path=str(pipeline_events_path))]
+
     result = AutonomousResult(
         workspace_root=workspace.root,
         interactions_jsonl=record_to,
         interactions=recorder.records,  # live ref — pop from same list
+        run_id=run_id,
+        pipeline_events_jsonl=pipeline_events_path,
     )
 
     if source_dir is None:
@@ -201,6 +251,7 @@ async def run_autonomous(
 
     logger.info(f"{SMOKE_LOG} ─── Autonomous run starting ───")
     logger.info(f"{SMOKE_LOG} project       = {project_name}")
+    logger.info(f"{SMOKE_LOG} run_id        = {run_id}")
     logger.info(f"{SMOKE_LOG} workspace     = {workspace.root}")
     logger.info(f"{SMOKE_LOG} source_dir    = {source_dir}")
     logger.info(f"{SMOKE_LOG} prompt        = {user_prompt[:200]}")
@@ -208,9 +259,11 @@ async def run_autonomous(
     logger.info(f"{SMOKE_LOG} target_dur    = {target_duration_seconds}s")
     logger.info(f"{SMOKE_LOG} include_phase3= {include_phase3}")
     logger.info(f"{SMOKE_LOG} jsonl_log     = {record_to}")
+    logger.info(f"{SMOKE_LOG} pipeline_events= {pipeline_events_path}")
     recorder.record("run_start", {
         "project_name": project_name,
         "user_prompt": user_prompt,
+        "run_id": run_id,
         "max_iterations": max_iterations,
         "target_duration_seconds": target_duration_seconds,
         "include_phase3": include_phase3,
@@ -229,15 +282,34 @@ async def run_autonomous(
             "vars as above."
         )
 
+    # Bind the run_id (+ a synthetic "autonomous" pipeline name) onto
+    # lvmm-core's ContextVars for the duration of this call. Phase 1 already
+    # rebinds its own ``pipeline``/``stage`` names per-stage inside
+    # ``Pipeline.execute()``; the value here is that Phase 2 + Phase 3 LLM
+    # calls (chat, search, FCPXML, narration, music, render) — none of which
+    # run through Pipeline.execute — still get the ``run_id`` tag in their
+    # log lines, so a single ``grep run_id=<x>`` (or one ``jq`` filter on
+    # the JSON formatter) returns every line from one run end-to-end.
+    _ctx_tokens = _bind_pipeline_context(
+        pipeline_name="autonomous", run_id=run_id,
+    )
+    _run_start = time.monotonic()
     try:
         # --- Phase 1 -----------------------------------------------------
+        _p1_start = time.monotonic()
         session = await _run_phase1(
             workspace=workspace,
             source_dir=source_dir,
             start_fresh=start_fresh,
             recorder=recorder,
+            run_id=run_id,
+            pipeline_hooks=pipeline_hooks,
         )
         result.session = session
+        _p1_elapsed = time.monotonic() - _p1_start
+        metric("vea.phase1.elapsed_seconds", _p1_elapsed)
+        metric("vea.phase1.videos", len(session.videos))
+        metric("vea.phase1.gist_chars", len(session.gist or ""))
 
         if not session.videos:
             raise RuntimeError(f"{SMOKE_LOG} Phase 1 produced no indexed videos.")
@@ -245,9 +317,11 @@ async def run_autonomous(
         if stop_after_phase < 2:
             logger.info(f"{SMOKE_LOG} stop_after_phase=1 → returning after Phase 1")
             recorder.record("run_done", {"stopped_after": "phase1", "videos": len(session.videos)})
+            metric("vea.run.elapsed_seconds", time.monotonic() - _run_start, stopped_after="phase1")
             return result
 
         # --- Phase 2 -----------------------------------------------------
+        _p2_start = time.monotonic()
         storyboard = await _run_phase2(
             workspace=workspace,
             user_prompt=user_prompt,
@@ -257,6 +331,12 @@ async def run_autonomous(
             recorder=recorder,
         )
         result.storyboard = storyboard
+        _p2_elapsed = time.monotonic() - _p2_start
+        _p2_total_dur = sum(s.duration_seconds for s in storyboard.shots)
+        metric("vea.phase2.elapsed_seconds", _p2_elapsed)
+        metric("vea.phase2.iterations", storyboard.iteration)
+        metric("vea.phase2.shots", len(storyboard.shots))
+        metric("vea.phase2.total_duration_seconds", _p2_total_dur)
 
         if stop_after_phase < 3:
             logger.info(f"{SMOKE_LOG} stop_after_phase=2 → returning after Phase 2")
@@ -265,11 +345,14 @@ async def run_autonomous(
                 "videos": len(session.videos),
                 "shots": len(storyboard.shots),
             })
+            metric("vea.run.elapsed_seconds", time.monotonic() - _run_start, stopped_after="phase2")
             return result
 
         # --- Phase 3 (best-effort, opt-in) ------------------------------
         if include_phase3:
+            _p3_start = time.monotonic()
             await _run_phase3(workspace=workspace, result=result, recorder=recorder)
+            metric("vea.phase3.elapsed_seconds", time.monotonic() - _p3_start)
 
         recorder.record("run_done", {
             "videos": len(session.videos),
@@ -278,12 +361,15 @@ async def run_autonomous(
             "draft_mp4": str(result.draft_mp4_path) if result.draft_mp4_path else None,
             "skipped": result.skipped,
         })
+        metric("vea.run.elapsed_seconds", time.monotonic() - _run_start, stopped_after="phase3")
         logger.info(f"{SMOKE_LOG} ─── Autonomous run done ───")
         return result
     finally:
+        # Reset ContextVars regardless of success/failure so subsequent
+        # runs in the same process don't inherit this run_id tag.
+        _release_pipeline_context(_ctx_tokens)
         # Note: do NOT close lvmm here — the FastAPI lifespan owns it.
         # Tests that drive run_autonomous directly should manage lifecycle.
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +383,8 @@ async def _run_phase1(
     source_dir: Path,
     start_fresh: bool,
     recorder: JsonlRecorder,
+    run_id: str = "",
+    pipeline_hooks: Optional[list] = None,
 ) -> SessionData:
     logger.info(f"{SMOKE_LOG} === Phase 1: Comprehension ===")
     recorder.record("phase1_start", {"source_dir": str(source_dir)})
@@ -311,6 +399,8 @@ async def _run_phase1(
         lvmm_ctx=services.lvmm_ctx,
         mavi_agent=services.mavi_agent,
         workspace=workspace,
+        run_id=run_id,
+        pipeline_hooks=pipeline_hooks,
     )
     session = await comprehension.run(
         start_fresh=start_fresh, progress_callback=_progress,
@@ -588,10 +678,26 @@ async def _run_phase3(
         ed_path.write_text(edit.model_dump_json(indent=2), encoding="utf-8")
 
         draft_path = workspace.get_render_path("draft")
+        _render_start = time.monotonic()
         await render_ffmpeg_preview(edit, workspace.get_footage_dir(), Path(draft_path))
+        _render_elapsed = time.monotonic() - _render_start
         result.draft_mp4_path = Path(draft_path)
-        logger.info(f"{SMOKE_LOG} Draft render → {result.draft_mp4_path}")
-        recorder.record("phase3_render_done", {"path": str(result.draft_mp4_path)})
+        try:
+            _draft_size = Path(draft_path).stat().st_size
+        except OSError:
+            _draft_size = 0
+        metric("vea.phase3.render_elapsed_seconds", _render_elapsed)
+        metric("vea.phase3.draft_mp4_bytes", _draft_size)
+        metric("vea.phase3.clip_count", len(edit.clips))
+        logger.info(
+            f"{SMOKE_LOG} Draft render → {result.draft_mp4_path} "
+            f"({_draft_size / 1024:.1f} KiB, {_render_elapsed:.1f}s)"
+        )
+        recorder.record("phase3_render_done", {
+            "path": str(result.draft_mp4_path),
+            "bytes": _draft_size,
+            "elapsed_seconds": _render_elapsed,
+        })
     except Exception as e:  # noqa: BLE001
         logger.warning(f"{SMOKE_LOG} Draft render failed: {e}")
         result.skipped.append(f"render: {e}")

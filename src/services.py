@@ -75,6 +75,13 @@ async def init_lvmm() -> None:
     Reads OPENROUTER_API_KEY / GEMINI_API_KEY etc. from the env (already
     populated by config.py at startup). MobileCLIP defaults to the local
     PyTorch adapter — fastest path with no VPN, no Ray dependency.
+
+    Also configures lvmm-core's structured logging (idempotent — repeated
+    calls replace the handler rather than stacking). After this runs, every
+    log line emitted from the ``lvmm_core.*`` logger tree carries auto-
+    injected ``[pipeline=… stage=… run_id=…]`` context tags whenever it's
+    inside a ``Pipeline.execute()`` call. Lets us debug "which run / which
+    stage emitted this?" without manually threading IDs through every log.
     """
     global lvmm_ctx, lvmm_lifecycle, searcher, mavi_agent
     if lvmm_ctx is not None:
@@ -84,6 +91,7 @@ async def init_lvmm() -> None:
         from lvmm_core.services.local_dev import build_local_context
         from lvmm_core.core.retrieval.luci_memory.searcher import Searcher
         from lvmm_core.agents.mavi_agent import MaviAgent
+        from lvmm_core.utils.logging import setup_logging
     except ImportError as e:
         logger.error(
             "lvmm-core not installed. From the vea-open-source repo root run: "
@@ -106,6 +114,14 @@ async def init_lvmm() -> None:
     # config.json), fall back to direct Gemini if only GEMINI_API_KEY
     # is set. Mirrors what gemini_manager does below for VEA's own
     # non-RAG LLM calls.
+    # Configure lvmm-core structured logging first so any startup chatter
+    # from the build_local_context() call below already carries the right
+    # formatter + context filter. Default level matches what VEA's existing
+    # ``logging.basicConfig`` uses; flip to DEBUG by setting LVMM_LOG_LEVEL
+    # to "DEBUG" (handy for chasing one specific adapter's behaviour).
+    _log_level = getattr(logging, os.environ.get("LVMM_LOG_LEVEL", "INFO").upper(), logging.INFO)
+    setup_logging(level=_log_level)
+
     _lvmm_provider = "openrouter" if _openrouter_key else "gemini"
     lvmm_ctx, lvmm_lifecycle = await build_local_context(
         provider=_lvmm_provider,

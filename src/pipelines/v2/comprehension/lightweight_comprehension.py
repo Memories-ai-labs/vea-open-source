@@ -28,6 +28,7 @@ from typing import Awaitable, Callable, List, Optional
 
 ProgressCallback = Callable[[float, str], Awaitable[None]]
 
+from lvmm_core.utils.logging import metric
 from src.pipelines.v2.schemas import SessionData, VideoEntry
 from src.pipelines.v2.workspace import WorkspaceManager
 from src.pipelines.v2.planning.planning_prompts import GIST_PROMPT
@@ -66,12 +67,35 @@ class LightweightComprehension:
         lvmm_ctx,                       # lvmm_core.pipelines.base.PipelineContext
         mavi_agent,                     # lvmm_core.agents.mavi_agent.MaviAgent
         workspace: WorkspaceManager,
+        *,
+        run_id: Optional[str] = None,
+        pipeline_hooks: Optional[list] = None,
     ):
+        """
+        Parameters
+        ----------
+        run_id:
+            Optional UUID-like identifier propagated to every
+            ``Pipeline.execute()`` call we drive in Phase 1. Threads into
+            lvmm-core's structured-logging ContextVars so every log line
+            emitted by lvmm-core (pipeline stage starts/ends, MaviAgent
+            query rewrites, etc.) carries this run_id. Lets us correlate
+            "which run produced this log line" after the fact.
+        pipeline_hooks:
+            Optional list of ``lvmm_core._internal.hooks.PipelineHooks``
+            passed straight through to ``Pipeline.execute(hooks=...)``.
+            Common pair: ``[ConsoleHooks(), JSONFileHooks(path=...)]`` —
+            the JSONL sink writes one structured record per L1 stage
+            start/end/error, sitting alongside VEA's own L3 interactions
+            JSONL for full top-to-bottom observability.
+        """
         self.project_name = project_name
         self.source_dir = Path(source_dir)
         self.lvmm_ctx = lvmm_ctx
         self.mavi_agent = mavi_agent
         self.workspace = workspace
+        self.run_id = run_id
+        self.pipeline_hooks = pipeline_hooks or []
 
     async def run(
         self,
@@ -290,9 +314,18 @@ class LightweightComprehension:
 
         now = datetime.now(timezone.utc).isoformat()
         pipeline = build_indexing_pipeline("classic")
+        # Thread run_id + hooks into the L1 pipeline. The run_id binds
+        # lvmm-core's logging ContextVars for the duration of execute(),
+        # so every visual_transcriber / embedding / store_visual stage's
+        # log line carries the same run_id tag as our L3 events. The
+        # hooks (typically ConsoleHooks + JSONFileHooks) capture each
+        # stage's start / end / cost / errors as structured JSONL records.
         result = await pipeline.execute(
             {"video_path": str(video_path), "user_id": "vea_local"},
             self.lvmm_ctx,
+            run_id=self.run_id,
+            sample_id=video_path.name,
+            hooks=self.pipeline_hooks,
         )
 
         # master_indexing's derive_video_id stage produces the video_id;
@@ -321,6 +354,11 @@ class LightweightComprehension:
             f"({duration:.1f}s)" if duration else
             f"[COMPREHENSION] Indexed {video_path.name} → video_id={video_id}"
         )
+        # Aggregatable per-video index metric. Tagged with video_id so we can
+        # diff "video X took N seconds and indexed M transcript chunks" across
+        # runs without parsing log strings.
+        if duration:
+            metric("vea.comprehension.video_duration_seconds", duration, video_id=video_id)
 
         return VideoEntry(
             video_no=video_id,  # kept as video_no for back-compat with existing session.json files
@@ -334,6 +372,12 @@ class LightweightComprehension:
         """Ask MaviAgent for a per-video gist. Returns the answer text or ""."""
         try:
             trace = await self.mavi_agent.ask(GIST_PROMPT, video_id=entry.video_no)
+            # Per-gist aggregatables. ``rewrite_reason`` and ``answer`` are
+            # logged at INFO by MaviAgent already; what's useful to aggregate
+            # is the cost (tokens) and the size of the resulting gist.
+            metric("vea.comprehension.gist_chars", len(trace.answer or ""), video_id=entry.video_no)
+            metric("vea.comprehension.gist_input_tokens", trace.total_input_tokens, video_id=entry.video_no)
+            metric("vea.comprehension.gist_output_tokens", trace.total_output_tokens, video_id=entry.video_no)
             return trace.answer
         except Exception as e:
             logger.warning(f"[COMPREHENSION] Gist failed for {entry.video_name}: {e}")

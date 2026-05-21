@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 
 from lvmm_core.interfaces.llm import ILLM
 from lvmm_core.utils.llm import messages_from_prompts
+from lvmm_core.utils.logging import metric
 from src.pipelines.v2.planning.clip_postprocess import (
     postprocess_clips,
     deduplicate_against_existing,
@@ -206,6 +207,12 @@ class IterativePlanningLoop:
                 f"[PLAN] Iter {iteration}: +{len(new_clips)} raw clips → "
                 f"+{len(processed)} new → {len(accumulated_clips)} total"
             )
+            # Per-iteration clip aggregatables. ``new_clips`` is the raw count
+            # pre-dedup; ``processed`` is post-dedup and post-postprocess; the
+            # final total is what the planner sees going into Call B.
+            metric("vea.planning.iter.raw_clips", len(new_clips), iteration=iteration)
+            metric("vea.planning.iter.new_clips", len(processed), iteration=iteration)
+            metric("vea.planning.iter.total_clips", len(accumulated_clips), iteration=iteration)
 
             # ---- CALL B: Update storyboard ----
             storyboard = await self._call_b_update_storyboard(
@@ -246,6 +253,13 @@ class IterativePlanningLoop:
             f"[PLAN] Done. {storyboard.iteration} iterations, "
             f"{len(storyboard.shots)} shots, {len(sorted_clips)} clips."
         )
+        # Terminal aggregatables for the planning loop. The autonomous
+        # orchestrator emits an outer ``vea.phase2.*`` block too; these are
+        # tagged ``planning.final.*`` so they're distinguishable in the JSON
+        # logs even if the loop is driven outside the autonomous orchestrator.
+        metric("vea.planning.final.iterations", storyboard.iteration)
+        metric("vea.planning.final.shots", len(storyboard.shots))
+        metric("vea.planning.final.clips", len(sorted_clips))
         return storyboard
 
     # -------------------------------------------------------------------------
@@ -282,10 +296,17 @@ class IterativePlanningLoop:
             # PORT NOTE: was self.gemini.LLM_request wrapped in run_in_executor
             # (sync VEA manager). Now using lvmm-core ILLM.generate_structured
             # directly — natively async, returns (parsed, usage) tuple.
-            result, _usage = await self.gemini.generate_structured(
+            result, usage = await self.gemini.generate_structured(
                 messages_from_prompts(prompt_contents),
                 ToolCallPlan,
             )
+            # Cost-tracking metric: per-iteration token usage for Call A.
+            # Tagged with iteration so we can aggregate "tokens per iteration"
+            # across runs to spot drift in planning-prompt size.
+            metric("vea.planning.call_a.input_tokens", usage.input_tokens, iteration=iteration)
+            metric("vea.planning.call_a.output_tokens", usage.output_tokens, iteration=iteration)
+            metric("vea.planning.call_a.chats", len(result.chat_calls), iteration=iteration)
+            metric("vea.planning.call_a.searches", len(result.search_calls), iteration=iteration)
             return result
         except Exception as e:
             logger.error(f"[PLAN] Call A failed at iteration {iteration}: {e}")
@@ -481,10 +502,13 @@ class IterativePlanningLoop:
         prompt_contents = [UPDATE_STORYBOARD_SYSTEM, user_content]
 
         try:
-            result, _usage = await self.gemini.generate_structured(
+            result, usage = await self.gemini.generate_structured(
                 messages_from_prompts(prompt_contents),
                 Storyboard,
             )
+            metric("vea.planning.call_b.input_tokens", usage.input_tokens, iteration=iteration)
+            metric("vea.planning.call_b.output_tokens", usage.output_tokens, iteration=iteration)
+            metric("vea.planning.call_b.shots", len(result.shots), iteration=iteration)
             return result
         except Exception as e:
             logger.error(f"[PLAN] Call B failed at iteration {iteration}: {e}")

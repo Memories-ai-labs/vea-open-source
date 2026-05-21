@@ -78,7 +78,12 @@ class FakeGemini:
         result = self.outputs.pop(0)
         if isinstance(result, Exception):
             raise result
-        return result, None
+        # Production ILLM.generate_structured returns (result, Usage). The
+        # planning loop now reads usage.input_tokens / usage.output_tokens for
+        # metric() emission, so we return a real zero-valued namespace rather
+        # than None to keep the unit test honest with the real contract.
+        usage = SimpleNamespace(input_tokens=0, output_tokens=0)
+        return result, usage
 
 
 class FakeMaviAgent:

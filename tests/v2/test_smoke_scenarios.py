@@ -270,21 +270,44 @@ def scenario_workspace(tmp_path, monkeypatch, request):
     artifact_dir = ARTIFACTS_ROOT / scenario.id / run_ts
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    # Tee scenario log to artifact_dir for inspection
+    # Tee scenario log to artifact_dir for inspection.
+    #
+    # Two handlers: one on root (catches VEA's own ``src.*`` loggers and
+    # third-party noise), one on ``lvmm_core`` (lvmm-core sets
+    # ``propagate=False`` on its sub-tree to avoid double-emit, so a root
+    # handler alone misses every lvmm-core record). The lvmm-core handler
+    # uses the structured formatter + filter so ``[pipeline=… run_id=…]``
+    # tags + METRIC records show up in the artifact log.
+    from lvmm_core.utils.logging import _ContextFormatter, PipelineLogFilter
+
     log_path = artifact_dir / "scenario.log"
-    handler = logging.FileHandler(log_path, mode="w")
-    handler.setLevel(logging.INFO)
-    handler.setFormatter(logging.Formatter(
+
+    # Root handler — VEA + stdlib + third-party.
+    root_handler = logging.FileHandler(log_path, mode="w")
+    root_handler.setLevel(logging.INFO)
+    root_handler.setFormatter(logging.Formatter(
         "%(asctime)s %(levelname)-7s %(name)s :: %(message)s"
     ))
+
+    # lvmm-core handler — same file, but with context-aware formatter so
+    # pipeline tags + METRIC records render correctly.
+    lvmm_handler = logging.FileHandler(log_path, mode="a")
+    lvmm_handler.setLevel(logging.INFO)
+    lvmm_handler.addFilter(PipelineLogFilter())
+    lvmm_handler.setFormatter(_ContextFormatter())
+
     root = logging.getLogger()
-    root.addHandler(handler)
+    root.addHandler(root_handler)
+    lvmm_logger = logging.getLogger("lvmm_core")
+    lvmm_logger.addHandler(lvmm_handler)
 
     try:
         yield workspaces_dir, artifact_dir, scenario
     finally:
-        root.removeHandler(handler)
-        handler.close()
+        root.removeHandler(root_handler)
+        root_handler.close()
+        lvmm_logger.removeHandler(lvmm_handler)
+        lvmm_handler.close()
 
 
 # ---------------------------------------------------------------------------
@@ -407,8 +430,30 @@ async def test_scenario(scenario: Scenario, scenario_workspace) -> None:
         ed = result.workspace_root / "fcpxml" / "edit_decision.json"
         if ed.is_file():
             shutil.copy2(ed, artifact_dir / "edit_decision.json")
+    # Copy pipeline_events.jsonl (lvmm-core L1 stage hooks). Sits alongside
+    # interactions.jsonl — together they're top-to-bottom observability of
+    # the run (L1 stages + L3 events). ``jq '.event' pipeline_events.jsonl``
+    # is the canonical post-run inspection.
+    if result.pipeline_events_jsonl and result.pipeline_events_jsonl.is_file():
+        shutil.copy2(result.pipeline_events_jsonl, artifact_dir / "pipeline_events.jsonl")
 
     # --- Structural assertions ------------------------------------------
+    # Structured logging — PipelineHooks were threaded into Pipeline.execute()
+    # and a per-run run_id was generated. Both should be visible on ``result``,
+    # and the JSONL sink should have written at least one stage record.
+    assert result.run_id and len(result.run_id) >= 8, (
+        f"[{scenario.id}] expected non-empty run_id on AutonomousResult; got {result.run_id!r}"
+    )
+    assert result.pipeline_events_jsonl and result.pipeline_events_jsonl.is_file(), (
+        f"[{scenario.id}] pipeline_events.jsonl missing — JSONFileHooks not wired? "
+        f"Expected at {result.pipeline_events_jsonl}"
+    )
+    _events_text = result.pipeline_events_jsonl.read_text(encoding="utf-8").strip()
+    assert _events_text, (
+        f"[{scenario.id}] pipeline_events.jsonl is empty — Pipeline.execute() "
+        f"either wasn't called with hooks= or didn't emit any stage events."
+    )
+
     # Phase 1
     assert result.session is not None, f"[{scenario.id}] Phase 1 produced no session"
     assert len(result.session.videos) == len(scenario.sources()), (
