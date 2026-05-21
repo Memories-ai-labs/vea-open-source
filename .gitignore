@@ -72,3 +72,4 @@ e2e_test_result.png
 
 # OS
 .DS_Store
+tests/v2/artifacts/
