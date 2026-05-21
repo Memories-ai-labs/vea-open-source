@@ -277,15 +277,21 @@ class LightweightComprehension:
         artefacts) then call ``index_transcripts`` to populate sqlite-vec
         so the Searcher can find the new content.
         """
-        from lvmm_core.pipelines.indexing.master_indexing import (
-            build_master_indexing_pipeline,
-        )
+        # PORT NOTE (2026-05-19): use the visual-only indexing pipeline
+        # (build_indexing_pipeline) instead of build_master_indexing_pipeline.
+        # Master adds portrait + multimodal_asr which need ctx.face_detector
+        # and ctx.asr. VEA's services.py builds ctx with face/asr/diar="none"
+        # — so master fails. Visual-only is sufficient for what VEA needs
+        # downstream (the planning loop searches video_transcripts text).
+        # Adding audio + face indexing is a follow-up if/when VEA wants to
+        # search dialogue or filter by person.
+        from lvmm_core.pipelines.indexing.video_indexing import build_indexing_pipeline
         from lvmm_core.core.retrieval.luci_memory.indexer import index_transcripts
 
         now = datetime.now(timezone.utc).isoformat()
-        pipeline = build_master_indexing_pipeline()
+        pipeline = build_indexing_pipeline("classic")
         result = await pipeline.execute(
-            {"video_path": str(video_path)},
+            {"video_path": str(video_path), "user_id": "vea_local"},
             self.lvmm_ctx,
         )
 

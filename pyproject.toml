@@ -82,13 +82,33 @@ dependencies = [
     "librosa>=0.10.0",
     "pyloudnorm>=0.1.1",
     "torch>=2.0.0",
-    "pydavinci>=0.3.0",
+    # PORT NOTE (2026-05-19): pydavinci removed from required deps.
+    # PyPI tops at 0.2.3 which pins typing-extensions==4.1.1, conflicting
+    # with fastapi's modern typing-extensions. The ffmpeg draft renderer
+    # is the primary render path; DaVinci Resolve final-render is opt-in
+    # and unused by the autonomous smoke. Install separately if you need
+    # it: ``pip install pydavinci==0.2.3 --no-deps``.
     # PORT NOTE (2026-05-19): lvmm-core supplies the L2 index/retrieve/chat
     # primitives (MaviAgent + Searcher + master_indexing pipeline) that used
     # to be served by memories.ai's hosted API via MemoriesAiManager.
     # Pinned as a path dep — assumes lvmm-core is checked out as a sibling
     # directory. Override via [tool.uv.sources] for production installs.
     "lvmm-core",
+    # The two LLM-adapter SDKs lvmm-core's adapters delegate to. Listed
+    # here (not as transitive optional extras on lvmm-core) because VEA
+    # always uses both — OpenRouterAdapter for OpenRouter-fronted models
+    # and GeminiAdapter for direct google-genai access (agent_session's
+    # function-calling loop hits the latter via the .client escape hatch).
+    "openai>=1.40",
+    "google-genai>=1.0",
+    # lvmm-core master_indexing pipeline persists to a local SQLite via
+    # aiosqlite + sqlite-vec (the [local] extras on lvmm-core itself).
+    # Listed here so VEA pulls them in transitively.
+    "aiosqlite>=0.19",
+    "sqlite-vec>=0.1",
+    # MobileCLIP PyTorch dep for the embedding="mobileclip-pytorch" path.
+    "torch>=2.1",
+    "mobileclip @ git+https://github.com/apple/ml-mobileclip.git",
 ]
 
 [tool.uv.sources]
@@ -97,6 +117,23 @@ lvmm-core = { path = "../lvmm-core", editable = true }
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+# Live-stream logs during test runs so smoke tests can show every model
+# output / intermediate as it happens (matches what
+# tests/v2/test_smoke_autonomous.py needs). Without log_cli=true,
+# pytest captures everything until the test finishes, defeating the
+# point of "wire up logging correctly."
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s %(levelname)-7s %(name)s :: %(message)s"
+log_cli_date_format = "%H:%M:%S"
+# Quiet the noisy clients that flood at INFO/DEBUG. Re-enable per-run
+# by passing --log-cli-level=DEBUG if you actually need them.
+filterwarnings = ["ignore::DeprecationWarning:google.*"]
+# Async tests don't need @pytest.mark.asyncio decorations — conftest
+# auto-marks coroutine functions.
+asyncio_mode = "auto"
 
 [dependency-groups]
 dev = [

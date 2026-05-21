@@ -96,9 +96,20 @@ async def init_lvmm() -> None:
     # Gemini for the LLM (via lvmm-core's GeminiAdapter, distinct from VEA's
     # own gemini_manager); MobileCLIP-PyTorch for embeddings (in-process,
     # no Ray endpoint required).
+    # embedding="mobileclip-pytorch" — in-process PyTorch path. The Ray
+    # endpoint (default "mobileclip") needs VPN; the OpenVINO path needs
+    # a separate IR conversion. PyTorch is the no-friction local-dev
+    # default. Auto-uses ~/lvmm-data/models/mobileclip_s1.pt (override
+    # with MOBILECLIP_PYTORCH_CHECKPOINT).
+    #
+    # provider auto-pick: prefer OpenRouter (VEA's standard env from
+    # config.json), fall back to direct Gemini if only GEMINI_API_KEY
+    # is set. Mirrors what gemini_manager does below for VEA's own
+    # non-RAG LLM calls.
+    _lvmm_provider = "openrouter" if _openrouter_key else "gemini"
     lvmm_ctx, lvmm_lifecycle = await build_local_context(
-        provider="gemini",
-        embedding="mobileclip",
+        provider=_lvmm_provider,
+        embedding="mobileclip-pytorch",
         face="none",
         asr="none",
         diarization="none",
