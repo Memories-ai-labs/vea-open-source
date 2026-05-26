@@ -15,15 +15,17 @@ def client():
     """Create a TestClient with mocked external dependencies."""
     with (
         patch("lib.oss.storage_factory.get_storage_client") as mock_storage,
-        patch("lib.llm.MemoriesAiManager.create_memories_manager") as mock_mem,
         patch("lib.llm.GeminiGenaiManager.GeminiGenaiManager") as mock_gemini,
+        # Skip the real lvmm-core async init at app startup — tests just need
+        # the singletons populated. The per-test fixtures below override these
+        # with MagicMock instances for any test that exercises routes.
+        patch("src.services.init_lvmm", new=AsyncMock(return_value=None)),
+        patch("src.services.close_lvmm", new=AsyncMock(return_value=None)),
         patch.dict("os.environ", {
-            "MEMORIES_API_KEY": "test-key",
             "GOOGLE_CLOUD_PROJECT": "test-project",
         }),
     ):
         mock_storage.return_value = MagicMock()
-        mock_mem.return_value = MagicMock()
         mock_gemini.return_value = MagicMock()
 
         from src.app import app
@@ -58,17 +60,18 @@ def test_root_health(client):
 # V2 Index — requires Memories.ai mock
 # ---------------------------------------------------------------------------
 
-def test_v2_index_missing_memories(client, tmp_path, monkeypatch):
-    """Should return 500 if memories_manager is None."""
-    monkeypatch.setattr("src.services.memories_manager", None)
+def test_v2_index_missing_lvmm(client, tmp_path, monkeypatch):
+    """Should return 503 if lvmm-core didn't initialise."""
+    monkeypatch.setattr("src.services.mavi_agent", None)
+    monkeypatch.setattr("src.services.lvmm_ctx", None)
     monkeypatch.setattr("src.config.WORKSPACES_DIR", tmp_path)
     resp = client.post("/video-edit/v2/index", json={
         "project_name": "p1",
         "source_dir": str(tmp_path),
         "start_fresh": False,
     })
-    assert resp.status_code == 500
-    assert "MEMORIES_API_KEY" in resp.json()["detail"]
+    assert resp.status_code == 503
+    assert "lvmm-core" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +80,9 @@ def test_v2_index_missing_memories(client, tmp_path, monkeypatch):
 
 def test_v2_plan_project_not_found(client, tmp_path, monkeypatch):
     monkeypatch.setattr("src.config.WORKSPACES_DIR", tmp_path)
-    monkeypatch.setattr("src.services.memories_manager", MagicMock())
+    monkeypatch.setattr("src.services.mavi_agent", MagicMock())
+    monkeypatch.setattr("src.services.searcher", MagicMock())
+    monkeypatch.setattr("src.services.lvmm_ctx", MagicMock())
     monkeypatch.setattr("src.services.gemini_manager", MagicMock())
     resp = client.post("/video-edit/v2/plan", json={
         "project_name": "doesnotexist",
@@ -88,7 +93,9 @@ def test_v2_plan_project_not_found(client, tmp_path, monkeypatch):
 
 def test_v2_plan_starts_for_existing_project(client, project_workspace, monkeypatch):
     ws, tmp_path = project_workspace
-    monkeypatch.setattr("src.services.memories_manager", MagicMock())
+    monkeypatch.setattr("src.services.mavi_agent", MagicMock())
+    monkeypatch.setattr("src.services.searcher", MagicMock())
+    monkeypatch.setattr("src.services.lvmm_ctx", MagicMock())
     monkeypatch.setattr("src.services.gemini_manager", MagicMock())
 
     # Patch IterativePlanningLoop.run to return immediately

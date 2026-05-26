@@ -83,13 +83,17 @@ async def v2_index(request: V2IndexRequest):
 
         logger.info(f"[V2 INDEX] project={request.project_name} source={source_dir} fresh={request.start_fresh}")
 
-        if not services.memories_manager:
-            raise HTTPException(status_code=500, detail="Memories.ai not configured. Set MEMORIES_API_KEY.")
+        if not services.mavi_agent or not services.lvmm_ctx:
+            raise HTTPException(
+                status_code=503,
+                detail="lvmm-core not initialised. Check server startup logs.",
+            )
 
         pipeline = LightweightComprehension(
             project_name=request.project_name,
             source_dir=source_dir,
-            memories=services.memories_manager,
+            lvmm_ctx=services.lvmm_ctx,
+            mavi_agent=services.mavi_agent,
             workspace=workspace,
         )
         session = await pipeline.run(start_fresh=request.start_fresh)
@@ -116,8 +120,11 @@ async def v2_plan(request: V2PlanRequest):
 
     Returns immediately with {"status": "started"} or {"status": "already_running"}.
     """
-    if not services.memories_manager:
-        raise HTTPException(status_code=500, detail="Memories.ai not configured. Set MEMORIES_API_KEY.")
+    if not services.mavi_agent or not services.searcher:
+        raise HTTPException(
+            status_code=503,
+            detail="lvmm-core not initialised. Check server startup logs.",
+        )
     if not services.gemini_manager:
         raise HTTPException(status_code=500, detail="Gemini not configured. Check GCP credentials.")
 
@@ -153,7 +160,8 @@ async def v2_plan(request: V2PlanRequest):
         project_name=project_name,
         user_prompt=request.prompt,
         workspace=workspace,
-        memories=services.memories_manager,
+        searcher=services.searcher,
+        mavi_agent=services.mavi_agent,
         gemini=services.gemini_manager,
         video_nos=video_nos,
         video_entries=session.videos,

@@ -13,18 +13,21 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def client_and_workspaces(tmp_path, monkeypatch):
     """Build a TestClient with WORKSPACES_DIR pointed at a fresh tmp dir."""
+    from unittest.mock import AsyncMock
     with (
         patch("lib.oss.storage_factory.get_storage_client") as mock_storage,
-        patch("lib.llm.MemoriesAiManager.create_memories_manager") as mock_mem,
         patch("lib.llm.GeminiGenaiManager.GeminiGenaiManager") as mock_gemini,
         patch("lib.llm.OpenRouterManager.OpenRouterManager") as mock_or,
+        # Stub the async lvmm-core init so app startup doesn't spin up a
+        # real PipelineContext just to test route behaviour.
+        patch("src.services.init_lvmm", new=AsyncMock(return_value=None)),
+        patch("src.services.close_lvmm", new=AsyncMock(return_value=None)),
         patch.dict("os.environ", {
-            "MEMORIES_API_KEY": "k", "GOOGLE_CLOUD_PROJECT": "p",
+            "GOOGLE_CLOUD_PROJECT": "p",
             "OPENROUTER_API_KEY": "or",
         }),
     ):
         mock_storage.return_value = MagicMock()
-        mock_mem.return_value = MagicMock()
         mock_gemini.return_value = MagicMock()
         mock_or.return_value = MagicMock()
 

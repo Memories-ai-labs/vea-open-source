@@ -1,11 +1,23 @@
 """
 Lightweight comprehension pipeline — Phase 1 of v2 agentic editing.
 
-Uploads video to Memories.ai (or reuses existing video_no from session cache),
-gets a broad gist via Chat API, and saves session.json.
+Indexes a workspace's videos LOCALLY via lvmm-core's master_indexing
+pipeline and asks lvmm-core's MaviAgent for a per-video gist. No upload
+to memories.ai, no polling for "ready" status — indexing is synchronous
+and runs in-process.
 
-Deliberately avoids heavy scene-by-scene analysis. All detailed understanding
-happens on-demand during the iterative planning loop.
+Deliberately avoids heavy scene-by-scene analysis. All detailed
+understanding happens on-demand during the iterative planning loop.
+
+PORT NOTE (2026-05-19): Migrated from memories.ai-hosted indexing. Where
+this module used to call ``MemoriesAiManager.upload_video_url`` +
+``wait_for_ready`` + ``chat(GIST_PROMPT)`` per video, it now runs:
+  1. ``master_indexing.execute({"video_path": ...})`` → fills SQLite
+  2. ``index_transcripts(...)``                          → fills vector_db
+  3. ``mavi_agent.ask(GIST_PROMPT, video_id=...)``       → produces gist
+
+Sequential per video for now; concurrent indexing is a follow-up (see
+the workspace-level notes file).
 """
 from __future__ import annotations
 import asyncio
@@ -16,7 +28,7 @@ from typing import Awaitable, Callable, List, Optional
 
 ProgressCallback = Callable[[float, str], Awaitable[None]]
 
-from lib.llm.MemoriesAiManager import MemoriesAiManager
+from lvmm_core.utils.logging import metric
 from src.pipelines.v2.schemas import SessionData, VideoEntry
 from src.pipelines.v2.workspace import WorkspaceManager
 from src.pipelines.v2.planning.planning_prompts import GIST_PROMPT
@@ -27,23 +39,63 @@ logger = logging.getLogger(__name__)
 
 class LightweightComprehension:
     """
-    Phase 1: Get video into Memories.ai and extract a broad gist.
+    Phase 1: Index a workspace's videos locally (via lvmm-core) and
+    extract a broad gist per video.
 
-    Session cache: if workspace already has a valid session with PARSE video_nos,
-    skip re-upload and return the existing session immediately.
+    Session cache: if the workspace already has a session and all videos
+    in it are still present in the local DB, skip re-indexing and return
+    the cached session immediately.
+
+    Parameters
+    ----------
+    project_name:
+        Logical name for the project (workspace name).
+    source_dir:
+        Directory holding the input video files.
+    lvmm_ctx:
+        lvmm-core PipelineContext (carries adapters + DB + storage).
+    mavi_agent:
+        lvmm-core MaviAgent used to generate per-video gists.
+    workspace:
+        WorkspaceManager that owns session.json + other workspace artefacts.
     """
 
     def __init__(
         self,
         project_name: str,
         source_dir: str,
-        memories: MemoriesAiManager,
+        lvmm_ctx,                       # lvmm_core.pipelines.base.PipelineContext
+        mavi_agent,                     # lvmm_core.agents.mavi_agent.MaviAgent
         workspace: WorkspaceManager,
+        *,
+        run_id: Optional[str] = None,
+        pipeline_hooks: Optional[list] = None,
     ):
+        """
+        Parameters
+        ----------
+        run_id:
+            Optional UUID-like identifier propagated to every
+            ``Pipeline.execute()`` call we drive in Phase 1. Threads into
+            lvmm-core's structured-logging ContextVars so every log line
+            emitted by lvmm-core (pipeline stage starts/ends, MaviAgent
+            query rewrites, etc.) carries this run_id. Lets us correlate
+            "which run produced this log line" after the fact.
+        pipeline_hooks:
+            Optional list of ``lvmm_core._internal.hooks.PipelineHooks``
+            passed straight through to ``Pipeline.execute(hooks=...)``.
+            Common pair: ``[ConsoleHooks(), JSONFileHooks(path=...)]`` —
+            the JSONL sink writes one structured record per L1 stage
+            start/end/error, sitting alongside VEA's own L3 interactions
+            JSONL for full top-to-bottom observability.
+        """
         self.project_name = project_name
         self.source_dir = Path(source_dir)
-        self.memories = memories
+        self.lvmm_ctx = lvmm_ctx
+        self.mavi_agent = mavi_agent
         self.workspace = workspace
+        self.run_id = run_id
+        self.pipeline_hooks = pipeline_hooks or []
 
     async def run(
         self,
@@ -52,14 +104,15 @@ class LightweightComprehension:
         only_files: Optional[List[str]] = None,
     ) -> SessionData:
         """
-        Run comprehension. Returns SessionData with video_nos and gist.
+        Run comprehension. Returns SessionData with per-video video_ids and gists.
 
         Args:
-            start_fresh: If True, re-upload all videos even if session exists.
+            start_fresh: If True, re-index all videos even if a cached session
+                exists. Skips the "is the cached session still valid?" check.
             progress_callback: optional async fn(percent, message) for stage updates.
-            only_files: If provided, only re-index these specific filenames and merge
-                the results back into the existing session (other videos are kept).
-                The matching memories.ai videos are deleted first to force a fresh upload.
+            only_files: If provided, only re-index these specific filenames and
+                merge the results back into the existing session (other videos
+                are kept). Matching DB rows are deleted first to force re-index.
         """
         async def _report(percent: float, message: str):
             if progress_callback:
@@ -79,23 +132,15 @@ class LightweightComprehension:
             try:
                 session = self.workspace.load_session()
                 if session.videos and session.gist:
-                    # Verify all videos are still PARSE on Memories.ai
-                    statuses = await asyncio.gather(*[
-                        self.memories.get_video_status(v.video_no)
-                        for v in session.videos
-                    ], return_exceptions=True)
-                    all_ready = all(
-                        not isinstance(s, Exception) and s.status == "PARSE"
-                        for s in statuses
-                    )
-                    if all_ready:
+                    all_present = await self._all_videos_still_indexed(session.videos)
+                    if all_present:
                         logger.info(
                             f"[COMPREHENSION] Resuming existing session for '{self.project_name}' "
                             f"({len(session.videos)} videos, gist cached)"
                         )
                         return session
                     else:
-                        logger.info("[COMPREHENSION] Some videos not PARSE — re-uploading")
+                        logger.info("[COMPREHENSION] Some indexed videos missing from local DB — re-indexing")
             except Exception as e:
                 logger.warning(f"[COMPREHENSION] Could not load existing session: {e}")
 
@@ -109,67 +154,60 @@ class LightweightComprehension:
         # --- Create workspace ---
         self.workspace.create()
 
-        # --- Upload all videos in parallel ---
-        logger.info("[COMPREHENSION] Uploading videos to Memories.ai...")
-        await _report(15, f"Uploading {len(video_files)} video(s) to Memories.ai...")
-        upload_results = await asyncio.gather(*[
-            self._upload_one(vf) for vf in video_files
-        ], return_exceptions=True)
+        # --- Index videos sequentially via lvmm-core ---
+        # NOTE: sequential for the first cut. Concurrent indexing is a follow-up;
+        # SQLite write contention will need the _Sequenced* stage-wrapper pattern
+        # from master_indexing (see workspace local-notes for tracking).
+        logger.info("[COMPREHENSION] Indexing videos locally via lvmm-core...")
+        await _report(15, f"Indexing {len(video_files)} video(s) locally...")
 
         video_entries: List[VideoEntry] = []
-        for vf, result in zip(video_files, upload_results):
-            if isinstance(result, Exception):
-                logger.error(f"[COMPREHENSION] Upload failed for {vf.name}: {result}")
-                continue
-            video_entries.append(result)
+        for idx, vf in enumerate(video_files):
+            pct = 15 + (40 * (idx / max(len(video_files), 1)))
+            await _report(pct, f"Indexing {idx+1}/{len(video_files)}: {vf.name}")
+            try:
+                entry = await self._index_one(vf)
+                video_entries.append(entry)
+            except Exception as e:
+                logger.error(f"[COMPREHENSION] Indexing failed for {vf.name}: {e}")
+                # Continue with the rest — partial success is better than total failure
 
         if not video_entries:
-            raise RuntimeError("All video uploads failed")
+            raise RuntimeError("All video indexing failed")
 
-        # --- Wait for all videos to be indexed ---
-        logger.info("[COMPREHENSION] Waiting for Memories.ai indexing to complete...")
-        await _report(40, f"Waiting for Memories.ai to index {len(video_entries)} video(s)...")
-        await asyncio.gather(*[
-            self.memories.wait_for_ready(v.video_no, timeout=3600)
-            for v in video_entries
-        ])
-        logger.info(f"[COMPREHENSION] All {len(video_entries)} videos indexed")
-        await _report(75, "Indexing complete, generating content gist...")
+        logger.info(f"[COMPREHENSION] Indexed {len(video_entries)}/{len(video_files)} videos")
+        await _report(60, "Indexing complete, generating content gist...")
 
         # --- Save initial session (no gist yet) ---
         session = self.workspace.init_session(videos=video_entries)
 
-        # --- Get per-video gist via Chat API (one call per video, in parallel) ---
-        logger.info("[COMPREHENSION] Requesting per-video gist from Memories.ai Chat API...")
+        # --- Get per-video gist via MaviAgent (one call per video, sequential) ---
+        logger.info("[COMPREHENSION] Requesting per-video gist via lvmm-core MaviAgent...")
 
-        async def _gist_one(entry: VideoEntry) -> str:
-            try:
-                resp = await self.memories.chat([entry.video_no], GIST_PROMPT)
-                return resp.text
-            except Exception as e:
-                logger.warning(f"[COMPREHENSION] Gist failed for {entry.video_name}: {e}")
-                return ""
-
-        gists = await asyncio.gather(*[_gist_one(v) for v in video_entries])
-        for entry, gist_text in zip(video_entries, gists):
-            entry.gist = gist_text
-            logger.info(f"[COMPREHENSION] Gist for {entry.video_name}: {len(gist_text)} chars")
+        for idx, entry in enumerate(video_entries):
+            pct = 60 + (35 * (idx / max(len(video_entries), 1)))
+            await _report(pct, f"Gist {idx+1}/{len(video_entries)}: {entry.video_name}")
+            entry.gist = await self._gist_one(entry)
+            logger.info(
+                f"[COMPREHENSION] Gist for {entry.video_name}: {len(entry.gist)} chars"
+            )
 
         # Combined gist for the session (used as planning context)
         if len(video_entries) == 1:
             combined_gist = video_entries[0].gist
-            memories_session_id = None
         else:
             combined_parts = "\n\n---\n\n".join(
                 f"**{v.video_name}**\n\n{v.gist}" for v in video_entries if v.gist
             )
             combined_gist = combined_parts
-            memories_session_id = None
 
         # --- Update session ---
         session.videos = video_entries
         session.gist = combined_gist
-        session.memories_session_id = memories_session_id
+        # memories_session_id is a memories.ai-only concept; left None for the
+        # local port. Kept on the schema for back-compat (existing session.json
+        # files in the wild may still have the field).
+        session.memories_session_id = None
         session.status = "indexed"
         self.workspace.save_session(session)
 
@@ -185,10 +223,9 @@ class LightweightComprehension:
         filenames: List[str],
         report: Callable[[float, str], Awaitable[None]],
     ) -> SessionData:
-        """Re-index a specific subset of files. Deletes existing memories.ai uploads
-        for those names first so the upload actually re-runs, then merges the new
-        VideoEntry objects back into the existing session."""
-        # Load existing session (must exist — per-file re-index only makes sense after initial index)
+        """Re-index a specific subset of files. Deletes existing rows for those
+        videos from the local DB first so master_indexing re-runs cleanly, then
+        merges the new VideoEntry objects back into the existing session."""
         try:
             session = self.workspace.load_session()
         except Exception:
@@ -201,55 +238,38 @@ class LightweightComprehension:
 
         await report(8, f"Re-indexing {len(targets)} file(s)...")
 
-        # Delete existing entries for these files from memories.ai so upload re-runs fresh
+        # Delete old DB rows for matching files so re-indexing produces a clean state.
         existing_by_name = {v.video_name: v for v in session.videos}
         for vf in targets:
             old = existing_by_name.get(vf.name)
             if old and old.video_no:
                 try:
-                    await self.memories.delete_video(old.video_no)
-                    logger.info(f"[COMPREHENSION] Deleted old memories.ai entry for {vf.name} ({old.video_no})")
+                    await self._delete_video(old.video_no)
+                    logger.info(f"[COMPREHENSION] Deleted old local index for {vf.name} ({old.video_no})")
                 except Exception as e:
-                    logger.warning(f"[COMPREHENSION] Could not delete old entry for {vf.name}: {e}")
-
-        await report(15, f"Uploading {len(targets)} file(s) to Memories.ai...")
-        upload_results = await asyncio.gather(*[
-            self._upload_one(vf) for vf in targets
-        ], return_exceptions=True)
+                    logger.warning(f"[COMPREHENSION] Could not delete old index for {vf.name}: {e}")
 
         new_entries: List[VideoEntry] = []
-        for vf, result in zip(targets, upload_results):
-            if isinstance(result, Exception):
-                logger.error(f"[COMPREHENSION] Re-index upload failed for {vf.name}: {result}")
-                continue
-            new_entries.append(result)
+        for idx, vf in enumerate(targets):
+            pct = 15 + (50 * (idx / max(len(targets), 1)))
+            await report(pct, f"Re-indexing {idx+1}/{len(targets)}: {vf.name}")
+            try:
+                new_entries.append(await self._index_one(vf))
+            except Exception as e:
+                logger.error(f"[COMPREHENSION] Re-index failed for {vf.name}: {e}")
 
         if not new_entries:
-            raise RuntimeError("All re-index uploads failed")
-
-        await report(40, f"Waiting for indexing to complete...")
-        await asyncio.gather(*[
-            self.memories.wait_for_ready(v.video_no, timeout=3600)
-            for v in new_entries
-        ])
+            raise RuntimeError("All re-index attempts failed")
 
         await report(75, "Generating updated content gists...")
-        async def _gist_one(entry: VideoEntry) -> str:
-            try:
-                resp = await self.memories.chat([entry.video_no], GIST_PROMPT)
-                return resp.text
-            except Exception as e:
-                logger.warning(f"[COMPREHENSION] Gist failed for {entry.video_name}: {e}")
-                return ""
-
-        gists = await asyncio.gather(*[_gist_one(v) for v in new_entries])
-        for entry, gist_text in zip(new_entries, gists):
-            entry.gist = gist_text
+        for idx, entry in enumerate(new_entries):
+            pct = 75 + (20 * (idx / max(len(new_entries), 1)))
+            await report(pct, f"Gist {idx+1}/{len(new_entries)}: {entry.video_name}")
+            entry.gist = await self._gist_one(entry)
 
         # Merge new entries back into session, replacing matching ones
         new_by_name = {v.video_name: v for v in new_entries}
         merged = [new_by_name.get(v.video_name, v) for v in session.videos]
-        # Add any entries that weren't already in the session (rare)
         existing_names = {v.video_name for v in session.videos}
         for v in new_entries:
             if v.video_name not in existing_names:
@@ -270,28 +290,142 @@ class LightweightComprehension:
         await report(98, "Saving session...")
         return session
 
-    async def _upload_one(self, video_path: Path) -> VideoEntry:
-        """Upload a single video file and return a VideoEntry."""
-        now = datetime.now(timezone.utc).isoformat()
-        # Check if already uploaded under this name
-        existing = await self.memories.find_video_by_name(video_path.name)
-        if existing and existing.status == "PARSE":
-            logger.info(f"[COMPREHENSION] Reusing existing video: {video_path.name} -> {existing.video_no}")
-            return VideoEntry(
-                video_no=existing.video_no,
-                video_name=video_path.name,
-                source_path=str(video_path.resolve()),
-                duration_seconds=existing.duration,
-                indexed_at=now,
-            )
+    # ------------------------------------------------------------------
+    # Per-video index + gist (the lvmm-core swap-in)
+    # ------------------------------------------------------------------
 
-        video_no = await self.memories.upload_video_file(str(video_path))
+    async def _index_one(self, video_path: Path) -> VideoEntry:
+        """Index a single video locally and return a VideoEntry.
+
+        Two-step process: run the master_indexing DAG (fills SQLite +
+        artefacts) then call ``index_transcripts`` to populate sqlite-vec
+        so the Searcher can find the new content.
+        """
+        # PORT NOTE (2026-05-19): use the visual-only indexing pipeline
+        # (build_indexing_pipeline) instead of build_master_indexing_pipeline.
+        # Master adds portrait + multimodal_asr which need ctx.face_detector
+        # and ctx.asr. VEA's services.py builds ctx with face/asr/diar="none"
+        # — so master fails. Visual-only is sufficient for what VEA needs
+        # downstream (the planning loop searches video_transcripts text).
+        # Adding audio + face indexing is a follow-up if/when VEA wants to
+        # search dialogue or filter by person.
+        from lvmm_core.pipelines.indexing.video_indexing import build_indexing_pipeline
+        from lvmm_core.core.retrieval.luci_memory.indexer import index_transcripts
+
+        now = datetime.now(timezone.utc).isoformat()
+        pipeline = build_indexing_pipeline("classic")
+        # Thread run_id + hooks into the L1 pipeline. The run_id binds
+        # lvmm-core's logging ContextVars for the duration of execute(),
+        # so every visual_transcriber / embedding / store_visual stage's
+        # log line carries the same run_id tag as our L3 events. The
+        # hooks (typically ConsoleHooks + JSONFileHooks) capture each
+        # stage's start / end / cost / errors as structured JSONL records.
+        result = await pipeline.execute(
+            {"video_path": str(video_path), "user_id": "vea_local"},
+            self.lvmm_ctx,
+            run_id=self.run_id,
+            sample_id=video_path.name,
+            hooks=self.pipeline_hooks,
+        )
+
+        # master_indexing's derive_video_id stage produces the video_id;
+        # downstream stages all reference it. It lands in the result dict.
+        video_id = (
+            result.get("video_id")
+            or result.get("derived_video_id")
+            or video_path.stem  # fallback — should never fire in practice
+        )
+
+        # Populate the vector DB so the Searcher can hit these transcripts.
+        await index_transcripts(
+            self.lvmm_ctx.database,
+            self.lvmm_ctx.vector_db,
+            self.lvmm_ctx.text_embedding,
+            video_id,
+        )
+
+        # Best-effort duration from the result; ffprobe fallback if missing.
+        duration = result.get("duration_seconds") or result.get("video_duration")
+        if duration is None:
+            duration = await asyncio.to_thread(_probe_duration, video_path)
+
+        logger.info(
+            f"[COMPREHENSION] Indexed {video_path.name} → video_id={video_id} "
+            f"({duration:.1f}s)" if duration else
+            f"[COMPREHENSION] Indexed {video_path.name} → video_id={video_id}"
+        )
+        # Aggregatable per-video index metric. Tagged with video_id so we can
+        # diff "video X took N seconds and indexed M transcript chunks" across
+        # runs without parsing log strings.
+        if duration:
+            metric("vea.comprehension.video_duration_seconds", duration, video_id=video_id)
+
         return VideoEntry(
-            video_no=video_no,
+            video_no=video_id,  # kept as video_no for back-compat with existing session.json files
             video_name=video_path.name,
             source_path=str(video_path.resolve()),
+            duration_seconds=duration,
             indexed_at=now,
         )
+
+    async def _gist_one(self, entry: VideoEntry) -> str:
+        """Ask MaviAgent for a per-video gist. Returns the answer text or ""."""
+        try:
+            trace = await self.mavi_agent.ask(GIST_PROMPT, video_id=entry.video_no)
+            # Per-gist aggregatables. ``rewrite_reason`` and ``answer`` are
+            # logged at INFO by MaviAgent already; what's useful to aggregate
+            # is the cost (tokens) and the size of the resulting gist.
+            metric("vea.comprehension.gist_chars", len(trace.answer or ""), video_id=entry.video_no)
+            metric("vea.comprehension.gist_input_tokens", trace.total_input_tokens, video_id=entry.video_no)
+            metric("vea.comprehension.gist_output_tokens", trace.total_output_tokens, video_id=entry.video_no)
+            return trace.answer
+        except Exception as e:
+            logger.warning(f"[COMPREHENSION] Gist failed for {entry.video_name}: {e}")
+            return ""
+
+    async def _all_videos_still_indexed(self, videos: List[VideoEntry]) -> bool:
+        """Return True if every VideoEntry's video_id is still present in the local DB."""
+        try:
+            for v in videos:
+                rows = await self.lvmm_ctx.database.query(
+                    "videos", {"video_id": v.video_no}
+                )
+                if not rows:
+                    return False
+            return True
+        except Exception as e:
+            logger.warning(f"[COMPREHENSION] DB check failed: {e}")
+            return False
+
+    async def _delete_video(self, video_id: str) -> None:
+        """Best-effort: drop all DB rows for a video_id so re-indexing is clean.
+
+        Touches the tables master_indexing populates: videos, keyframes,
+        video_transcripts, audio_transcripts, persons, face_detections,
+        segments. Missing tables / rows are silently ignored.
+        """
+        tables = [
+            "videos",
+            "keyframes",
+            "video_transcripts",
+            "audio_transcripts",
+            "persons",
+            "face_detections",
+            "segments",
+            "keyframe_meta",
+            "transcript_meta",
+            "video_transcript_meta",
+        ]
+        for t in tables:
+            try:
+                await self.lvmm_ctx.database.delete(t, {"video_id": video_id})
+            except Exception:
+                # Table may not exist, or schema may differ — ignore.
+                pass
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     def _find_videos(self) -> List[Path]:
         """Find all video files in source_dir."""
@@ -302,3 +436,18 @@ class LightweightComprehension:
             videos.extend(self.source_dir.glob(f"*{ext}"))
             videos.extend(self.source_dir.glob(f"*{ext.upper()}"))
         return sorted(set(videos))
+
+
+def _probe_duration(video_path: Path) -> Optional[float]:
+    """ffprobe fallback when master_indexing's result dict didn't include duration."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(video_path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        s = out.stdout.strip()
+        return round(float(s), 2) if s else None
+    except Exception:
+        return None

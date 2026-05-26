@@ -116,7 +116,8 @@ class ToolExecutor:
 
     def __init__(
         self,
-        memories_manager,
+        mavi_agent,
+        searcher,
         gemini_manager,
         workspace,
         scratchpads: ScratchpadManager,
@@ -126,7 +127,13 @@ class ToolExecutor:
         footage_fps: Optional[Dict[str, float]] = None,
         source_fps: Optional[float] = None,
     ):
-        self.memories = memories_manager
+        # Video-understanding handles from lvmm-core (replaces the old
+        # memories.ai cloud client). ``mavi_agent.ask(question, video_ids=...)``
+        # backs the ``ask_memories`` tool; ``searcher.search(SearchRequest(...))``
+        # backs the ``search_footage`` tool. Both are constructed in
+        # ``src.services.init_lvmm()`` and shared across the app.
+        self.mavi_agent = mavi_agent
+        self.searcher = searcher
         # ``gemini`` is the main text LLM (may be Claude/GPT via OpenRouter).
         # ``video_llm`` is used for tasks that need native video input
         # (refine_clip_timestamps, verify_preview). If omitted, falls back to
@@ -175,62 +182,62 @@ class ToolExecutor:
     # ── Individual tool implementations ───────────────────────────────────
 
     async def _ask_memories(self, args: Dict) -> Dict:
+        """Backed by lvmm-core's MaviAgent: query rewrite → search → rerank → answer.
+
+        Returns the same shape the agent loop has always seen
+        (``answer`` + optional ``references``), so the rest of the tool
+        protocol is unchanged.
+        """
         question = args.get("question", "")
         logger.info(f"[AGENT] ask_memories: {question[:100]}")
 
-        response = await self.memories.chat(
-            video_nos=self.video_nos,
-            prompt=question,
+        trace = await self.mavi_agent.ask(
+            question,
+            video_ids=self.video_nos or None,
         )
 
-        result = {
-            "answer": response.text,
-            "reference_count": len(response.ref_items),
+        result: Dict[str, Any] = {
+            "answer": trace.answer or "",
+            "reference_count": int(getattr(trace, "reranked_hits", 0) or 0),
         }
-
-        # Include timestamped references if available
-        if response.references:
-            result["references"] = [
-                {
-                    "video_name": ref.video_name,
-                    "timestamp": ref.timestamp,
-                    "description": ref.description,
-                }
-                for ref in response.references[:10]  # cap at 10
-            ]
-
+        # MaviAgent's trace doesn't carry per-hit timestamped references the
+        # same way memories.ai's chat response did. The agent gets the gist
+        # via ``answer``; if it needs specific timestamps it should call
+        # ``search_footage`` for that clip directly.
         return result
 
     async def _search_footage(self, args: Dict) -> Dict:
+        """Backed by lvmm-core's Searcher.
+
+        Searches the TRANSCRIPT + VIDEO_TRANSCRIPT collections (visual
+        captions + dialogue segments). Returns ``clips`` with the same
+        per-item shape (``video_no``, ``start_seconds``, ``end_seconds``,
+        ``score``, optional ``transcript``) the agent loop expects.
+        """
+        from lvmm_core.core.retrieval.luci_memory.types import SearchRequest, Collection
+
         query = args.get("query", "")
         target_duration = args.get("target_duration_seconds", 5.0)
         logger.info(f"[AGENT] search_footage: {query[:100]}")
 
-        raw_results = await self.memories.search(
-            query,
-            search_type="BY_CLIP",
-            video_nos=self.video_nos,
-        )
-
-        # raw_results is either a list of dicts or a dict with an "items" key
-        items = []
-        if isinstance(raw_results, list):
-            items = raw_results
-        elif isinstance(raw_results, dict):
-            items = raw_results.get("items", [])
+        response = await self.searcher.search(SearchRequest(
+            query=query,
+            collections=[Collection.VIDEO_TRANSCRIPT, Collection.TRANSCRIPT],
+            video_ids=self.video_nos or None,
+            top_k=15,
+        ))
 
         # Fetch transcript once so we can snap endpoints to sentence boundaries
-        # and include dialogue context in results
+        # and include dialogue context in results. May return [] when ASR
+        # wasn't enabled at indexing time — clip enrichment degrades gracefully.
         transcript_segments = await self._get_transcript_segments()
 
-        clips = []
-        for item in items[:15]:  # cap results
-            if not isinstance(item, dict):
-                continue
-            video_no = item.get("videoNo", "")
-            start = float(item.get("startTime", 0))
-            end_raw = item.get("endTime")
-            end = float(end_raw) if end_raw else start + target_duration
+        clips: List[Dict[str, Any]] = []
+        for hit in response.hits[:15]:
+            video_no = getattr(hit, "video_id", "") or ""
+            start = float(getattr(hit, "start_time", None) or 0)
+            end_raw = getattr(hit, "end_time", None)
+            end = float(end_raw) if end_raw is not None else start + target_duration
 
             # If clip is shorter than target, extend to nearest sentence boundary
             if end - start < target_duration:
@@ -239,23 +246,17 @@ class ToolExecutor:
                     desired_end, transcript_segments, direction="forward"
                 )
 
-            score = float(item.get("score", 0))
+            score = float(getattr(hit, "score", 0) or 0)
 
-            # Slice transcript to this clip's time range so the agent can see
-            # what dialogue exists before deciding to refine.
-            # Use generous overlap: include any sentence that overlaps the clip
-            # window at all, even if it starts well before or ends well after.
-            # This catches sentences that straddle the clip boundary.
+            # Slice transcript to this clip's time range — same overlap logic
+            # as before, just sourced from the lvmm-core DB query.
             clip_transcript = []
             for seg in transcript_segments:
                 seg_text = seg.get("text", "").strip()
-                # Skip empty or metadata-only segments
                 if not seg_text or len(seg_text) < 3:
                     continue
                 if seg_text.lower().startswith("transcription by"):
                     continue
-                # Include if any part of the sentence overlaps the clip range
-                # (sentence ends after clip starts AND sentence starts before clip ends)
                 if seg["end"] > start and seg["start"] < end:
                     clip_transcript.append({
                         "text": seg_text,
@@ -263,9 +264,9 @@ class ToolExecutor:
                         "end": round(seg["end"], 1),
                     })
 
-            clip_data = {
+            clip_data: Dict[str, Any] = {
                 "video_no": video_no,
-                "video_name": item.get("videoName", video_no),
+                "video_name": video_no,  # lvmm-core hits don't carry display name; video_no IS the name
                 "start_seconds": start,
                 "end_seconds": end,
                 "score": score,
@@ -277,23 +278,34 @@ class ToolExecutor:
         return {"clips": clips, "count": len(clips), "query": query}
 
     async def _get_transcript_segments(self) -> List[Dict]:
-        """Fetch and cache the full audio transcript for the first video."""
-        if not hasattr(self, '_cached_transcript'):
-            self._cached_transcript = []
-            try:
-                video_no = self.video_nos[0] if self.video_nos else None
-                if video_no:
-                    all_segs = await self.memories.get_audio_transcription(video_no)
-                    self._cached_transcript = [
-                        {
-                            "text": seg.get("content", "").strip(),
-                            "start": float(seg.get("startTime", 0)),
-                            "end": float(seg.get("endTime", 0)),
-                        }
-                        for seg in all_segs
-                    ]
-            except Exception as e:
-                logger.warning(f"[AGENT] Could not fetch transcript for caching: {e}")
+        """Fetch + cache audio-transcript segments for the first indexed video.
+
+        Reads from lvmm-core's ``audio_transcripts`` table (populated by
+        Whisper when ASR is enabled at indexing time). Returns [] when
+        ASR wasn't enabled — callers should treat empty as "no enrichment
+        available" and not error.
+        """
+        if hasattr(self, '_cached_transcript'):
+            return self._cached_transcript
+
+        self._cached_transcript = []
+        try:
+            from src import services as _services
+            ctx = _services.lvmm_ctx
+            if ctx is None or not self.video_nos:
+                return self._cached_transcript
+            video_id = self.video_nos[0]
+            rows = await ctx.database.query("audio_transcripts", {"video_id": video_id})
+            self._cached_transcript = [
+                {
+                    "text": (r.get("text") or r.get("content") or "").strip(),
+                    "start": float(r.get("start_time") or r.get("startTime") or 0),
+                    "end": float(r.get("end_time") or r.get("endTime") or 0),
+                }
+                for r in (rows or [])
+            ]
+        except Exception as e:
+            logger.warning(f"[AGENT] Could not fetch transcript for caching: {e}")
         return self._cached_transcript
 
     @staticmethod

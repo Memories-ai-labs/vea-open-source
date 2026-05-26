@@ -1,14 +1,19 @@
 """
 Iterative Planning Loop — Phase 2 of the VEA v2 pipeline.
 
-Architecture:
+Architecture (unchanged from pre-port):
   - MAX_ITERATIONS passes through the planning loop (configurable)
   - Each iteration:
-      Call A (Gemini): Given current state, decide which Memories.ai tools to call → ToolCallPlan
+      Call A (Gemini): Given current state, decide which retrieval tools to call → ToolCallPlan
       Execute:         Run chat() and search() calls concurrently → update context + clips
       Call B (Gemini): Given full context + clips, produce updated Storyboard
   - Stops early if should_stop=True or all shots have clips and no open_questions remain
   - Streams progress events via asyncio.Queue for WebSocket dashboard
+
+PORT NOTE (2026-05-19): Backend swapped from memories.ai HTTP client to
+lvmm-core's local MaviAgent (chat) + Searcher (search). Loop semantics
+unchanged. Tool calls now hit the local SQLite index instead of crossing
+the network.
 """
 from __future__ import annotations
 
@@ -19,8 +24,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from lib.llm.GeminiGenaiManager import GeminiGenaiManager
-from lib.llm.MemoriesAiManager import MemoriesAiManager
+from lvmm_core.interfaces.llm import ILLM
+from lvmm_core.utils.llm import messages_from_prompts
+from lvmm_core.utils.logging import metric
 from src.pipelines.v2.planning.clip_postprocess import (
     postprocess_clips,
     deduplicate_against_existing,
@@ -77,12 +83,13 @@ class IterativePlanningLoop:
             project_name="my_project",
             user_prompt="Create a 2-min highlight reel of the keynote",
             workspace=workspace_manager,
-            memories=memories_manager,
+            searcher=searcher,          # lvmm-core luci_memory.Searcher
+            mavi_agent=mavi_agent,      # lvmm-core MaviAgent
             gemini=gemini_manager,
-            video_nos=[...],          # Memories.ai video IDs to query
-            video_entries=[...],      # Full VideoEntry objects (for source paths)
-            event_queue=queue,        # Optional — live updates to dashboard
-            pause_event=event,        # Optional — caller sets to pause loop
+            video_nos=[...],            # lvmm-core video_ids to query
+            video_entries=[...],        # Full VideoEntry objects (for source paths)
+            event_queue=queue,          # Optional — live updates to dashboard
+            pause_event=event,          # Optional — caller sets to pause loop
         )
         storyboard = await loop.run()
     """
@@ -92,8 +99,9 @@ class IterativePlanningLoop:
         project_name: str,
         user_prompt: str,
         workspace: WorkspaceManager,
-        memories: MemoriesAiManager,
-        gemini: GeminiGenaiManager,
+        searcher,                       # lvmm_core.core.retrieval.luci_memory.Searcher
+        mavi_agent,                     # lvmm_core.agents.mavi_agent.MaviAgent
+        gemini: ILLM,
         video_nos: List[str],
         video_entries: List[VideoEntry],
         max_iterations: int = 5,
@@ -105,7 +113,8 @@ class IterativePlanningLoop:
         self.project_name = project_name
         self.user_prompt = user_prompt
         self.workspace = workspace
-        self.memories = memories
+        self.searcher = searcher
+        self.mavi_agent = mavi_agent
         self.gemini = gemini
         self.video_nos = video_nos
         self.video_entries = video_entries
@@ -115,7 +124,7 @@ class IterativePlanningLoop:
         self.pause_event = pause_event
         self.inject_prompt_queue = inject_prompt_queue
 
-        # Map video_no → VideoEntry for fast lookup
+        # Map video_no → VideoEntry for fast source-path lookup at clip-parse time.
         self._video_map: Dict[str, VideoEntry] = {v.video_no: v for v in video_entries}
 
     # -------------------------------------------------------------------------
@@ -198,6 +207,12 @@ class IterativePlanningLoop:
                 f"[PLAN] Iter {iteration}: +{len(new_clips)} raw clips → "
                 f"+{len(processed)} new → {len(accumulated_clips)} total"
             )
+            # Per-iteration clip aggregatables. ``new_clips`` is the raw count
+            # pre-dedup; ``processed`` is post-dedup and post-postprocess; the
+            # final total is what the planner sees going into Call B.
+            metric("vea.planning.iter.raw_clips", len(new_clips), iteration=iteration)
+            metric("vea.planning.iter.new_clips", len(processed), iteration=iteration)
+            metric("vea.planning.iter.total_clips", len(accumulated_clips), iteration=iteration)
 
             # ---- CALL B: Update storyboard ----
             storyboard = await self._call_b_update_storyboard(
@@ -238,6 +253,13 @@ class IterativePlanningLoop:
             f"[PLAN] Done. {storyboard.iteration} iterations, "
             f"{len(storyboard.shots)} shots, {len(sorted_clips)} clips."
         )
+        # Terminal aggregatables for the planning loop. The autonomous
+        # orchestrator emits an outer ``vea.phase2.*`` block too; these are
+        # tagged ``planning.final.*`` so they're distinguishable in the JSON
+        # logs even if the loop is driven outside the autonomous orchestrator.
+        metric("vea.planning.final.iterations", storyboard.iteration)
+        metric("vea.planning.final.shots", len(storyboard.shots))
+        metric("vea.planning.final.clips", len(sorted_clips))
         return storyboard
 
     # -------------------------------------------------------------------------
@@ -271,14 +293,21 @@ class IterativePlanningLoop:
         prompt_contents = [DECIDE_TOOL_CALLS_SYSTEM, user_content]
 
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.gemini.LLM_request(prompt_contents, schema=ToolCallPlan),
+            # PORT NOTE: was self.gemini.LLM_request wrapped in run_in_executor
+            # (sync VEA manager). Now using lvmm-core ILLM.generate_structured
+            # directly — natively async, returns (parsed, usage) tuple.
+            result, usage = await self.gemini.generate_structured(
+                messages_from_prompts(prompt_contents),
+                ToolCallPlan,
             )
-            if isinstance(result, ToolCallPlan):
-                return result
-            # Fallback: parse raw JSON text
-            return ToolCallPlan.model_validate_json(result)
+            # Cost-tracking metric: per-iteration token usage for Call A.
+            # Tagged with iteration so we can aggregate "tokens per iteration"
+            # across runs to spot drift in planning-prompt size.
+            metric("vea.planning.call_a.input_tokens", usage.input_tokens, iteration=iteration)
+            metric("vea.planning.call_a.output_tokens", usage.output_tokens, iteration=iteration)
+            metric("vea.planning.call_a.chats", len(result.chat_calls), iteration=iteration)
+            metric("vea.planning.call_a.searches", len(result.search_calls), iteration=iteration)
+            return result
         except Exception as e:
             logger.error(f"[PLAN] Call A failed at iteration {iteration}: {e}")
             return ToolCallPlan(
@@ -332,7 +361,16 @@ class IterativePlanningLoop:
         return new_context, new_clips
 
     async def _run_chat(self, question: str, purpose: str, iteration: int) -> tuple[str, Any]:
-        """Run a Memories.ai chat call. Returns ("chat", context_text)."""
+        """Ask MaviAgent and return ("chat", context_text).
+
+        PORT NOTE: scope MaviAgent's retrieval to the current workspace's
+        videos via the explicit ``video_ids`` kwarg. An earlier draft of
+        this method only passed a single ``video_id`` (and fell back to
+        ``None`` for >1 video), which left MaviAgent searching the entire
+        shared ``~/lvmm-data/local.db`` — content from previous workspaces /
+        indexing runs would leak into the chat answers and contaminate the
+        storyboard. ``video_ids=self.video_nos`` makes the scope explicit.
+        """
         await self._emit("tool_call", {
             "iteration": iteration,
             "type": "chat",
@@ -340,16 +378,11 @@ class IterativePlanningLoop:
             "purpose": purpose,
         })
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.memories.chat(self.video_nos, question),
+            trace = await self.mavi_agent.ask(
+                question,
+                video_ids=self.video_nos or None,
             )
-            # response is typically a dict with "text" or a raw string
-            if isinstance(response, dict):
-                text = response.get("text") or response.get("response") or str(response)
-            else:
-                text = str(response)
+            text = trace.answer or ""
 
             context_block = (
                 f"\n--- Chat Q [{iteration}]: {question} ---\n"
@@ -371,7 +404,13 @@ class IterativePlanningLoop:
     async def _run_search(
         self, query: str, purpose: str, target_duration: float, iteration: int
     ) -> tuple[str, List[RetrievedClip]]:
-        """Run a Memories.ai search call. Returns ("clips", List[RetrievedClip])."""
+        """Run a Searcher vector search and return ("clips", List[RetrievedClip]).
+
+        PORT NOTE: memories.ai's BY_CLIP mode mapped onto lvmm-core's
+        VIDEO_TRANSCRIPT + TRANSCRIPT collections — both carry time-windowed
+        text content (visual captions and spoken dialogue respectively), which
+        is what the storyboard planning prompt expects to compose with.
+        """
         await self._emit("tool_call", {
             "iteration": iteration,
             "type": "search",
@@ -379,12 +418,16 @@ class IterativePlanningLoop:
             "purpose": purpose,
         })
         try:
-            loop = asyncio.get_event_loop()
-            raw_results = await loop.run_in_executor(
-                None,
-                lambda: self.memories.search(query, search_type="BY_CLIP"),
+            from lvmm_core.core.retrieval.luci_memory.types import (
+                SearchRequest, Collection,
             )
-            clips = self._parse_search_results(raw_results, query, purpose)
+            response = await self.searcher.search(SearchRequest(
+                query=query,
+                collections=[Collection.VIDEO_TRANSCRIPT, Collection.TRANSCRIPT],
+                video_ids=self.video_nos or None,
+                top_k=20,
+            ))
+            clips = self._parse_search_results(response.hits, query, purpose)
             await self._emit("tool_result", {
                 "iteration": iteration,
                 "type": "search",
@@ -399,46 +442,22 @@ class IterativePlanningLoop:
             return "clips", []
 
     def _parse_search_results(
-        self, raw: Any, query: str, purpose: str
+        self, hits: List[Any], query: str, purpose: str
     ) -> List[RetrievedClip]:
-        """
-        Convert raw Memories.ai search response into RetrievedClip list.
+        """Convert lvmm-core Hit objects into RetrievedClip records.
 
-        The Memories.ai search API returns something like:
-        {
-          "results": [
-            {
-              "videoNo": "abc123",
-              "startTime": 12.5,
-              "endTime": 17.3,
-              "score": 0.82,
-              "description": "..."
-            },
-            ...
-          ]
-        }
-        Exact schema may vary — be defensive.
+        ``hits`` is a list of ``lvmm_core.core.retrieval.luci_memory.types.Hit``
+        with fields: video_id, start_time, end_time, text, score, collection.
         """
         clips: List[RetrievedClip] = []
-        if not raw:
-            return clips
-
-        items: List[dict] = []
-        if isinstance(raw, dict):
-            items = raw.get("results") or raw.get("clips") or raw.get("data") or []
-        elif isinstance(raw, list):
-            items = raw
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
+        for h in hits or []:
             try:
-                video_no = item.get("videoNo") or item.get("video_no", "")
+                video_no = getattr(h, "video_id", "") or ""
                 entry = self._video_map.get(video_no)
-                start = float(item.get("startTime") or item.get("start_seconds") or 0)
-                end = float(item.get("endTime") or item.get("end_seconds") or 0)
-                score = float(item.get("score") or item.get("relevance") or 0)
-                desc = item.get("description") or item.get("text") or ""
+                start = float(getattr(h, "start_time", None) or 0)
+                end = float(getattr(h, "end_time", None) or 0)
+                score = float(getattr(h, "score", 0) or 0)
+                desc = getattr(h, "text", "") or ""
 
                 clip = RetrievedClip(
                     video_no=video_no,
@@ -452,7 +471,7 @@ class IterativePlanningLoop:
                 )
                 clips.append(clip)
             except Exception as e:
-                logger.warning(f"[PLAN] Failed to parse clip item: {item}: {e}")
+                logger.warning(f"[PLAN] Failed to parse hit {h}: {e}")
         return clips
 
     # -------------------------------------------------------------------------
@@ -483,13 +502,14 @@ class IterativePlanningLoop:
         prompt_contents = [UPDATE_STORYBOARD_SYSTEM, user_content]
 
         try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.gemini.LLM_request(prompt_contents, schema=Storyboard),
+            result, usage = await self.gemini.generate_structured(
+                messages_from_prompts(prompt_contents),
+                Storyboard,
             )
-            if isinstance(result, Storyboard):
-                return result
-            return Storyboard.model_validate_json(result)
+            metric("vea.planning.call_b.input_tokens", usage.input_tokens, iteration=iteration)
+            metric("vea.planning.call_b.output_tokens", usage.output_tokens, iteration=iteration)
+            metric("vea.planning.call_b.shots", len(result.shots), iteration=iteration)
+            return result
         except Exception as e:
             logger.error(f"[PLAN] Call B failed at iteration {iteration}: {e}")
             # Return existing storyboard unchanged

@@ -211,16 +211,20 @@ async def _ensure_indexed(
         await emitter("index_skipped", {"reason": "session.json exists and --reuse-index is set"})
         return
 
-    if not services.memories_manager:
+    # lvmm-core has to be initialised before indexing. The CLI runs outside
+    # FastAPI's lifespan hook so we trigger it here on first need.
+    await services.init_lvmm()
+    if not services.mavi_agent or not services.lvmm_ctx:
         raise RuntimeError(
-            "Memories.ai is not configured (MEMORIES_API_KEY). "
-            "The v2 agent cannot run without video indexing."
+            "lvmm-core failed to initialise. Check OPENROUTER_API_KEY / "
+            "GEMINI_API_KEY in .env and the server logs."
         )
 
     pipeline = LightweightComprehension(
         project_name=workspace.project_name,
         source_dir=str(workspace.get_footage_dir()),
-        memories=services.memories_manager,
+        lvmm_ctx=services.lvmm_ctx,
+        mavi_agent=services.mavi_agent,
         workspace=workspace,
     )
 
@@ -292,10 +296,13 @@ async def _run(args: argparse.Namespace) -> int:
 
     # Build the agent session in autonomous mode — CLI runs are non-interactive
     # by definition (no WebSocket back-channel for the agent to message).
+    # lvmm-core handles came up during _ensure_indexed; if they're still None
+    # something went sideways and the build below will surface a clear error.
     agent = AgentSession(
         project_name=args.project,
         workspace=workspace,
-        memories_manager=services.memories_manager,
+        mavi_agent=services.mavi_agent,
+        searcher=services.searcher,
         gemini_manager=services.main_llm,
         video_llm=services.video_llm,
         video_entries=session_data.videos,

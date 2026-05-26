@@ -94,7 +94,8 @@ class AgentSession:
         self,
         project_name: str,
         workspace,
-        memories_manager,
+        mavi_agent,
+        searcher,
         gemini_manager,
         video_entries: list,
         emit: Callable[..., Coroutine],
@@ -104,7 +105,12 @@ class AgentSession:
     ):
         self.project_name = project_name
         self.workspace = workspace
-        self.memories = memories_manager
+        # Video-understanding handles from lvmm-core. ``mavi_agent.ask(...)``
+        # replaces the old ``memories_manager.chat(...)``; ``searcher.search(...)``
+        # replaces ``memories_manager.search_by_clip(...)``. Both come from
+        # ``src.services`` after ``init_lvmm()`` has run.
+        self.mavi_agent = mavi_agent
+        self.searcher = searcher
         # ``mode`` selects the agent's temperament (collaborative = deferential
         # to a user in the loop; autonomous = perfectionist, non-interactive,
         # used by the CLI/MCP). ``autonomous: bool`` is a legacy kwarg kept
@@ -255,7 +261,8 @@ class AgentSession:
                 self._event_log.append({"type": event_type, "data": data})
 
         self.tools = ToolExecutor(
-            memories_manager=memories_manager,
+            mavi_agent=mavi_agent,
+            searcher=searcher,
             gemini_manager=gemini_manager,
             video_llm=self.video_llm,
             workspace=workspace,
