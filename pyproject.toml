@@ -81,6 +81,11 @@ dependencies = [
     "elevenlabs>=1.0.0",
     "librosa>=0.10.0",
     "pyloudnorm>=0.1.1",
+    # scenedetect is used by refine_clip_timestamps to give the video-LLM
+    # PySceneDetect cut hints. Without it, the tool degrades to "STT word
+    # boundaries only" — still works, but less accurate cuts at scene
+    # changes. The tool_prereqs module surfaces this if it's ever missing.
+    "scenedetect>=0.6.0",
     "torch>=2.0.0",
     "pydavinci>=0.3.0",
     # lvmm-core supplies the L0-L2 video-understanding stack (indexing

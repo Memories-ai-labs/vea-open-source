@@ -46,6 +46,14 @@ async def lifespan(app: FastAPI):
         # before using it.
         logger.exception("lvmm-core initialization failed at startup")
 
+    # Tool-level dependency check — surfaces silently-degraded tools at
+    # startup instead of mid-edit. ``select_music`` losing beat detection
+    # because librosa is missing, or ``refine_clip_timestamps`` losing
+    # PySceneDetect cut hints, used to be discoverable only when a user
+    # ran the affected tool. Now those gaps print on stderr at boot.
+    from src.pipelines.v2.tool_prereqs import log_check_results
+    log_check_results()
+
     yield
 
     try:

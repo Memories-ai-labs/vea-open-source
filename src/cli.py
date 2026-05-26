@@ -220,6 +220,12 @@ async def _ensure_indexed(
             "GEMINI_API_KEY in .env and the server logs."
         )
 
+    # Tool-level dependency check — same as app.py lifespan does for the
+    # dashboard. Catches missing scenedetect/librosa/etc. before the
+    # agent loop discovers them mid-run.
+    from src.pipelines.v2.tool_prereqs import log_check_results
+    log_check_results()
+
     pipeline = LightweightComprehension(
         project_name=workspace.project_name,
         source_dir=str(workspace.get_footage_dir()),
