@@ -104,6 +104,10 @@ async def v2_index(request: V2IndexRequest):
             gist=session.gist,
             status=session.status,
         )
+    except HTTPException:
+        # Already-shaped HTTP errors (e.g. 503 lvmm-core unavailable) — let
+        # them propagate with their own status, don't re-wrap as 500.
+        raise
     except Exception as e:
         logger.error(f"[V2 INDEX] Error: {e}")
         logger.error(traceback.format_exc())

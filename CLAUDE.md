@@ -4,16 +4,30 @@ Orientation for AI coding assistants (Codex, Claude Code, etc.) working in this 
 
 ## What this project is
 
-VEA is a video editing automation service. The current product is a **conversational editing agent** that runs in a React dashboard. A user drops video files into a workspace, the system indexes them via Memories.ai, and an LLM-driven agent collaborates with the user in chat to plan, refine, and compile a Final Cut Pro XML edit. Drafts auto-render via FFmpeg; high-quality finals can render via DaVinci Resolve.
+VEA is a video editing automation service. The current product is a **conversational editing agent** that runs in a React dashboard. A user drops video files into a workspace, the system indexes them **locally via lvmm-core** (frame embeddings via MobileCLIP-PyTorch in-process, visual captions via Gemini VLM, vector search via sqlite-vec), and an LLM-driven agent collaborates with the user in chat to plan, refine, and compile a Final Cut Pro XML edit. Drafts auto-render via FFmpeg; high-quality finals can render via DaVinci Resolve.
 
 There is also a legacy V1 pipeline (videoComprehension → flexibleResponse → ...) at `src/pipelines/` that is kept for reproducibility of the paper. **Most active development happens in V2.** Don't conflate the two.
+
+### Dependency on lvmm-core
+
+V2's video understanding (indexing, retrieval, RAG chat) is delegated to the sibling repo `lvmm-core`. VEA assumes lvmm-core is checked out as a sibling directory next to `vea-open-source/`. The path dep is wired in `pyproject.toml` under `[tool.uv.sources]` and rebuilt via `uv sync`.
+
+Three module-level handles in `src/services.py` carry the lvmm-core surface that the rest of VEA uses:
+
+| Handle | What it is | Used by |
+|---|---|---|
+| `services.lvmm_ctx` | lvmm-core `PipelineContext` (DB, vector_db, adapters) | indexing + housekeeping |
+| `services.searcher` | `luci_memory.Searcher` for vector clip search | planning loop + `search_footage` tool |
+| `services.mavi_agent` | `MaviAgent` for RAG chat (rewrite → search → rerank → answer) | Phase 1 gist + `ask_memories` tool |
+
+They're populated by an async `init_lvmm()` factory wired into FastAPI's lifespan startup hook (`src/app.py`). The CLI (`src/cli.py`) calls `init_lvmm()` itself since it runs outside FastAPI's lifespan.
 
 ## Key directories
 
 ```
 src/
 ├── app.py                          # FastAPI entrypoint (port 8000)
-├── services.py                     # Shared singletons (main_llm, video_llm, Memories.ai, agent sessions)
+├── services.py                     # Shared singletons (main_llm, video_llm, lvmm-core handles, agent sessions)
 ├── cli.py                          # One-shot CLI (vea-oneshot) for non-interactive runs
 ├── routes/                         # FastAPI routers
 │   ├── _route_utils.py             # Path-safety helpers (workspace resolution)
@@ -48,9 +62,8 @@ src/
 └── config.py                       # Config loading, paths, env var population
 lib/
 ├── llm/
-│   ├── MemoriesAiManager.py        # Memories.ai client (upload, chat, search)
-│   ├── GeminiGenaiManager.py       # Vertex AI Gemini client
-│   └── OpenRouterManager.py        # OpenRouter (drop-in replacement for Gemini)
+│   ├── GeminiGenaiManager.py       # Vertex AI Gemini client (used by video_llm for native-video tasks)
+│   └── OpenRouterManager.py        # OpenRouter client (used by main_llm for text + tool-calling)
 └── utils/
     ├── media.py                    # ffmpeg/ffprobe helpers
     ├── resolve_setup.py            # DaVinci Resolve health check / pythonpath
@@ -69,7 +82,11 @@ tests/v2/                           # pytest suite (230+ tests, offline)
 ## Setup commands
 
 ```bash
-# Install everything (Python deps via uv, dashboard deps + build)
+# Sibling-checkout layout — lvmm-core must live next to vea-open-source.
+git clone git@github.com:Memories-ai-labs/lvmm-core.git  # if you don't have it
+
+# Install everything (Python deps via uv, dashboard deps + build).
+# `uv sync` picks up lvmm-core as a path dep automatically via [tool.uv.sources].
 uv sync
 cd dashboard && npm install && npm run build && cd ..
 
@@ -87,6 +104,8 @@ python -m src.app
 The dashboard is served at **http://localhost:8000/app**. API docs at **http://localhost:8000/docs**.
 
 System dependency: `ffmpeg` must be installed (`brew install ffmpeg` or distro equivalent).
+
+First-run note: lvmm-core's MobileCLIP-PyTorch adapter auto-downloads Apple's `mobileclip_s1.pt` checkpoint (~325 MB) to `~/lvmm-data/models/` on the first indexing call. Subsequent runs are instant.
 
 ## LLM providers (main_llm vs video_llm)
 
@@ -121,8 +140,8 @@ Declared in `src/pipelines/v2/agent/tool_definitions.py`, executed by `ToolExecu
 
 | Tool | Purpose |
 |------|---------|
-| `ask_memories` | Memories.ai chat (Q&A about footage) |
-| `search_footage` | Memories.ai BY_CLIP search (returns clips + transcripts) |
+| `ask_memories` | lvmm-core `MaviAgent.ask` — RAG chat over the indexed footage (Q&A) |
+| `search_footage` | lvmm-core `Searcher.search` over TRANSCRIPT + VIDEO_TRANSCRIPT collections — returns clips with optional dialogue context |
 | `refine_clip_timestamps` | ffmpeg extract → PySceneDetect boundaries + ElevenLabs STT word grid → video LLM two-pass (reasoning + structured) for in/out points. Auto-retries with wider window if speech is truncated. |
 | `update_scratchpad` | Write to `comprehension` / `creative_direction` / `planning` / `fcpxml` |
 | `generate_fcpxml` | Validate clips against ffprobe durations and narration word-grid, compile EditDecision → FCPXML (with `workspace_root` for absolute audio paths), kick off draft render as a background task. |
@@ -202,8 +221,9 @@ Tagged prefixes make backend logs easy to grep:
 
 * `[AGENT]` — agent loop, tool execution
 * `[AGENT WS]` — WebSocket lifecycle
-* `[MEMORIES]` — Memories.ai API calls
-* `[COMPREHENSION]` — V2 indexing
+* `[COMPREHENSION]` — V2 indexing (Phase 1)
+* `[PLAN]` — iterative planning loop (Phase 2)
+* `lvmm_core.*` — every line from the lvmm-core sub-tree (indexing pipeline, Searcher, MaviAgent). Carries auto-injected `[pipeline=… stage=… run_id=…]` context tags when run through lvmm-core's structured-logging setup.
 * `[COMPILER]` — FCPXML compiler
 * `[LOUDNESS]` — LUFS measurement
 * `[RENDER]` — draft/final rendering
