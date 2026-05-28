@@ -51,22 +51,30 @@ def make_storyboard(n_shots=2, iteration=1) -> Storyboard:
 
 
 def make_search_hits():
-    """Simulate lvmm-core Searcher hits."""
+    """Simulate lvmm-core Querier hits.
+
+    Querier.search returns list[dict] (since commit 330a34c — the old Hit
+    namespace was replaced with dicts). _parse_search_results expects keys
+    ``video_id``, ``start_time``, ``end_time``, ``transcript``/``text``,
+    ``similarity``/``score``.
+    """
     return [
-        SimpleNamespace(
-            video_id="v1",
-            start_time=10.0,
-            end_time=20.0,
-            score=0.85,
-            text="Speaker at podium",
-        ),
-        SimpleNamespace(
-            video_id="v1",
-            start_time=50.0,
-            end_time=65.0,
-            score=0.72,
-            text="Audience reaction",
-        ),
+        {
+            "video_id": "v1",
+            "start_time": 10.0,
+            "end_time": 20.0,
+            "similarity": 0.85,
+            "text": "Speaker at podium",
+            "collection": "video_transcript",
+        },
+        {
+            "video_id": "v1",
+            "start_time": 50.0,
+            "end_time": 65.0,
+            "similarity": 0.72,
+            "text": "Audience reaction",
+            "collection": "video_transcript",
+        },
     ]
 
 
@@ -91,12 +99,19 @@ class FakeMaviAgent:
         return SimpleNamespace(answer="answer", reranked_hits=1, search_hits=1)
 
 
-class FakeSearcher:
+class FakeQuerier:
+    """Replaces the old FakeSearcher after the lvmm-core Searcher→Querier rename.
+
+    Mirrors the real ``luci_memory.Querier.search`` signature:
+    ``search(question, user_id, video_ids, top_k, collections, time_range)``.
+    Returns ``list[dict]`` directly (no SimpleNamespace wrapper).
+    """
     def __init__(self, hits=None):
         self.hits = hits if hits is not None else make_search_hits()
 
-    async def search(self, request):
-        return SimpleNamespace(hits=list(self.hits))
+    async def search(self, question, user_id=None, video_ids=None,
+                     top_k=10, collections=None, time_range=None):
+        return list(self.hits)
 
 
 def make_loop(
@@ -112,7 +127,7 @@ def make_loop(
         project_name="test_plan",
         user_prompt="test prompt",
         workspace=workspace,
-        searcher=FakeSearcher(search_hits),
+        querier=FakeQuerier(search_hits),
         mavi_agent=FakeMaviAgent(),
         gemini=FakeGemini(gemini_outputs),
         video_nos=["v1"],

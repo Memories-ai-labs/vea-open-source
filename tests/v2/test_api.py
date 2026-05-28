@@ -81,7 +81,7 @@ def test_v2_index_missing_lvmm(client, tmp_path, monkeypatch):
 def test_v2_plan_project_not_found(client, tmp_path, monkeypatch):
     monkeypatch.setattr("src.config.WORKSPACES_DIR", tmp_path)
     monkeypatch.setattr("src.services.mavi_agent", MagicMock())
-    monkeypatch.setattr("src.services.searcher", MagicMock())
+    monkeypatch.setattr("src.services.querier", MagicMock())
     monkeypatch.setattr("src.services.lvmm_ctx", MagicMock())
     monkeypatch.setattr("src.services.gemini_manager", MagicMock())
     resp = client.post("/video-edit/v2/plan", json={
@@ -94,7 +94,7 @@ def test_v2_plan_project_not_found(client, tmp_path, monkeypatch):
 def test_v2_plan_starts_for_existing_project(client, project_workspace, monkeypatch):
     ws, tmp_path = project_workspace
     monkeypatch.setattr("src.services.mavi_agent", MagicMock())
-    monkeypatch.setattr("src.services.searcher", MagicMock())
+    monkeypatch.setattr("src.services.querier", MagicMock())
     monkeypatch.setattr("src.services.lvmm_ctx", MagicMock())
     monkeypatch.setattr("src.services.gemini_manager", MagicMock())
 
