@@ -9,7 +9,10 @@ lvmm-core's local stack. Three module-level handles replace what used
 to be ``memories_manager``:
 
   * ``lvmm_ctx``       — lvmm-core PipelineContext (adapters + DB + storage)
-  * ``searcher``       — luci_memory.Searcher for vector clip search
+  * ``querier``        — luci_memory.Querier for vector clip search
+                         (renamed upstream from Searcher in lvmm-core
+                         commit 330a34c — kept this alias name in VEA so
+                         call sites read naturally)
   * ``mavi_agent``     — MaviAgent for RAG-style chat (rewrite → search →
                          rerank → answer)
 
@@ -220,12 +223,19 @@ _indexing_progress: Dict[str, dict] = {}
 # singletons:
 #   - lvmm_ctx        : lvmm-core PipelineContext (carries LLM, embedding,
 #                       storage, database, vector_db adapter instances).
-#   - searcher        : core/retrieval/luci_memory/Searcher — vector clip
+#   - querier         : core/retrieval/luci_memory/Querier — vector clip
 #                       search facade. Independent of any LLM. Used by the
 #                       planning loop and AgentSession's search_footage tool.
+#                       (Was named ``Searcher`` until lvmm-core commit
+#                       330a34c renamed it; ctor now also takes ``database``.)
 #   - mavi_agent      : agents/MaviAgent — fixed-pipeline RAG agent.
-#                       query-rewrite → search → rerank → answer.
+#                       query-rewrite → parallel search → rerank → answer.
 #                       Used by Phase 1 gist + AgentSession's ask_memories tool.
+#                       (Ctor now takes ``querier=`` not ``searcher=``;
+#                       ``ask`` no longer accepts a video_ids list — only a
+#                       single ``video_id``. VEA passes the first video_id
+#                       when there is more than one — see ``ToolExecutor.
+#                       _ask_memories``.)
 #
 # Lazy-initialised via ``init_lvmm()`` (called from app.py's lifespan
 # startup hook) because lvmm-core's ``build_local_context`` is async.
@@ -234,7 +244,7 @@ _indexing_progress: Dict[str, dict] = {}
 
 lvmm_ctx = None  # type: ignore[assignment]
 lvmm_lifecycle = None  # type: ignore[assignment]
-searcher = None  # type: ignore[assignment]
+querier = None  # type: ignore[assignment]
 mavi_agent = None  # type: ignore[assignment]
 
 
@@ -253,13 +263,13 @@ async def init_lvmm() -> None:
     tags when inside a ``Pipeline.execute()`` call. Complements VEA's
     per-project ``logging_setup.py`` bundle.
     """
-    global lvmm_ctx, lvmm_lifecycle, searcher, mavi_agent
+    global lvmm_ctx, lvmm_lifecycle, querier, mavi_agent
     if lvmm_ctx is not None:
         return
 
     try:
         from lvmm_core.services.local_dev import build_local_context
-        from lvmm_core.core.retrieval.luci_memory.searcher import Searcher
+        from lvmm_core.core.retrieval.luci_memory.querier import Querier
         from lvmm_core.agents.mavi_agent import MaviAgent
         from lvmm_core.utils.logging import setup_logging
     except ImportError:
@@ -285,11 +295,12 @@ async def init_lvmm() -> None:
         asr="none",    # nor its ASR pipeline
         diarization="none",
     )
-    searcher = Searcher(
-        vector_db=lvmm_ctx.vector_db,
-        text_embedding=lvmm_ctx.text_embedding,
+    querier = Querier(
+        lvmm_ctx.vector_db,
+        lvmm_ctx.text_embedding,
+        lvmm_ctx.database,
     )
-    mavi_agent = MaviAgent(llm=lvmm_ctx.llm, searcher=searcher)
+    mavi_agent = MaviAgent(llm=lvmm_ctx.llm, querier=querier)
     logger.info(
         f"lvmm-core initialised (provider={_lvmm_provider}, "
         "embedding=mobileclip-pytorch, SQLite local DB)"
@@ -301,7 +312,7 @@ async def close_lvmm() -> None:
 
     Safe to call from FastAPI's shutdown hook or any async exit path.
     """
-    global lvmm_ctx, lvmm_lifecycle, searcher, mavi_agent
+    global lvmm_ctx, lvmm_lifecycle, querier, mavi_agent
     if lvmm_lifecycle is not None:
         try:
             await lvmm_lifecycle.close()
@@ -309,5 +320,5 @@ async def close_lvmm() -> None:
             logger.warning(f"lvmm-core shutdown raised: {e}")
         lvmm_ctx = None
         lvmm_lifecycle = None
-        searcher = None
+        querier = None
         mavi_agent = None

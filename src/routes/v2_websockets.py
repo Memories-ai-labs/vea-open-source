@@ -107,7 +107,7 @@ def register_websocket_routes(app: FastAPI):
         logger.info(f"[AGENT WS] Client connected for project={project_name}")
 
         # Validate dependencies
-        if not services.mavi_agent or not services.searcher:
+        if not services.mavi_agent or not services.querier:
             await websocket.send_json({"type": "error", "data": {"message": "lvmm-core not initialised. Check server startup logs."}})
             await websocket.close()
             return
@@ -160,7 +160,7 @@ def register_websocket_routes(app: FastAPI):
                     project_name=project_name,
                     workspace=workspace,
                     mavi_agent=services.mavi_agent,
-                    searcher=services.searcher,
+                    querier=services.querier,
                     gemini_manager=services.main_llm,
                     video_llm=services.video_llm,
                     video_entries=session_data.videos,

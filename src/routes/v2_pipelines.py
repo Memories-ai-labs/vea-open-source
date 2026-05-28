@@ -124,7 +124,7 @@ async def v2_plan(request: V2PlanRequest):
 
     Returns immediately with {"status": "started"} or {"status": "already_running"}.
     """
-    if not services.mavi_agent or not services.searcher:
+    if not services.mavi_agent or not services.querier:
         raise HTTPException(
             status_code=503,
             detail="lvmm-core not initialised. Check server startup logs.",
@@ -164,7 +164,7 @@ async def v2_plan(request: V2PlanRequest):
         project_name=project_name,
         user_prompt=request.prompt,
         workspace=workspace,
-        searcher=services.searcher,
+        querier=services.querier,
         mavi_agent=services.mavi_agent,
         gemini=services.gemini_manager,
         video_nos=video_nos,

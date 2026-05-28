@@ -12,9 +12,9 @@ understanding happens on-demand during the iterative planning loop.
 PORT NOTE (2026-05-19): Migrated from memories.ai-hosted indexing. Where
 this module used to call ``MemoriesAiManager.upload_video_url`` +
 ``wait_for_ready`` + ``chat(GIST_PROMPT)`` per video, it now runs:
-  1. ``master_indexing.execute({"video_path": ...})`` → fills SQLite
-  2. ``index_transcripts(...)``                          → fills vector_db
-  3. ``mavi_agent.ask(GIST_PROMPT, video_id=...)``       → produces gist
+  1. ``build_indexing_pipeline("classic").execute({"video_path": ...})``
+     → fills SQLite **and** vector_db (StoreVisualStage handles both).
+  2. ``mavi_agent.ask(GIST_PROMPT, video_id=...)``      → produces gist
 
 Sequential per video for now; concurrent indexing is a follow-up (see
 the workspace-level notes file).
@@ -297,9 +297,11 @@ class LightweightComprehension:
     async def _index_one(self, video_path: Path) -> VideoEntry:
         """Index a single video locally and return a VideoEntry.
 
-        Two-step process: run the master_indexing DAG (fills SQLite +
-        artefacts) then call ``index_transcripts`` to populate sqlite-vec
-        so the Searcher can find the new content.
+        Runs the lvmm-core ``classic`` indexing DAG, which includes
+        ``StoreVisualStage`` — that stage writes both the SQLite rows
+        (videos / video_transcripts / segments / summary) and the
+        sqlite-vec collections (vec_video_transcript / vec_keyframe /
+        vec_transcript / summary). One pipeline.execute() does it all.
         """
         # PORT NOTE (2026-05-19): use the visual-only indexing pipeline
         # (build_indexing_pipeline) instead of build_master_indexing_pipeline.
@@ -310,7 +312,6 @@ class LightweightComprehension:
         # Adding audio + face indexing is a follow-up if/when VEA wants to
         # search dialogue or filter by person.
         from lvmm_core.pipelines.indexing.video_indexing import build_indexing_pipeline
-        from lvmm_core.core.retrieval.luci_memory.indexer import index_transcripts
 
         now = datetime.now(timezone.utc).isoformat()
         pipeline = build_indexing_pipeline("classic")
@@ -328,20 +329,12 @@ class LightweightComprehension:
             hooks=self.pipeline_hooks,
         )
 
-        # master_indexing's derive_video_id stage produces the video_id;
-        # downstream stages all reference it. It lands in the result dict.
+        # DeriveVideoIDStage produces the video_id; downstream stages all
+        # reference it. It lands in the result dict.
         video_id = (
             result.get("video_id")
             or result.get("derived_video_id")
             or video_path.stem  # fallback — should never fire in practice
-        )
-
-        # Populate the vector DB so the Searcher can hit these transcripts.
-        await index_transcripts(
-            self.lvmm_ctx.database,
-            self.lvmm_ctx.vector_db,
-            self.lvmm_ctx.text_embedding,
-            video_id,
         )
 
         # Best-effort duration from the result; ffprobe fallback if missing.

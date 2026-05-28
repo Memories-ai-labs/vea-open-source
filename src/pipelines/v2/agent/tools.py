@@ -117,7 +117,7 @@ class ToolExecutor:
     def __init__(
         self,
         mavi_agent,
-        searcher,
+        querier,
         gemini_manager,
         workspace,
         scratchpads: ScratchpadManager,
@@ -128,12 +128,17 @@ class ToolExecutor:
         source_fps: Optional[float] = None,
     ):
         # Video-understanding handles from lvmm-core (replaces the old
-        # memories.ai cloud client). ``mavi_agent.ask(question, video_ids=...)``
-        # backs the ``ask_memories`` tool; ``searcher.search(SearchRequest(...))``
+        # memories.ai cloud client). ``mavi_agent.ask(question, video_id=...)``
+        # backs the ``ask_memories`` tool; ``querier.search(question, ...)``
         # backs the ``search_footage`` tool. Both are constructed in
         # ``src.services.init_lvmm()`` and shared across the app.
+        #
+        # API note: lvmm-core commit 330a34c renamed Searcher → Querier and
+        # changed MaviAgent.ask to take a single ``video_id`` only (no list).
+        # When VEA has >1 indexed video we pass the first id below; cross-
+        # video search still works via the Querier directly (search_footage).
         self.mavi_agent = mavi_agent
-        self.searcher = searcher
+        self.querier = querier
         # ``gemini`` is the main text LLM (may be Claude/GPT via OpenRouter).
         # ``video_llm`` is used for tasks that need native video input
         # (refine_clip_timestamps, verify_preview). If omitted, falls back to
@@ -182,50 +187,64 @@ class ToolExecutor:
     # ── Individual tool implementations ───────────────────────────────────
 
     async def _ask_memories(self, args: Dict) -> Dict:
-        """Backed by lvmm-core's MaviAgent: query rewrite → search → rerank → answer.
+        """Backed by lvmm-core's MaviAgent: query rewrite → parallel search → rerank → answer.
 
         Returns the same shape the agent loop has always seen
-        (``answer`` + optional ``references``), so the rest of the tool
+        (``answer`` + ``reference_count``), so the rest of the tool
         protocol is unchanged.
+
+        ``MaviAgent.ask`` only accepts a single ``video_id`` (no list) since
+        lvmm-core commit 330a34c. We pass the first id when VEA has at least
+        one indexed video; with multiple videos in the project, secondary
+        files are searched via ``search_footage`` instead.
         """
         question = args.get("question", "")
         logger.info(f"[AGENT] ask_memories: {question[:100]}")
 
-        trace = await self.mavi_agent.ask(
-            question,
-            video_ids=self.video_nos or None,
-        )
+        video_id = self.video_nos[0] if self.video_nos else None
+        trace = await self.mavi_agent.ask(question, video_id=video_id)
 
-        result: Dict[str, Any] = {
+        # New MaviTrace splits hit counts by source (videos / video_ts /
+        # audio_ts / keyframes). Sum the reranked totals so the agent sees a
+        # single "how many things did this hit" number, matching the old
+        # ``reference_count`` field.
+        reranked_total = sum(
+            int(getattr(trace, name, 0) or 0)
+            for name in (
+                "reranked_videos",
+                "reranked_video_ts",
+                "reranked_audio_ts",
+                "reranked_keyframes",
+            )
+        )
+        return {
             "answer": trace.answer or "",
-            "reference_count": int(getattr(trace, "reranked_hits", 0) or 0),
+            "reference_count": reranked_total,
         }
-        # MaviAgent's trace doesn't carry per-hit timestamped references the
-        # same way memories.ai's chat response did. The agent gets the gist
-        # via ``answer``; if it needs specific timestamps it should call
-        # ``search_footage`` for that clip directly.
-        return result
 
     async def _search_footage(self, args: Dict) -> Dict:
-        """Backed by lvmm-core's Searcher.
+        """Backed by lvmm-core's Querier.
 
-        Searches the TRANSCRIPT + VIDEO_TRANSCRIPT collections (visual
-        captions + dialogue segments). Returns ``clips`` with the same
-        per-item shape (``video_no``, ``start_seconds``, ``end_seconds``,
+        Searches the ``video_transcript`` (Gemini visual captions) and
+        ``transcript`` (Whisper audio dialogue, if ASR was enabled at
+        indexing) collections. Returns ``clips`` with the same per-item
+        shape (``video_no``, ``start_seconds``, ``end_seconds``,
         ``score``, optional ``transcript``) the agent loop expects.
-        """
-        from lvmm_core.core.retrieval.luci_memory.types import SearchRequest, Collection
 
+        API note: ``Querier.search`` returns ``list[dict]`` keyed by
+        ``video_id``/``start_time``/``end_time``/``similarity``/``transcript``
+        (replacing the old ``RetrievalResponse.hits`` of Hit objects).
+        """
         query = args.get("query", "")
         target_duration = args.get("target_duration_seconds", 5.0)
         logger.info(f"[AGENT] search_footage: {query[:100]}")
 
-        response = await self.searcher.search(SearchRequest(
-            query=query,
-            collections=[Collection.VIDEO_TRANSCRIPT, Collection.TRANSCRIPT],
+        hits = await self.querier.search(
+            query,
             video_ids=self.video_nos or None,
             top_k=15,
-        ))
+            collections=["video_transcript", "transcript"],
+        )
 
         # Fetch transcript once so we can snap endpoints to sentence boundaries
         # and include dialogue context in results. May return [] when ASR
@@ -233,10 +252,10 @@ class ToolExecutor:
         transcript_segments = await self._get_transcript_segments()
 
         clips: List[Dict[str, Any]] = []
-        for hit in response.hits[:15]:
-            video_no = getattr(hit, "video_id", "") or ""
-            start = float(getattr(hit, "start_time", None) or 0)
-            end_raw = getattr(hit, "end_time", None)
+        for hit in hits[:15]:
+            video_no = hit.get("video_id", "") or ""
+            start = float(hit.get("start_time") or 0)
+            end_raw = hit.get("end_time")
             end = float(end_raw) if end_raw is not None else start + target_duration
 
             # If clip is shorter than target, extend to nearest sentence boundary
@@ -246,7 +265,7 @@ class ToolExecutor:
                     desired_end, transcript_segments, direction="forward"
                 )
 
-            score = float(getattr(hit, "score", 0) or 0)
+            score = float(hit.get("similarity") or 0)
 
             # Slice transcript to this clip's time range — same overlap logic
             # as before, just sourced from the lvmm-core DB query.
@@ -280,10 +299,14 @@ class ToolExecutor:
     async def _get_transcript_segments(self) -> List[Dict]:
         """Fetch + cache audio-transcript segments for the first indexed video.
 
-        Reads from lvmm-core's ``audio_transcripts`` table (populated by
-        Whisper when ASR is enabled at indexing time). Returns [] when
-        ASR wasn't enabled — callers should treat empty as "no enrichment
-        available" and not error.
+        Reads from lvmm-core's ``transcript`` table (populated by Whisper
+        when ASR is enabled at indexing time). VEA currently wires
+        ``asr="none"`` in ``services.init_lvmm`` so this returns [] in
+        practice — callers should treat empty as "no enrichment available"
+        and not error.
+
+        (Table was named ``audio_transcripts`` in earlier lvmm-core
+        revisions; the current schema uses ``transcript``.)
         """
         if hasattr(self, '_cached_transcript'):
             return self._cached_transcript
@@ -295,7 +318,7 @@ class ToolExecutor:
             if ctx is None or not self.video_nos:
                 return self._cached_transcript
             video_id = self.video_nos[0]
-            rows = await ctx.database.query("audio_transcripts", {"video_id": video_id})
+            rows = await ctx.database.query("transcript", {"video_id": video_id})
             self._cached_transcript = [
                 {
                     "text": (r.get("text") or r.get("content") or "").strip(),

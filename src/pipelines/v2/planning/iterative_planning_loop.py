@@ -25,8 +25,23 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from lvmm_core.interfaces.llm import ILLM
-from lvmm_core.utils.llm import messages_from_prompts
+from lvmm_core.interfaces.types import Message
 from lvmm_core.utils.logging import metric
+
+
+def _messages_from_prompts(prompts: list[str]) -> list[Message]:
+    """Adapt VEA's ``[system_str, user_str]`` pairs to lvmm-core's Message list.
+
+    Convention: first prompt is treated as system, every subsequent prompt as user.
+    Mirrors what the missing ``lvmm_core.utils.llm.messages_from_prompts`` used to
+    do — kept inline here so we don't depend on a symbol that lvmm-core's current
+    surface doesn't export.
+    """
+    if not prompts:
+        return []
+    return [Message(role="system", content=prompts[0])] + [
+        Message(role="user", content=p) for p in prompts[1:]
+    ]
 from src.pipelines.v2.planning.clip_postprocess import (
     postprocess_clips,
     deduplicate_against_existing,
@@ -83,7 +98,7 @@ class IterativePlanningLoop:
             project_name="my_project",
             user_prompt="Create a 2-min highlight reel of the keynote",
             workspace=workspace_manager,
-            searcher=searcher,          # lvmm-core luci_memory.Searcher
+            querier=querier,            # lvmm-core luci_memory.Querier
             mavi_agent=mavi_agent,      # lvmm-core MaviAgent
             gemini=gemini_manager,
             video_nos=[...],            # lvmm-core video_ids to query
@@ -99,7 +114,7 @@ class IterativePlanningLoop:
         project_name: str,
         user_prompt: str,
         workspace: WorkspaceManager,
-        searcher,                       # lvmm_core.core.retrieval.luci_memory.Searcher
+        querier,                        # lvmm_core.core.retrieval.luci_memory.Querier
         mavi_agent,                     # lvmm_core.agents.mavi_agent.MaviAgent
         gemini: ILLM,
         video_nos: List[str],
@@ -113,7 +128,7 @@ class IterativePlanningLoop:
         self.project_name = project_name
         self.user_prompt = user_prompt
         self.workspace = workspace
-        self.searcher = searcher
+        self.querier = querier
         self.mavi_agent = mavi_agent
         self.gemini = gemini
         self.video_nos = video_nos
@@ -297,7 +312,7 @@ class IterativePlanningLoop:
             # (sync VEA manager). Now using lvmm-core ILLM.generate_structured
             # directly — natively async, returns (parsed, usage) tuple.
             result, usage = await self.gemini.generate_structured(
-                messages_from_prompts(prompt_contents),
+                _messages_from_prompts(prompt_contents),
                 ToolCallPlan,
             )
             # Cost-tracking metric: per-iteration token usage for Call A.
@@ -418,16 +433,13 @@ class IterativePlanningLoop:
             "purpose": purpose,
         })
         try:
-            from lvmm_core.core.retrieval.luci_memory.types import (
-                SearchRequest, Collection,
-            )
-            response = await self.searcher.search(SearchRequest(
-                query=query,
-                collections=[Collection.VIDEO_TRANSCRIPT, Collection.TRANSCRIPT],
+            hits = await self.querier.search(
+                query,
                 video_ids=self.video_nos or None,
                 top_k=20,
-            ))
-            clips = self._parse_search_results(response.hits, query, purpose)
+                collections=["video_transcript", "transcript"],
+            )
+            clips = self._parse_search_results(hits, query, purpose)
             await self._emit("tool_result", {
                 "iteration": iteration,
                 "type": "search",
@@ -444,20 +456,23 @@ class IterativePlanningLoop:
     def _parse_search_results(
         self, hits: List[Any], query: str, purpose: str
     ) -> List[RetrievedClip]:
-        """Convert lvmm-core Hit objects into RetrievedClip records.
+        """Convert lvmm-core Querier hits into RetrievedClip records.
 
-        ``hits`` is a list of ``lvmm_core.core.retrieval.luci_memory.types.Hit``
-        with fields: video_id, start_time, end_time, text, score, collection.
+        ``hits`` is a list of dicts (one per result) with keys ``video_id``,
+        ``start_time``, ``end_time``, ``transcript``/``text``, ``similarity``,
+        and ``collection``. (Before lvmm-core commit 330a34c these were
+        ``Hit`` objects with the same fields as attributes — the dict form
+        is the new contract.)
         """
         clips: List[RetrievedClip] = []
         for h in hits or []:
             try:
-                video_no = getattr(h, "video_id", "") or ""
+                video_no = h.get("video_id", "") or ""
                 entry = self._video_map.get(video_no)
-                start = float(getattr(h, "start_time", None) or 0)
-                end = float(getattr(h, "end_time", None) or 0)
-                score = float(getattr(h, "score", 0) or 0)
-                desc = getattr(h, "text", "") or ""
+                start = float(h.get("start_time") or 0)
+                end = float(h.get("end_time") or 0)
+                score = float(h.get("similarity") or h.get("score") or 0)
+                desc = h.get("transcript") or h.get("text") or ""
 
                 clip = RetrievedClip(
                     video_no=video_no,
@@ -503,7 +518,7 @@ class IterativePlanningLoop:
 
         try:
             result, usage = await self.gemini.generate_structured(
-                messages_from_prompts(prompt_contents),
+                _messages_from_prompts(prompt_contents),
                 Storyboard,
             )
             metric("vea.planning.call_b.input_tokens", usage.input_tokens, iteration=iteration)

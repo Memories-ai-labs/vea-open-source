@@ -308,7 +308,7 @@ async def _run(args: argparse.Namespace) -> int:
         project_name=args.project,
         workspace=workspace,
         mavi_agent=services.mavi_agent,
-        searcher=services.searcher,
+        querier=services.querier,
         gemini_manager=services.main_llm,
         video_llm=services.video_llm,
         video_entries=session_data.videos,
