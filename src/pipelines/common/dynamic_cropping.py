@@ -222,13 +222,22 @@ class ShotDetector:
                 frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                 if manager._frame_size is None:
                     manager._frame_size = (frame_bgr.shape[1], frame_bgr.shape[0])
-                manager._process_frame(idx, frame_bgr, callback=None)
+                # PySceneDetect 0.7's _process_frame(position: FrameTimecode, ...)
+                # and the detectors read ``position.frame_rate`` — a bare int
+                # frame index raises "'int' object has no attribute 'frame_rate'".
+                # Pass a FrameTimecode at this frame index instead.
+                manager._process_frame(base_timecode + idx, frame_bgr, callback=None)
                 manager._last_pos = base_timecode + idx
                 progress.update(1)
         finally:
             progress.close()
 
-        manager._post_process(max(total_frames - 1, 0))
+        # PySceneDetect 0.7's SceneManager._post_process is typed
+        # ``(timecode: FrameTimecode)`` and internally reads ``.frame_rate``
+        # off it — passing a bare int raises "'int' object has no attribute
+        # 'frame_rate'" and silently collapses multi-shot detection to a
+        # single shot. Hand it a FrameTimecode at the final frame instead.
+        manager._post_process(base_timecode + max(total_frames - 1, 0))
         scenes = manager.get_scene_list()
 
         if not scenes:

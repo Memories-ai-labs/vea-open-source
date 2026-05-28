@@ -377,11 +377,18 @@ class LightweightComprehension:
             return ""
 
     async def _all_videos_still_indexed(self, videos: List[VideoEntry]) -> bool:
-        """Return True if every VideoEntry's video_id is still present in the local DB."""
+        """Return True if every VideoEntry's video_id is still present in the local DB.
+
+        Checks the ``summary`` table — lvmm-core's classic IndexingPipeline
+        (StoreVisualStage) writes one summary row per indexed video. (Earlier
+        revisions used a ``videos`` table; the current schema is ``summary``.
+        Querying the wrong name made this always return False → re-index on
+        every call.)
+        """
         try:
             for v in videos:
                 rows = await self.lvmm_ctx.database.query(
-                    "videos", {"video_id": v.video_no}
+                    "summary", {"video_id": v.video_no}
                 )
                 if not rows:
                     return False
@@ -391,30 +398,12 @@ class LightweightComprehension:
             return False
 
     async def _delete_video(self, video_id: str) -> None:
-        """Best-effort: drop all DB rows for a video_id so re-indexing is clean.
+        """Best-effort: drop all of a video's indexed data so re-indexing is clean.
 
-        Touches the tables master_indexing populates: videos, keyframes,
-        video_transcripts, audio_transcripts, persons, face_detections,
-        segments. Missing tables / rows are silently ignored.
+        Delegates to :func:`purge_video_index`, which clears both the
+        relational rows and the sqlite-vec vectors lvmm-core writes per video.
         """
-        tables = [
-            "videos",
-            "keyframes",
-            "video_transcripts",
-            "audio_transcripts",
-            "persons",
-            "face_detections",
-            "segments",
-            "keyframe_meta",
-            "transcript_meta",
-            "video_transcript_meta",
-        ]
-        for t in tables:
-            try:
-                await self.lvmm_ctx.database.delete(t, {"video_id": video_id})
-            except Exception:
-                # Table may not exist, or schema may differ — ignore.
-                pass
+        await purge_video_index(self.lvmm_ctx, video_id)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -429,6 +418,63 @@ class LightweightComprehension:
             videos.extend(self.source_dir.glob(f"*{ext}"))
             videos.extend(self.source_dir.glob(f"*{ext.upper()}"))
         return sorted(set(videos))
+
+
+# Collections (relational table name == vector collection name) that
+# lvmm-core's classic IndexingPipeline (StoreVisualStage) populates per
+# video. The collection name doubles as the sqlite-vec ``vec_<name>`` and
+# ``<name>_meta`` prefix. Keep this in sync with StoreVisualStage in
+# lvmm-core ``pipelines/indexing/video_indexing.py``.
+#
+# (Earlier lvmm-core revisions used plural/legacy names — videos / keyframes
+# / video_transcripts. The current schema is singular. Deleting the old names
+# silently no-ops and leaves the video indexed, so DO NOT revert these.)
+_INDEXED_COLLECTIONS = ("summary", "keyframe", "video_transcript", "transcript")
+
+
+async def purge_video_index(lvmm_ctx, video_id: str) -> None:
+    """Remove ALL of a video's indexed data from lvmm-core's local stores.
+
+    Clears both the relational rows (``summary`` / ``keyframe`` /
+    ``video_transcript`` / ``transcript``) AND the sqlite-vec vectors for
+    ``video_id``. Vectors are enumerated from each ``<collection>_meta``
+    sidecar (which carries a ``video_id`` column) and deleted by id — the
+    adapter's ``delete(collection, id)`` drops both the ``vec_<collection>``
+    row and the ``<collection>_meta`` row.
+
+    Best-effort: missing tables/rows are ignored so a partially-indexed
+    video still cleans up. Used by both per-file re-index (delete-then-
+    reindex) and the dashboard's clear-memories endpoint.
+    """
+    db = getattr(lvmm_ctx, "database", None)
+    vec = getattr(lvmm_ctx, "vector_db", None)
+    if db is None:
+        return
+
+    # 1. Vectors (+ their _meta sidecar rows): enumerate ids per collection
+    #    from the meta table, then delete each via the vector adapter.
+    if vec is not None:
+        for col in _INDEXED_COLLECTIONS:
+            try:
+                rows = await db.query(f"{col}_meta", {"video_id": video_id})
+            except Exception:
+                rows = []
+            for r in (rows or []):
+                vid = r.get("id")
+                if vid is None:
+                    continue
+                try:
+                    await vec.delete(col, str(vid))
+                except Exception:
+                    pass
+
+    # 2. Relational rows.
+    for tbl in _INDEXED_COLLECTIONS:
+        try:
+            await db.delete(tbl, {"video_id": video_id})
+        except Exception:
+            # Table may not exist, or schema may differ — ignore.
+            pass
 
 
 def _probe_duration(video_path: Path) -> Optional[float]:

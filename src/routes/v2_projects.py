@@ -193,24 +193,20 @@ async def v2_clear_memories(project_name: str):
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
 
+    # Per-video purge of lvmm-core's indexed data. Delegates to the shared
+    # ``purge_video_index`` helper so the table/collection names stay in one
+    # place and match lvmm-core's current schema (summary/keyframe/
+    # video_transcript/transcript) — both the relational rows AND the
+    # sqlite-vec vectors are removed.
+    from src.pipelines.v2.comprehension.lightweight_comprehension import purge_video_index
+
     session = workspace.load_session()
     deleted = []
     errors = []
-    # Tables that the indexing pipeline populates per video_id. Best-effort
-    # delete — missing tables / rows are ignored.
-    _TABLES = [
-        "videos", "keyframes", "video_transcripts", "audio_transcripts",
-        "persons", "face_detections", "segments",
-        "keyframe_meta", "transcript_meta", "video_transcript_meta",
-    ]
     for v in session.videos:
         if v.video_no:
             try:
-                for t in _TABLES:
-                    try:
-                        await services.lvmm_ctx.database.delete(t, {"video_id": v.video_no})
-                    except Exception:
-                        pass
+                await purge_video_index(services.lvmm_ctx, v.video_no)
                 deleted.append(v.video_name)
                 v.video_no = ""
             except Exception as e:
