@@ -58,8 +58,8 @@ def _safe_child(directory: Path, name: str) -> Path:
 async def v2_index(request: V2IndexRequest):
     """
     V2: Lightweight video comprehension.
-    Uploads to Memories.ai (or reuses cached video_no), gets a broad gist.
-    Much faster than v1 /index -- no scene-by-scene analysis.
+    Indexes footage locally through lvmm-core (or reuses cached video_no),
+    then gets a broad gist. Much faster than v1 /index -- no scene-by-scene analysis.
 
     source_dir is optional. If omitted, footage is read from the workspace's
     footage/ subdirectory (data/workspaces/{project_name}/footage/).
@@ -124,13 +124,14 @@ async def v2_plan(request: V2PlanRequest):
 
     Returns immediately with {"status": "started"} or {"status": "already_running"}.
     """
-    if not services.mavi_agent or not services.querier:
+    if not services.mavi_agent or not services.querier or not services.lvmm_ctx:
         raise HTTPException(
             status_code=503,
             detail="lvmm-core not initialised. Check server startup logs.",
         )
-    if not services.gemini_manager:
-        raise HTTPException(status_code=500, detail="Gemini not configured. Check GCP credentials.")
+    lvmm_llm = getattr(services.lvmm_ctx, "llm", None)
+    if not lvmm_llm:
+        raise HTTPException(status_code=500, detail="lvmm-core LLM not configured.")
 
     project_name = request.project_name
 
@@ -166,7 +167,7 @@ async def v2_plan(request: V2PlanRequest):
         workspace=workspace,
         querier=services.querier,
         mavi_agent=services.mavi_agent,
-        gemini=services.gemini_manager,
+        gemini=lvmm_llm,
         video_nos=video_nos,
         video_entries=session.videos,
         max_iterations=request.max_iterations,

@@ -1,5 +1,6 @@
 """Tests for narration transcript generation logic in agent/tools.py."""
 import re
+from types import SimpleNamespace
 import pytest
 
 
@@ -159,3 +160,35 @@ def test_source_has_audio_stream_safe_on_missing_file(tmp_path):
     """Probe failure must not raise — caller treats False as 'skip STT'."""
     from src.pipelines.v2.agent.tools import _source_has_audio_stream
     assert _source_has_audio_stream(tmp_path / "nope.mp4") is False
+
+
+@pytest.mark.asyncio
+async def test_ask_memories_queries_each_video_with_current_mavi_signature():
+    """MaviAgent.ask accepts one video_id; VEA must cover multi-source projects."""
+    from src.pipelines.v2.agent.tools import ToolExecutor
+
+    class StrictMaviAgent:
+        def __init__(self):
+            self.calls = []
+
+        async def ask(self, question, video_id=None, user_id=None):
+            self.calls.append(video_id)
+            return SimpleNamespace(
+                answer=f"answer for {video_id}",
+                reranked_videos=1,
+                reranked_video_ts=2,
+                reranked_audio_ts=3,
+                reranked_keyframes=4,
+            )
+
+    mavi = StrictMaviAgent()
+    executor = ToolExecutor.__new__(ToolExecutor)
+    executor.mavi_agent = mavi
+    executor.video_nos = ["v1", "v2"]
+
+    result = await ToolExecutor._ask_memories(executor, {"question": "What happens?"})
+
+    assert mavi.calls == ["v1", "v2"]
+    assert "answer for v1" in result["answer"]
+    assert "answer for v2" in result["answer"]
+    assert result["reference_count"] == 20

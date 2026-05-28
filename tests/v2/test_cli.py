@@ -9,13 +9,16 @@ import asyncio
 import io
 import json
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from src.cli import (
     StdoutEmitter,
     _build_parser,
+    _ensure_indexed,
+    _run,
     _resolve_render_paths,
     _stage_footage,
     _summarize_tool_args,
@@ -62,6 +65,74 @@ class TestParser:
         assert args.reuse_index is True
         assert args.log_format == "jsonl"
         assert args.timeout == 120
+
+
+# ─── Service lifecycle ───────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_ensure_indexed_initializes_lvmm_before_reuse(monkeypatch):
+    """--reuse-index skips indexing, not lvmm setup needed by agent tools."""
+    import src.cli as cli
+
+    async def fake_init_lvmm():
+        cli.services.lvmm_ctx = object()
+        cli.services.mavi_agent = object()
+
+    class CachedWorkspace:
+        project_name = "cached"
+
+        def exists(self):
+            return True
+
+    monkeypatch.setattr(cli.services, "lvmm_ctx", None)
+    monkeypatch.setattr(cli.services, "mavi_agent", None)
+    init_mock = AsyncMock(side_effect=fake_init_lvmm)
+    emitter = AsyncMock()
+    monkeypatch.setattr(cli.services, "init_lvmm", init_mock)
+
+    await _ensure_indexed(CachedWorkspace(), emitter, reuse=True)
+
+    init_mock.assert_awaited_once()
+    emitter.assert_awaited_once_with(
+        "index_skipped",
+        {"reason": "session.json exists and --reuse-index is set"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_closes_lvmm_on_early_return(monkeypatch, tmp_path):
+    """The CLI must release lvmm-core resources before process exit."""
+    import src.cli as cli
+
+    class EmptyWorkspace:
+        def __init__(self, project_name, workspaces_root):
+            self.project_name = project_name
+            self.root = tmp_path / project_name
+
+        def dir_exists(self):
+            return True
+
+        def scan_footage(self):
+            return []
+
+    close_mock = AsyncMock()
+    monkeypatch.setattr(cli, "WorkspaceManager", EmptyWorkspace)
+    monkeypatch.setattr(cli, "_stage_footage", lambda workspace, footage_dir: 0)
+    monkeypatch.setattr(cli.services, "close_lvmm", close_mock)
+
+    args = SimpleNamespace(
+        project="empty",
+        brief="make an edit",
+        footage_dir=None,
+        reuse_index=False,
+        log_format="text",
+        timeout=1,
+    )
+
+    exit_code = await _run(args)
+
+    assert exit_code == 2
+    close_mock.assert_awaited_once()
 
 
 # ─── _stage_footage (symlink in) ─────────────────────────────────────────────

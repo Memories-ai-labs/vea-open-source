@@ -683,6 +683,7 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
     ghostLeft: number;
     targetTrackNum: number;
     sourceTrackNum: number;
+    sourceFamily: TrackFamily;
   } | null>(null);
 
   // Drag-to-pan (only when not dragging a clip)
@@ -771,6 +772,7 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
 
   // ─── Ruler seek ────────────────────────────────────────────────────────
   const seekingRef = useRef(false);
+  const [isSeeking, setIsSeeking] = useState(false);
   const resolveSeekTime = useCallback((clientX: number): number | null => {
     const el = scrollRef.current;
     if (!el || totalDuration <= 0) return null;
@@ -784,6 +786,7 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
     const t = resolveSeekTime(e.clientX);
     if (t != null && onSeek) { onSeek(t); }
     seekingRef.current = true;
+    setIsSeeking(true);
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
   }, [resolveSeekTime, onSeek]);
 
@@ -795,6 +798,7 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
 
   const onRulerPointerUp = useCallback(() => {
     seekingRef.current = false;
+    setIsSeeking(false);
   }, []);
 
   // ─── Clip drag (reorder / retrim) ─────────────────────────────────────
@@ -969,6 +973,7 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
         ghostLeft,
         targetTrackNum,
         sourceTrackNum: drag.sourceTrackNum,
+        sourceFamily: drag.sourceFamily,
       });
     } else if (drag.mode === 'retrim-left' || drag.mode === 'retrim-right') {
       const deltaSec = dx / pxPerSec;
@@ -979,6 +984,7 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
         ghostLeft: 0,
         targetTrackNum: drag.sourceTrackNum,
         sourceTrackNum: drag.sourceTrackNum,
+        sourceFamily: drag.sourceFamily,
       });
 
       // Apply retrim per kind. Route through the PREVIEW channel so we don't
@@ -1347,7 +1353,7 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
             overflowX: 'auto',
             overflowY: 'hidden',
             position: 'relative',
-            cursor: dragRef.current ? 'grabbing' : 'grab',
+            cursor: dragVisual ? 'grabbing' : 'grab',
           }}
         >
           <div style={{ width: timelineWidth, minWidth: '100%', position: 'relative' }}>
@@ -1450,9 +1456,7 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
                     // Only render the indicator on tracks in the same family
                     // as the item being dragged. The drag state carries its
                     // source family; we compare track.family to that.
-                    const drag = dragRef.current;
-                    if (!drag) return null;
-                    if (track.family !== drag.sourceFamily) return null;
+                    if (track.family !== dragVisual.sourceFamily) return null;
                     if (track.trackNum !== dragVisual.targetTrackNum) return null;
                     const indicatorX = dragVisual.ghostLeft;
                     return (
@@ -1527,14 +1531,6 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
                 ghostTop = yOffset + 2;
               } else {
                 // New track — position below the last video track
-                let yOffset = RULER_H;
-                for (const t of tracks) {
-                  if (t.type === 'video') yOffset = RULER_H;
-                  yOffset += t.height + TRACK_BORDER;
-                  if (t.type === 'video') {
-                    // Track the end of the last video track
-                  }
-                }
                 // Find end of all video tracks
                 let lastVideoEnd = RULER_H;
                 for (const t of tracks) {
@@ -1593,7 +1589,7 @@ export function NLETimeline({ editDecision, playheadTime = 0, selectedClipId, cr
                 zIndex: 10,
                 pointerEvents: 'none',
                 boxShadow: '0 0 4px rgba(255,125,111,0.4)',
-                transition: seekingRef.current ? 'none' : 'left 0.1s linear',
+                transition: isSeeking ? 'none' : 'left 0.1s linear',
               }}
             >
               <div

@@ -135,8 +135,8 @@ class ToolExecutor:
         #
         # API note: lvmm-core commit 330a34c renamed Searcher → Querier and
         # changed MaviAgent.ask to take a single ``video_id`` only (no list).
-        # When VEA has >1 indexed video we pass the first id below; cross-
-        # video search still works via the Querier directly (search_footage).
+        # VEA adapts multi-video projects by calling MaviAgent once per
+        # project video and merging the answers.
         self.mavi_agent = mavi_agent
         self.querier = querier
         # ``gemini`` is the main text LLM (may be Claude/GPT via OpenRouter).
@@ -194,31 +194,43 @@ class ToolExecutor:
         protocol is unchanged.
 
         ``MaviAgent.ask`` only accepts a single ``video_id`` (no list) since
-        lvmm-core commit 330a34c. We pass the first id when VEA has at least
-        one indexed video; with multiple videos in the project, secondary
-        files are searched via ``search_footage`` instead.
+        lvmm-core commit 330a34c. For multi-source projects, ask every indexed
+        project video and merge the answers so the tool still covers the full
+        workspace.
         """
         question = args.get("question", "")
         logger.info(f"[AGENT] ask_memories: {question[:100]}")
 
-        video_id = self.video_nos[0] if self.video_nos else None
-        trace = await self.mavi_agent.ask(question, video_id=video_id)
+        video_ids: List[Optional[str]] = list(self.video_nos) or [None]
+        traces = await asyncio.gather(*[
+            self.mavi_agent.ask(question, video_id=video_id)
+            for video_id in video_ids
+        ])
 
-        # New MaviTrace splits hit counts by source (videos / video_ts /
-        # audio_ts / keyframes). Sum the reranked totals so the agent sees a
-        # single "how many things did this hit" number, matching the old
-        # ``reference_count`` field.
-        reranked_total = sum(
-            int(getattr(trace, name, 0) or 0)
-            for name in (
-                "reranked_videos",
-                "reranked_video_ts",
-                "reranked_audio_ts",
-                "reranked_keyframes",
+        answers = []
+        reranked_total = 0
+        for video_id, trace in zip(video_ids, traces):
+            answer = trace.answer or ""
+            if len(video_ids) > 1:
+                answers.append(f"### {video_id or 'all videos'}\n{answer}")
+            else:
+                answers.append(answer)
+
+            # New MaviTrace splits hit counts by source (videos / video_ts /
+            # audio_ts / keyframes). Sum the reranked totals so the agent sees
+            # a single "how many things did this hit" number, matching the old
+            # ``reference_count`` field.
+            reranked_total += sum(
+                int(getattr(trace, name, 0) or 0)
+                for name in (
+                    "reranked_videos",
+                    "reranked_video_ts",
+                    "reranked_audio_ts",
+                    "reranked_keyframes",
+                )
             )
-        )
         return {
-            "answer": trace.answer or "",
+            "answer": "\n\n".join(a for a in answers if a),
             "reference_count": reranked_total,
         }
 
@@ -1169,7 +1181,7 @@ Be concise but specific. Reference timestamps (MM:SS) when possible."""
         2. Add padding buffer around the search window
         3. Extract the padded video segment using ffmpeg
         4. Downsample it for Gemini (lower res, reasonable fps)
-        5. Get dialogue transcription from Memories.ai (video-relative timestamps)
+        5. Get dialogue transcription from ElevenLabs STT (video-relative timestamps)
         6. Send video + transcription + prompt to Gemini with structured output
         7. If Gemini detects truncated speech, auto-retry with a wider window
         8. Return refined start/end timestamps

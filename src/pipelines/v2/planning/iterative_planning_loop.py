@@ -11,7 +11,7 @@ Architecture (unchanged from pre-port):
   - Streams progress events via asyncio.Queue for WebSocket dashboard
 
 PORT NOTE (2026-05-19): Backend swapped from memories.ai HTTP client to
-lvmm-core's local MaviAgent (chat) + Searcher (search). Loop semantics
+lvmm-core's local MaviAgent (chat) + Querier (search). Loop semantics
 unchanged. Tool calls now hit the local SQLite index instead of crossing
 the network.
 """
@@ -378,13 +378,10 @@ class IterativePlanningLoop:
     async def _run_chat(self, question: str, purpose: str, iteration: int) -> tuple[str, Any]:
         """Ask MaviAgent and return ("chat", context_text).
 
-        PORT NOTE: scope MaviAgent's retrieval to the current workspace's
-        videos via the explicit ``video_ids`` kwarg. An earlier draft of
-        this method only passed a single ``video_id`` (and fell back to
-        ``None`` for >1 video), which left MaviAgent searching the entire
-        shared ``~/lvmm-data/local.db`` — content from previous workspaces /
-        indexing runs would leak into the chat answers and contaminate the
-        storyboard. ``video_ids=self.video_nos`` makes the scope explicit.
+        lvmm-core's current MaviAgent only accepts one ``video_id`` per
+        call. For multi-source projects, ask once per project video and
+        merge the answers so the planning context still covers the whole
+        workspace without using the removed ``video_ids`` API.
         """
         await self._emit("tool_call", {
             "iteration": iteration,
@@ -393,11 +390,22 @@ class IterativePlanningLoop:
             "purpose": purpose,
         })
         try:
-            trace = await self.mavi_agent.ask(
-                question,
-                video_ids=self.video_nos or None,
-            )
-            text = trace.answer or ""
+            video_ids: List[Optional[str]] = list(self.video_nos) or [None]
+            traces = await asyncio.gather(*[
+                self.mavi_agent.ask(question, video_id=video_id)
+                for video_id in video_ids
+            ])
+
+            answers = []
+            for video_id, trace in zip(video_ids, traces):
+                answer = trace.answer or ""
+                if len(video_ids) > 1:
+                    entry = self._video_map.get(video_id or "")
+                    label = entry.video_name if entry else (video_id or "all videos")
+                    answers.append(f"### {label}\n{answer}")
+                else:
+                    answers.append(answer)
+            text = "\n\n".join(a for a in answers if a)
 
             context_block = (
                 f"\n--- Chat Q [{iteration}]: {question} ---\n"
@@ -419,7 +427,7 @@ class IterativePlanningLoop:
     async def _run_search(
         self, query: str, purpose: str, target_duration: float, iteration: int
     ) -> tuple[str, List[RetrievedClip]]:
-        """Run a Searcher vector search and return ("clips", List[RetrievedClip]).
+        """Run a Querier vector search and return ("clips", List[RetrievedClip]).
 
         PORT NOTE: memories.ai's BY_CLIP mode mapped onto lvmm-core's
         VIDEO_TRANSCRIPT + TRANSCRIPT collections — both carry time-windowed

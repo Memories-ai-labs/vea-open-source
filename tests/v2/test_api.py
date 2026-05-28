@@ -1,6 +1,7 @@
 """Integration tests for v2 API endpoints using FastAPI TestClient."""
 import json
 import pytest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -111,6 +112,42 @@ def test_v2_plan_starts_for_existing_project(client, project_workspace, monkeypa
     data = resp.json()
     assert data["status"] in ("started", "already_running")
     assert data["project_name"] == "test_proj"
+
+
+def test_v2_plan_uses_lvmm_illm_for_planning_loop(client, project_workspace, monkeypatch):
+    """The legacy /v2/plan loop expects lvmm-core's async ILLM contract."""
+    from src import services
+
+    services._planning_sessions.pop("test_proj", None)
+    lvmm_llm = object()
+    legacy_vea_llm = object()
+
+    monkeypatch.setattr("src.services.mavi_agent", MagicMock())
+    monkeypatch.setattr("src.services.querier", MagicMock())
+    monkeypatch.setattr("src.services.lvmm_ctx", SimpleNamespace(llm=lvmm_llm))
+    monkeypatch.setattr("src.services.gemini_manager", legacy_vea_llm)
+
+    captured = {}
+
+    class DummyPlanningLoop:
+        def __init__(self, *args, **kwargs):
+            captured["gemini"] = kwargs["gemini"]
+
+        async def run(self):
+            return Storyboard(iteration=1, shots=[])
+
+    monkeypatch.setattr(
+        "src.routes.v2_pipelines.IterativePlanningLoop",
+        DummyPlanningLoop,
+    )
+
+    resp = client.post("/video-edit/v2/plan", json={
+        "project_name": "test_proj",
+        "prompt": "Make a 60s recap",
+    })
+
+    assert resp.status_code == 200
+    assert captured["gemini"] is lvmm_llm
 
 
 # ---------------------------------------------------------------------------

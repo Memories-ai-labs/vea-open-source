@@ -95,7 +95,7 @@ class FakeGemini:
 
 
 class FakeMaviAgent:
-    async def ask(self, question, **kwargs):
+    async def ask(self, question, video_id=None, user_id=None):
         return SimpleNamespace(answer="answer", reranked_hits=1, search_hits=1)
 
 
@@ -281,6 +281,47 @@ async def test_loop_parses_search_results(workspace, video_entries):
     assert clips[0].score == pytest.approx(0.85)
 
 
+@pytest.mark.asyncio
+async def test_run_chat_uses_current_mavi_video_id_signature_for_each_video(workspace):
+    entries = [
+        VideoEntry("v1", "a.mp4", "/media/a.mp4", 10.0),
+        VideoEntry("v2", "b.mp4", "/media/b.mp4", 10.0),
+    ]
+
+    class StrictMaviAgent:
+        def __init__(self):
+            self.calls = []
+
+        async def ask(self, question, video_id=None, user_id=None):
+            self.calls.append(video_id)
+            return SimpleNamespace(
+                answer=f"answer for {video_id}",
+                reranked_videos=1,
+                reranked_video_ts=0,
+                reranked_audio_ts=0,
+                reranked_keyframes=0,
+            )
+
+    mavi = StrictMaviAgent()
+    loop = IterativePlanningLoop(
+        project_name="test_plan",
+        user_prompt="test prompt",
+        workspace=workspace,
+        querier=FakeQuerier([]),
+        mavi_agent=mavi,
+        gemini=FakeGemini([]),
+        video_nos=["v1", "v2"],
+        video_entries=entries,
+    )
+
+    kind, context = await loop._run_chat("What happens?", "test", 0)
+
+    assert kind == "chat"
+    assert mavi.calls == ["v1", "v2"]
+    assert "answer for v1" in context
+    assert "answer for v2" in context
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -294,4 +335,3 @@ def _interleave(tool_plans, storyboards):
         if i < len(storyboards):
             result.append(storyboards[i])
     return result
-

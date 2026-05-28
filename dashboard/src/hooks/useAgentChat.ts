@@ -288,6 +288,7 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
   const backoffRef = useRef(500);
   const mountedRef = useRef(true);
   const projectRef = useRef(projectName);
+  const connectRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     projectRef.current = projectName;
@@ -560,13 +561,17 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
       backoffRef.current = Math.min(backoffRef.current * 2, 5000);
       reconnectTimerRef.current = setTimeout(() => {
         if (mountedRef.current && projectRef.current === name) {
-          connect();
+          connectRef.current();
         }
       }, delay);
     };
 
     ws.onerror = () => { ws.close(); };
-  }, []);
+  }, [setEditDecision]);
+
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -616,7 +621,7 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
         wsRef.current = null;
       }
     };
-  }, [projectName, connect]);
+  }, [projectName, connect, setEditDecision]);
 
   const send = useCallback((text: string) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -761,7 +766,7 @@ export function useAgentChat(projectName: string | null): UseAgentChatResult {
     backoffRef.current = 500;
     // Small delay so the backend clear endpoint finishes before reconnect
     setTimeout(() => { if (mountedRef.current) connect(); }, 300);
-  }, [connect]);
+  }, [connect, setEditDecision]);
 
   return { events, messages, scratchpads, scratchpadTimestamps, editDecision, ffmpegRenderState, resolveRenderState, ffmpegQualityPref, cropStatuses, footageFiles, indexedFiles, videoMeta, reindexingFiles, needsIndexing, indexingState, connected, busy, send, requestResolveRender, requestFfmpegRender, setFfmpegQualityPref, clearAndReconnect, updateEditDecision, previewEditDecision, requestCropClip, triggerIndex, undo, redo, canUndo, canRedo };
 }

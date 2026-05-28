@@ -233,9 +233,9 @@ _indexing_progress: Dict[str, dict] = {}
 #                       Used by Phase 1 gist + AgentSession's ask_memories tool.
 #                       (Ctor now takes ``querier=`` not ``searcher=``;
 #                       ``ask`` no longer accepts a video_ids list — only a
-#                       single ``video_id``. VEA passes the first video_id
-#                       when there is more than one — see ``ToolExecutor.
-#                       _ask_memories``.)
+#                       single ``video_id``. VEA calls it once per project
+#                       video when it needs multi-video coverage — see
+#                       ``ToolExecutor._ask_memories`` and the planning loop.)
 #
 # Lazy-initialised via ``init_lvmm()`` (called from app.py's lifespan
 # startup hook) because lvmm-core's ``build_local_context`` is async.
@@ -249,7 +249,7 @@ mavi_agent = None  # type: ignore[assignment]
 
 
 async def init_lvmm() -> None:
-    """Construct lvmm-core context + Searcher + MaviAgent (idempotent).
+    """Construct lvmm-core context + Querier + MaviAgent (idempotent).
 
     Reads ``OPENROUTER_API_KEY`` / ``GEMINI_API_KEY`` from env (already
     populated by ``src.config`` at startup). MobileCLIP defaults to the

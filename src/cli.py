@@ -207,18 +207,20 @@ async def _ensure_indexed(
     If ``reuse`` and ``session.json`` is already present, we trust the cached
     session. Otherwise (or if ``reuse=False``), run indexing from scratch.
     """
-    if reuse and workspace.exists():
-        await emitter("index_skipped", {"reason": "session.json exists and --reuse-index is set"})
-        return
-
     # lvmm-core has to be initialised before indexing. The CLI runs outside
     # FastAPI's lifespan hook so we trigger it here on first need.
+    # Even when --reuse-index skips indexing, the agent still needs these
+    # handles for ask_memories/search_footage during the edit turn.
     await services.init_lvmm()
     if not services.mavi_agent or not services.lvmm_ctx:
         raise RuntimeError(
             "lvmm-core failed to initialise. Check OPENROUTER_API_KEY / "
             "GEMINI_API_KEY in .env and the server logs."
         )
+
+    if reuse and workspace.exists():
+        await emitter("index_skipped", {"reason": "session.json exists and --reuse-index is set"})
+        return
 
     # Tool-level dependency check — same as app.py lifespan does for the
     # dashboard. Catches missing scenedetect/librosa/etc. before the
@@ -272,96 +274,99 @@ async def _run(args: argparse.Namespace) -> int:
     workspaces_root = Path(_config.WORKSPACES_DIR).resolve()
     workspace = WorkspaceManager(args.project, workspaces_root)
 
-    # Ensure the project directory exists.
-    if not workspace.dir_exists():
-        workspace.create()
-        await emitter("project_created", {"project": args.project, "path": str(workspace.root)})
-
-    linked = _stage_footage(workspace, args.footage_dir)
-    if linked:
-        await emitter("footage_staged", {"linked": linked})
-
-    footage = workspace.scan_footage()
-    if not footage:
-        _print_result({"status": "error", "error": "No footage found", "project": args.project})
-        return 2
-
-    # Indexing (cached unless --reuse-index is false or session missing).
     try:
-        await _ensure_indexed(workspace, emitter, reuse=args.reuse_index)
-    except Exception as e:
-        logger.exception("Indexing failed")
-        _print_result({"status": "error", "error": f"indexing: {e}", "project": args.project})
-        return 3
+        # Ensure the project directory exists.
+        if not workspace.dir_exists():
+            workspace.create()
+            await emitter("project_created", {"project": args.project, "path": str(workspace.root)})
 
-    # Load the session that indexing produced (or reused).
-    session_data = workspace.load_session()
-    if not session_data.videos:
-        _print_result({"status": "error", "error": "No videos in session after indexing", "project": args.project})
-        return 4
+        linked = _stage_footage(workspace, args.footage_dir)
+        if linked:
+            await emitter("footage_staged", {"linked": linked})
 
-    # Build the agent session in autonomous mode — CLI runs are non-interactive
-    # by definition (no WebSocket back-channel for the agent to message).
-    # lvmm-core handles came up during _ensure_indexed; if they're still None
-    # something went sideways and the build below will surface a clear error.
-    agent = AgentSession(
-        project_name=args.project,
-        workspace=workspace,
-        mavi_agent=services.mavi_agent,
-        querier=services.querier,
-        gemini_manager=services.main_llm,
-        video_llm=services.video_llm,
-        video_entries=session_data.videos,
-        emit=emitter,
-        mode=AgentMode.AUTONOMOUS,
-    )
+        footage = workspace.scan_footage()
+        if not footage:
+            _print_result({"status": "error", "error": "No footage found", "project": args.project})
+            return 2
 
-    # One-shot: deliver the brief and wait.
-    try:
-        await asyncio.wait_for(
-            agent.handle_user_message(args.brief),
-            timeout=args.timeout,
+        # Indexing (cached unless --reuse-index is false or session missing).
+        try:
+            await _ensure_indexed(workspace, emitter, reuse=args.reuse_index)
+        except Exception as e:
+            logger.exception("Indexing failed")
+            _print_result({"status": "error", "error": f"indexing: {e}", "project": args.project})
+            return 3
+
+        # Load the session that indexing produced (or reused).
+        session_data = workspace.load_session()
+        if not session_data.videos:
+            _print_result({"status": "error", "error": "No videos in session after indexing", "project": args.project})
+            return 4
+
+        # Build the agent session in autonomous mode — CLI runs are non-interactive
+        # by definition (no WebSocket back-channel for the agent to message).
+        # lvmm-core handles came up during _ensure_indexed; if they're still None
+        # something went sideways and the build below will surface a clear error.
+        agent = AgentSession(
+            project_name=args.project,
+            workspace=workspace,
+            mavi_agent=services.mavi_agent,
+            querier=services.querier,
+            gemini_manager=services.main_llm,
+            video_llm=services.video_llm,
+            video_entries=session_data.videos,
+            emit=emitter,
+            mode=AgentMode.AUTONOMOUS,
         )
-    except asyncio.TimeoutError:
-        _print_result({
-            "status": "error",
-            "error": f"Timed out after {args.timeout}s",
-            "project": args.project,
-            **_resolve_render_paths(workspace),
-        })
-        return 5
-    except Exception as e:
-        logger.exception("Agent loop failed")
-        _print_result({
-            "status": "error",
-            "error": f"agent: {e}",
-            "project": args.project,
-            **_resolve_render_paths(workspace),
-        })
-        return 6
 
-    # Background tasks may include the ffmpeg draft render and Resolve final
-    # render. Wait for them with a cap so we don't hang forever on Resolve.
-    if agent._bg_tasks:
-        await emitter("render_wait", {"pending": len(agent._bg_tasks)})
+        # One-shot: deliver the brief and wait.
         try:
             await asyncio.wait_for(
-                asyncio.gather(*agent._bg_tasks, return_exceptions=True),
-                timeout=DEFAULT_RENDER_WAIT_SECONDS,
+                agent.handle_user_message(args.brief),
+                timeout=args.timeout,
             )
         except asyncio.TimeoutError:
-            await emitter("render_wait_timeout", {"seconds": DEFAULT_RENDER_WAIT_SECONDS})
+            _print_result({
+                "status": "error",
+                "error": f"Timed out after {args.timeout}s",
+                "project": args.project,
+                **_resolve_render_paths(workspace),
+            })
+            return 5
+        except Exception as e:
+            logger.exception("Agent loop failed")
+            _print_result({
+                "status": "error",
+                "error": f"agent: {e}",
+                "project": args.project,
+                **_resolve_render_paths(workspace),
+            })
+            return 6
 
-    # Final result.
-    paths = _resolve_render_paths(workspace)
-    result = {
-        "status": "ok",
-        "project": args.project,
-        "edit_decision": _load_edit_decision(workspace),
-        **paths,
-    }
-    _print_result(result)
-    return 0 if paths["fcpxml"] else 7
+        # Background tasks may include the ffmpeg draft render and Resolve final
+        # render. Wait for them with a cap so we don't hang forever on Resolve.
+        if agent._bg_tasks:
+            await emitter("render_wait", {"pending": len(agent._bg_tasks)})
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*agent._bg_tasks, return_exceptions=True),
+                    timeout=DEFAULT_RENDER_WAIT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                await emitter("render_wait_timeout", {"seconds": DEFAULT_RENDER_WAIT_SECONDS})
+
+        # Final result.
+        paths = _resolve_render_paths(workspace)
+        result = {
+            "status": "ok",
+            "project": args.project,
+            "edit_decision": _load_edit_decision(workspace),
+            **paths,
+        }
+        _print_result(result)
+        return 0 if paths["fcpxml"] else 7
+    finally:
+        await services.close_lvmm()
 
 
 def _print_result(payload: Dict[str, Any]) -> None:

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { ProjectSummary } from './types';
 import { useAgentChat } from './hooks/useAgentChat';
 import { ProjectBrowser } from './components/ProjectBrowser';
@@ -27,18 +27,18 @@ export default function App() {
 
   const agent = useAgentChat(agentProjectName);
 
-  // Update project metadata when agent connects and sends init data
-  useEffect(() => {
-    if (selectedProject && (agent.footageFiles.length > 0 || agent.indexedFiles.length > 0)) {
-      setSelectedProject(prev => prev ? {
-        ...prev,
-        video_count: agent.footageFiles.length,
-        footage_files: agent.footageFiles,
-        indexed_files: agent.indexedFiles,
-        status: agent.indexedFiles.length > 0 ? 'indexed' : prev.status,
-      } : prev);
+  const hydratedProject = useMemo(() => {
+    if (!selectedProject || (agent.footageFiles.length === 0 && agent.indexedFiles.length === 0)) {
+      return selectedProject;
     }
-  }, [agent.footageFiles, agent.indexedFiles, selectedProject?.project_name]);
+    return {
+      ...selectedProject,
+      video_count: agent.footageFiles.length,
+      footage_files: agent.footageFiles,
+      indexed_files: agent.indexedFiles,
+      status: agent.indexedFiles.length > 0 ? 'indexed' : selectedProject.status,
+    };
+  }, [agent.footageFiles, agent.indexedFiles, selectedProject]);
 
   // Sync hash → state on popstate (browser back/forward)
   useEffect(() => {
@@ -83,7 +83,7 @@ export default function App() {
   return (
     <ToastProvider>
       <AgentChat
-        project={selectedProject}
+        project={hydratedProject ?? selectedProject}
         events={agent.events}
         messages={agent.messages}
         scratchpads={agent.scratchpads}

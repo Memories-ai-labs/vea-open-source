@@ -22,6 +22,7 @@ export function useWebSocket(projectName: string | null): UseWebSocketResult {
   const backoffRef = useRef(500);
   const mountedRef = useRef(true);
   const projectRef = useRef(projectName);
+  const connectRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     projectRef.current = projectName;
@@ -60,7 +61,7 @@ export function useWebSocket(projectName: string | null): UseWebSocketResult {
       backoffRef.current = Math.min(backoffRef.current * 2, 5000);
       reconnectTimerRef.current = setTimeout(() => {
         if (mountedRef.current && projectRef.current === name) {
-          connect();
+          connectRef.current();
         }
       }, delay);
     };
@@ -69,6 +70,10 @@ export function useWebSocket(projectName: string | null): UseWebSocketResult {
       ws.close();
     };
   }, []);
+
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   useEffect(() => {
     mountedRef.current = true;
