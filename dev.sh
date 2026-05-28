@@ -78,6 +78,16 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+run_python() {
+  if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then
+    "$ROOT_DIR/.venv/bin/python" "$@"
+  elif command_exists uv; then
+    uv run python "$@"
+  else
+    python3 "$@"
+  fi
+}
+
 require_command() {
   local cmd="$1"
   local help_text="$2"
@@ -94,7 +104,7 @@ ensure_dev_dir() {
 
 read_config_value() {
   local key="$1"
-  python3 - "$key" <<'PY'
+  run_python - "$key" <<'PY'
 import json
 import pathlib
 import sys
@@ -119,7 +129,7 @@ PY
 write_config_value() {
   local key="$1"
   local value="$2"
-  python3 - "$key" "$value" <<'PY'
+  run_python - "$key" "$value" <<'PY'
 import json
 import pathlib
 import sys
@@ -227,7 +237,7 @@ repo_needs_setup() {
 
 check_python_version() {
   local version
-  version="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+  version="$(run_python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
   local major minor
   major="$(echo "$version" | cut -d. -f1)"
   minor="$(echo "$version" | cut -d. -f2)"
@@ -241,10 +251,9 @@ check_python_version() {
 
 check_core_tooling() {
   info "[check] Required tools"
-  require_command python3 "Install Python 3.12+ and ensure python3 is on PATH."
-  check_python_version
   require_command uv "Install uv: https://docs.astral.sh/uv/getting-started/installation/"
   success "uv"
+  check_python_version
   require_command ffmpeg "Install ffmpeg: brew install ffmpeg"
   success "ffmpeg"
   require_command node "Install Node.js 20+: https://nodejs.org"
@@ -309,7 +318,7 @@ check_resolve() {
 
   # Try to connect via Python
   local resolve_status
-  resolve_status="$(python3 - <<'PY' 2>/dev/null || echo "error"
+  resolve_status="$(run_python - <<'PY' 2>/dev/null || echo "error"
 import sys, os
 api = os.environ.get("RESOLVE_SCRIPT_API", "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting")
 modules = os.path.join(api, "Modules")
@@ -360,10 +369,10 @@ check_config_keys() {
   fi
 
   local key val placeholder
-  local -a keys=("MEMORIES_API_KEY" "OPENROUTER_API_KEY" "ELEVENLABS_API_KEY")
-  local -a placeholders=("your-memories-ai-api-key" "" "your-elevenlabs-api-key")
-  local -a labels=("Memories.ai (video understanding)" "OpenRouter (LLM + music generation)" "ElevenLabs (TTS + STT)")
-  local -a required=("true" "true" "true")
+  local -a keys=("OPENROUTER_API_KEY" "ELEVENLABS_API_KEY" "MEMORIES_API_KEY")
+  local -a placeholders=("" "your-elevenlabs-api-key" "your-memories-ai-api-key")
+  local -a labels=("OpenRouter (LLM + lvmm-core local video understanding)" "ElevenLabs (TTS + STT)" "Memories.ai (legacy V1 only)")
+  local -a required=("true" "true" "false")
 
   for i in "${!keys[@]}"; do
     key="${keys[$i]}"
@@ -462,15 +471,8 @@ prompt_for_config() {
   copy_config_if_missing
 
   prompt_for_config_key \
-    "MEMORIES_API_KEY" \
-    "Memories.ai API key (https://memories.ai/app/service/key):" \
-    "your-memories-ai-api-key" \
-    "true" \
-    "true"
-
-  prompt_for_config_key \
     "OPENROUTER_API_KEY" \
-    "OpenRouter API key (https://openrouter.ai — LLM agent + music generation):" \
+    "OpenRouter API key (https://openrouter.ai — LLM agent + lvmm-core + music generation):" \
     "" \
     "true" \
     "true"
@@ -480,6 +482,13 @@ prompt_for_config() {
     "ElevenLabs API key (https://elevenlabs.io — narration TTS + STT):" \
     "your-elevenlabs-api-key" \
     "true" \
+    "true"
+
+  prompt_for_config_key \
+    "MEMORIES_API_KEY" \
+    "Memories.ai API key (optional — legacy V1 only):" \
+    "your-memories-ai-api-key" \
+    "false" \
     "true"
 
   prompt_for_config_key \
@@ -648,14 +657,6 @@ run_up() {
   fi
 
   # Validate required keys
-  local memories_key
-  memories_key="$(read_config_value "MEMORIES_API_KEY")"
-  if is_placeholder_value "$memories_key" "your-memories-ai-api-key"; then
-    fail "MEMORIES_API_KEY is not configured in config.json"
-    echo "    Run: ./dev.sh setup"
-    exit 1
-  fi
-
   local or_key
   or_key="$(read_config_value "OPENROUTER_API_KEY")"
   if [[ -z "$or_key" ]]; then

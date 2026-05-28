@@ -15,8 +15,8 @@ This document describes the technical architecture of VEA's V2 agentic editing s
                                           WebSocket
                                           JSON events
                                                |
-+------------------+    REST     +-------------+-------------+
-|  Memories.ai     |<---------->|   FastAPI Backend (8000)   |
++------------------+    local    +-------------+-------------+
+|  lvmm-core       |<---------->|   FastAPI Backend (8000)   |
 |  (video index,   |            |                             |
 |   chat, search)  |            |   AgentSession              |
 +------------------+            |     +-- ScratchpadManager   |
@@ -118,8 +118,8 @@ The agent has 10 tools, declared as Gemini `FunctionDeclaration` objects in `too
 
 | Tool | Purpose | Calls |
 |------|---------|-------|
-| `ask_memories` | Ask natural-language questions about footage | Memories.ai Chat API |
-| `search_footage` | Find clips by query, returns timestamps + transcripts | Memories.ai Search API (BY_CLIP) |
+| `ask_memories` | Ask natural-language questions about footage | lvmm-core MaviAgent |
+| `search_footage` | Find clips by query, returns timestamps + transcripts | lvmm-core Querier |
 | `refine_clip_timestamps` | Precise in/out point selection using video + audio analysis | ffmpeg extract + downsample, then Gemini structured output |
 | `update_scratchpad` | Write to one of 4 persistent scratchpads | Local filesystem |
 | `generate_fcpxml` | Validate clips against ffprobe durations, compile EditDecision JSON to FCPXML 1.10, kick off draft render | Deterministic compiler + FFmpeg |
@@ -348,7 +348,7 @@ The `session.json` `status` field tracks the project lifecycle:
 | Status | Meaning |
 |--------|---------|
 | `new` | Directory exists but no indexing has been done |
-| `indexed` | Videos uploaded to Memories.ai, gist generated |
+| `indexed` | Videos indexed locally through lvmm-core, gist generated |
 | `planning` | Iterative planning loop is running (v1 flow) |
 | `fcpxml_ready` | FCPXML has been generated |
 | `rendered` | DaVinci Resolve has produced a render |
@@ -359,7 +359,7 @@ The `session.json` `status` field tracks the project lifecycle:
 
 ### Technology Stack
 
-- React 18 + TypeScript
+- React 19 + TypeScript
 - Vite for bundling (dev server on 5173, production build served by FastAPI at `/app`)
 - No state management library -- React hooks + lifted state
 - WebSocket for real-time communication with backend
@@ -384,7 +384,7 @@ App.tsx
 - Middle: NLE timeline (left) + video preview (right), separated by a draggable column divider
 - Bottom: chat messages (left) + scratchpad tabs (right)
 
-Features a "Manage" dropdown for: re-indexing, clearing gists, clearing planning/chat, deleting from Memories.ai.
+Features a "Manage" dropdown for: re-indexing, clearing gists, clearing planning/chat, and clearing the local lvmm-core index.
 
 **NLETimeline** (`NLETimeline.tsx`): A custom-built non-linear editing timeline visualization:
 - Builds tracks from EditDecision: V1 (video spine), V2+ (overlay clips and titles via their `lane` field), A1 (narration), A2 (music). Titles with `lane=N` render on V-track `N+1` so V1 stays the dedicated spine row.
@@ -427,36 +427,36 @@ Features a "Manage" dropdown for: re-indexing, clearing gists, clearing planning
 
 ---
 
-## Memories.ai Integration
+## lvmm-core Integration
 
-The `MemoriesAiManager` (`lib/llm/MemoriesAiManager.py`) wraps the Memories.ai API. V2 uses these features:
+`src/services.py` initializes lvmm-core's local stack at backend startup:
+`PipelineContext`, `Querier`, and `MaviAgent`. V2 uses these features:
 
-### Upload and Indexing
+### Local Indexing
 
-- `upload_video_file(file_path)` -- multipart upload with streaming
-- `wait_for_ready(video_no)` -- polls until status is `PARSE` (30s interval, rate limit backoff)
-- `find_video_by_name(name)` -- fuzzy match to reuse existing uploads
+- `LightweightComprehension` indexes workspace footage through lvmm-core.
+- SQLite rows and sqlite-vec vectors are stored under `~/lvmm-data/local.db`.
+- Current table/collection names are `summary`, `keyframe`, `video_transcript`, and `transcript`.
 
-### Chat API (used by `ask_memories` tool)
+### MaviAgent (used by `ask_memories` tool)
 
-- `chat(video_nos, prompt)` -- natural language Q&A against indexed videos
-- Returns `ChatResponse` with text answer + `MemoriesReference` objects (timestamped citations)
-- References include `video_no`, `video_name`, `timestamp` (HH:MM:SS), `description`
+- `MaviAgent.ask(question, video_id=...)` -- natural language Q&A against indexed videos
+- VEA calls it once per indexed video when a multi-video project needs whole-workspace coverage.
+- Returns a `MaviTrace` with answer text and reranked hit counts.
 
-### Search API (used by `search_footage` tool)
+### Querier (used by `search_footage` tool)
 
-- `search(query, search_type="BY_CLIP", video_nos=...)` -- clip-level semantic search
-- Returns items with `videoNo`, `startTime`, `endTime`, `score`
-- Results are capped at 15 clips by ToolExecutor
+- `Querier.search(question, video_ids=..., collections=...)` -- clip-level semantic search
+- Returns `list[dict]` items with video id, timestamps, score, and text
+- Results are normalized by ToolExecutor into the stable VEA clip shape
 
 ### Lightweight Comprehension (V2 indexing)
 
 `LightweightComprehension` (`src/pipelines/v2/comprehension/lightweight_comprehension.py`):
 1. Finds video files in the workspace `footage/` directory
-2. Uploads each to Memories.ai (or reuses existing by name match)
-3. Waits for all videos to reach `PARSE` status
-4. Gets a per-video gist via the Chat API
-5. Saves `SessionData` with video entries and combined gist
+2. Indexes each through lvmm-core (or reuses existing local rows/vectors)
+3. Gets a per-video gist via MaviAgent
+4. Saves `SessionData` with video entries and combined gist
 
 This is much faster than V1 indexing (no scene-by-scene analysis). Detailed understanding happens on-demand during the agent conversation.
 
@@ -586,7 +586,7 @@ Every agent session writes a structured debug bundle to `{workspace}/logs/`. The
     "workspaces_dir": "data/workspaces"
   },
   "api_keys": {
-    "MEMORIES_API_KEY": "...",
+    "MEMORIES_API_KEY": "... (optional; legacy V1 only)",
     "GOOGLE_CLOUD_PROJECT": "...",
     "GOOGLE_CLOUD_LOCATION": "us-central1",
     "ELEVENLABS_API_KEY": "...",
@@ -641,7 +641,7 @@ gcloud auth application-default login
 | POST | `/v2/projects/{project}/clear/gists` | Clear gist data |
 | POST | `/v2/projects/{project}/clear/planning` | Clear planning + chat |
 | POST | `/v2/projects/{project}/clear/session` | Full local reset |
-| POST | `/v2/projects/{project}/clear/memories` | Delete from Memories.ai |
+| POST | `/v2/projects/{project}/clear/memories` | Clear local lvmm-core index rows/vectors |
 
 ---
 
@@ -650,8 +650,8 @@ gcloud auth application-default login
 ### WebSocket disconnects during long agent operations
 The agent loop can take minutes (especially with multiple `refine_clip_timestamps` calls). The WebSocket connection uses a 0.05s polling loop, so it should stay alive. If the client disconnects, the running agent task is cancelled. On reconnect, persisted state (scratchpads, chat_history, event_log, edit_decision) is sent in the `init` event.
 
-### Memories.ai rate limiting
-The upload/status polling uses 30-second intervals with exponential backoff on rate limit errors. If you see repeated "Rate limited" messages, reduce concurrent uploads or wait.
+### lvmm-core indexing is slow
+Frame embedding and visual transcription are CPU/GPU-bound and can take minutes for long footage. Watch `[COMPREHENSION]` and `lvmm_core.*` logs for stage-level progress.
 
 ### FCPXML source file resolution
 The compiler resolves `source_file` to `source_path` by matching filenames in the workspace `footage/` directory. If no match is found, the FCPXML will contain a `file:///media/{filename}` URI that requires manual media relinking in Final Cut Pro.

@@ -37,7 +37,7 @@
 
 You drop video files into a project folder, then chat with an agent that:
 
-* 🧠 **Understands** your footage via [Memories.ai](https://memories.ai) (uploads, indexes, answers questions about visuals and dialogue).
+* 🧠 **Understands** your footage via the local [lvmm-core](https://github.com/Memories-ai-labs/lvmm-core) index (visual transcripts, semantic search, and RAG chat).
 * 🎬 **Plans and selects clips** based on your creative brief, refining cut points using LLM video analysis.
 * 🗣️ **Narrates** with [ElevenLabs](https://elevenlabs.io) text-to-speech (optional, on request).
 * 🎵 **Adds music** via Google Lyria 3 AI music generation with automatic loudness balancing (optional).
@@ -94,10 +94,10 @@ Edit `config.json` and fill in the `api_keys` section:
 
 | Key | Required | Where to get it |
 |-----|----------|-----------------|
-| `MEMORIES_API_KEY` | **Yes** | https://memories.ai/app/service/key |
 | `OPENROUTER_API_KEY` | **One of these two** | https://openrouter.ai |
 | `GOOGLE_CLOUD_PROJECT` | **One of these two** | A GCP project with Vertex AI enabled |
 | `ELEVENLABS_API_KEY` | Optional | https://elevenlabs.io — needed for narration |
+| `MEMORIES_API_KEY` | Optional | Legacy V1-only Memories.ai flows |
 
 VEA uses **two** LLM slots and routes each to the best backend:
 
@@ -150,7 +150,7 @@ Navigate to **http://localhost:8000/app**, click your project, and you'll land i
 
 ### 3. Index footage
 
-If the footage hasn't been indexed yet, the dashboard shows an **"Index footage"** banner with a button. Click it. The indexer uploads each file to Memories.ai and generates a content gist. Progress streams live to the UI.
+If the footage hasn't been indexed yet, the dashboard shows an **"Index footage"** banner with a button. Click it. The indexer analyzes each file locally through lvmm-core and generates a content gist. Progress streams live to the UI.
 
 > Indexing takes 1–5 minutes per video depending on length and upload speed. Once finished, every footage pill shows a green check.
 
@@ -162,7 +162,7 @@ Type a brief in the chat box:
 
 The agent will:
 
-1. Query Memories.ai to understand the footage
+1. Query the local footage index to understand the footage
 2. Update its `comprehension` and `creative_direction` scratchpads
 3. Propose an edit plan (you'll see it in the chat)
 4. Search for clips, refine in/out points with frame-accurate analysis
@@ -273,7 +273,7 @@ The agent has 10 tools, all declared in `src/pipelines/v2/agent/tool_definitions
 
 | Tool | Purpose |
 |------|---------|
-| `ask_memories` | Natural-language Q&A against indexed footage (Memories.ai chat) |
+| `ask_memories` | Natural-language Q&A against indexed footage (lvmm-core RAG chat) |
 | `search_footage` | Semantic clip search returning timestamps + dialogue transcripts |
 | `refine_clip_timestamps` | Frame-accurate in/out point selection via Gemini video analysis |
 | `update_scratchpad` | Write to one of the 4 persistent scratchpads |
@@ -299,7 +299,7 @@ V2 (current, agent-driven) is at `/video-edit/v2`. The most useful endpoints:
 | `WS` | `/v2/agent/{project}/chat` | Agent chat WebSocket (used by dashboard) |
 | `GET` | `/v2/projects/{project}/renders/{filename}` | Stream rendered MP4 |
 | `POST` | `/v2/projects/{project}/clear/planning` | Clear chat + scratchpads + edit |
-| `POST` | `/v2/projects/{project}/clear/memories` | Delete uploaded videos from Memories.ai |
+| `POST` | `/v2/projects/{project}/clear/memories` | Clear local lvmm-core index rows/vectors for a project |
 
 A legacy V1 pipeline-style API still lives at `/video-edit/v1` (index → flexible_respond). It's the original system from the paper and is kept for reproducibility, but the dashboard and agent flow only use V2. The original V1-only codebase is preserved on the [`legacy/v1-main`](https://github.com/Memories-ai-labs/vea-open-source/tree/legacy/v1-main) branch.
 

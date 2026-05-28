@@ -50,11 +50,11 @@ Edit `config.json` and fill in the `api_keys` section:
 
 | Key | Required | Where to get it |
 |-----|----------|-----------------|
-| `MEMORIES_API_KEY` | Yes | https://memories.ai/app/service/key |
 | `OPENROUTER_API_KEY` | One of these two | https://openrouter.ai |
 | `GOOGLE_CLOUD_PROJECT` | One of these two | Your GCP project ID (Vertex AI enabled) |
 | `GOOGLE_CLOUD_LOCATION` | No | Defaults to `us-central1` (Vertex only) |
 | `ELEVENLABS_API_KEY` | No | https://elevenlabs.io -- needed for narration |
+| `MEMORIES_API_KEY` | No | Legacy V1-only Memories.ai flows |
 
 VEA uses **two** LLM slots — a `main_llm` for the agent loop and a `video_llm` for the one tool that needs native video (`refine_clip_timestamps`). Configure both in `config.json`:
 
@@ -153,7 +153,7 @@ You should see your project in the project browser. Click on it to open the work
 
 ### 4. Index footage
 
-If the footage hasn't been indexed yet, the dashboard shows an **"Index footage"** banner with a button — click it. (You can also re-index at any time from the **Manage** dropdown.) Indexing uploads the video files to Memories.ai and generates a content gist; progress streams live to the banner.
+If the footage hasn't been indexed yet, the dashboard shows an **"Index footage"** banner with a button — click it. (You can also re-index at any time from the **Manage** dropdown.) Indexing analyzes the video files locally through lvmm-core and generates a content gist; progress streams live to the banner.
 
 Alternatively, use the API:
 
@@ -163,7 +163,7 @@ curl -X POST http://localhost:8000/video-edit/v2/index \
   -d '{"project_name": "my-test-project"}'
 ```
 
-Indexing takes 1-5 minutes per video depending on length and upload speed. The footage strip in the dashboard will show a green checkmark next to each indexed file.
+Indexing takes 1-5 minutes per video depending on length and local embedding/transcription speed. The footage strip in the dashboard will show a green checkmark next to each indexed file.
 
 ### 5. Start chatting
 
@@ -172,7 +172,7 @@ Once indexing completes, type a message in the chat input:
 > "Create a 90-second highlight reel of this keynote, focusing on the product demo and audience reactions."
 
 The agent will:
-1. Query Memories.ai to understand the footage
+1. Query the local footage index to understand the footage
 2. Update the comprehension scratchpad
 3. Propose an edit plan
 4. Search for specific clips
@@ -224,7 +224,7 @@ Use the **Manage** dropdown in the dashboard:
 
 - **Clear gists**: Removes gist text but keeps video_no mappings
 - **Clear planning + chat**: Removes scratchpads, chat history, storyboard, clips, FCPXML -- keeps indexing
-- **Delete from Memories.ai**: Removes the uploaded videos from Memories.ai cloud (requires re-upload to re-index)
+- **Delete local index**: Removes local lvmm-core rows/vectors for the indexed videos (requires re-indexing)
 
 ---
 
@@ -236,7 +236,7 @@ The backend prints structured log lines prefixed with tags:
 
 - `[AGENT]` -- Agent session lifecycle
 - `[AGENT WS]` -- WebSocket connection events
-- `[MEMORIES]` -- Memories.ai API calls
+- `[MEMORIES]` -- Legacy V1 Memories.ai API calls
 - `[COMPREHENSION]` -- Indexing pipeline
 - `[COMPILER]` -- FCPXML compilation
 - `[MUSIC]` -- Lyria 3 music generation (via OpenRouter)
@@ -267,12 +267,11 @@ If the dashboard shows "Offline":
 - Rate limit errors -- reduce concurrent requests, the agent loop already has built-in retry
 - Empty responses -- check safety settings (all set to `BLOCK_NONE` but may still occasionally block)
 
-### Memories.ai issues
+### lvmm-core indexing issues
 
-- "Memories.ai not configured" -- set `MEMORIES_API_KEY` in `config.json`
-- Upload timeouts -- large files get longer timeouts automatically (5min + 1min per 100MB)
-- "Rate limited" during status polling -- backoff is automatic, wait
-- Videos stuck in `UNPARSE` -- check your Memories.ai dashboard for quota issues
+- Startup says "lvmm-core not initialised" -- restart the backend and inspect startup logs for the lvmm-core traceback
+- Slow indexing -- large files spend most time in frame embedding and visual transcription
+- Missing search results -- use **Delete local index** and re-index the project so SQLite rows and vectors match current lvmm-core schemas
 
 ### FCPXML not generating
 
@@ -305,7 +304,7 @@ If the dashboard shows "Offline":
 - `src/schema.py` -- API request/response models (Pydantic)
 
 ### Video understanding
-- `lib/llm/MemoriesAiManager.py` -- Memories.ai client (upload, chat, search)
+- `src/services.py` -- lvmm-core context, Querier, and MaviAgent singletons
 - `src/pipelines/v2/comprehension/lightweight_comprehension.py` -- V2 indexing
 
 ### FCPXML
@@ -317,7 +316,7 @@ If the dashboard shows "Offline":
 
 ### LLM clients
 - `lib/llm/GeminiGenaiManager.py` -- Gemini / Vertex AI client
-- `lib/llm/MemoriesAiManager.py` -- Memories.ai client
+- `lib/llm/OpenRouterManager.py` -- OpenRouter-compatible LLM client
 
 ### Dashboard
 - `dashboard/src/App.tsx` -- Root component, routing
@@ -337,7 +336,7 @@ If the dashboard shows "Offline":
 
 1. **One agent session per project.** If you open the same project in two tabs, only the most recent tab receives events. The first tab will appear frozen.
 
-2. **Indexing is idempotent.** Re-indexing reuses existing Memories.ai uploads if the video name matches. Use "Delete from Memories.ai" in Manage to force re-upload.
+2. **Indexing is idempotent.** Re-indexing reuses existing local lvmm-core rows if the video name matches. Use "Delete local index" in Manage to force a clean re-index.
 
 3. **Scratchpad size limit.** Each scratchpad is capped at 6000 characters. Long editing sessions can hit this. The agent should consolidate with `replace` rather than accumulating with `append`.
 

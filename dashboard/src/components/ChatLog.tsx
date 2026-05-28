@@ -104,7 +104,7 @@ export function ChatLog({
       if (e.event_type === 'tool_call') {
         const isChat = e.data?.type === 'chat';
         const label = isChat
-          ? `Asking Memories.ai: "${e.data?.question ?? ''}"`
+          ? `Asking footage index: "${e.data?.question ?? ''}"`
           : `Searching footage: "${e.data?.query ?? ''}"`;
         msgs.push({
           role: 'system',
@@ -168,7 +168,7 @@ export function ChatLog({
         return { label: 'Deciding tool calls…', color: 'var(--accent-yellow)' };
       case 'tool_call':
         return last.data?.type === 'chat'
-          ? { label: 'Querying Memories.ai…', color: 'var(--accent-blue)' }
+          ? { label: 'Querying footage index…', color: 'var(--accent-blue)' }
           : { label: 'Searching footage…', color: 'var(--accent-green)' };
       case 'tool_result':
         return { label: 'Processing results…', color: 'var(--text-muted)' };

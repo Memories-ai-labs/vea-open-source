@@ -330,7 +330,7 @@ def register_websocket_routes(app: FastAPI):
                         # Trigger indexing for this project. Runs in the background and
                         # broadcasts index_progress events through the project's emitter list.
                         # Optional `files: [filename, ...]` re-indexes only those files
-                        # (deletes the existing memories.ai upload first).
+                        # (purges existing lvmm-core rows/vectors first).
                         only_files = msg.get("files") or None
                         if services._indexing_progress.get(project_name, {}).get("status") == "running":
                             await emit("index_progress", services._indexing_progress[project_name])

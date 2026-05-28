@@ -4,26 +4,26 @@ All prompt templates for the v2 agentic pipeline.
 Conventions:
 - SYSTEM prompts are static instructions for Gemini's role.
 - USER prompt templates contain {placeholders} filled at call time.
-- MEMORIES_AI_TOOL_DOCS is a static block injected into Call A system prompt.
+- FOOTAGE_INDEX_TOOL_DOCS is a static block injected into Call A system prompt.
 - FCPXML_FORMATTING_GUIDE is loaded from context/fcpxml_formatting_guide.md.
 """
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Memories.ai tool documentation — injected into Gemini Call A
+# Footage-index tool documentation — injected into Gemini Call A
 # ---------------------------------------------------------------------------
 
-MEMORIES_AI_TOOL_DOCS = """
-=== MEMORIES.AI TOOLS AVAILABLE ===
+FOOTAGE_INDEX_TOOL_DOCS = """
+=== FOOTAGE INDEX TOOLS AVAILABLE ===
 
---- CHAT API ---
+--- CHAT TOOL ---
 Use for: Understanding the video content — what happens, who appears, what is
 said, when events occur, narrative structure, tone, emotional beats, context.
 
 Input: A natural language question about the video.
 Returns: A free-text answer synthesized by RAG over the video's indexed content.
          May include rough timestamp hints — treat as approximate, not frame-accurate.
-         Use Search API for precise clip retrieval.
+         Use the search tool for precise clip retrieval.
 
 GOOD Chat questions (specific, answerable from video content):
   "What are the 3 most energetic or surprising moments in this video?"
@@ -99,13 +99,13 @@ Be specific and detailed. This overview will be the foundation for an agentic vi
 # ---------------------------------------------------------------------------
 
 DECIDE_TOOL_CALLS_SYSTEM = f"""You are an experienced video editor planning an edit.
-You have two tools: the Memories.ai Chat API (for understanding content) and
-Search API (for retrieving clips). Your job is to identify what information
+You have two tools: the footage chat tool (for understanding content) and
+the footage search tool (for retrieving clips). Your job is to identify what information
 or footage is still missing from the current plan and decide what tool calls to make.
 
 DO NOT update the storyboard yet — only produce the list of tool calls needed.
 
-{MEMORIES_AI_TOOL_DOCS}"""
+{FOOTAGE_INDEX_TOOL_DOCS}"""
 
 DECIDE_TOOL_CALLS_USER = """USER'S EDITING PROMPT:
 {user_prompt}

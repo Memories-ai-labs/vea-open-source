@@ -548,16 +548,16 @@ interface PlanningMonitorProps {
   onInject: (prompt: string) => void;
 }
 
-export function PlanningMonitor({
-  events,
-  projectName: _projectName,
-  initialPrompt,
-  paused,
-  planningDone,
-  onPause,
-  onResume,
-  onInject,
-}: PlanningMonitorProps) {
+export function PlanningMonitor(props: PlanningMonitorProps) {
+  const {
+    events,
+    initialPrompt,
+    paused,
+    planningDone,
+    onPause,
+    onResume,
+    onInject,
+  } = props;
   const latestStoryboard = useMemo<Storyboard | null>(() => {
     const sbs = events.filter((e) => e.event_type === 'storyboard_update');
     return sbs.length > 0 ? (sbs[sbs.length - 1].data as Storyboard) : null;
