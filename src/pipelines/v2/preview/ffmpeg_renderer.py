@@ -190,6 +190,14 @@ async def render_ffmpeg_preview(
     tl_w = edit.timeline.width
     tl_h = edit.timeline.height
     tl_fps = edit.timeline.fps
+    if tl_w <= 0 or tl_h <= 0:
+        # Timeline dims come straight from the LLM-supplied EditDecision with no
+        # schema constraint; 0 would ZeroDivisionError at the out_w / title-scale
+        # math below. Fail with a clear message (the caller treats render errors
+        # as non-fatal and surfaces them to the agent). Matches resolve_render.
+        raise ValueError(
+            f"Invalid timeline dimensions {tl_w}x{tl_h}; width and height must be > 0."
+        )
 
     target_h = resolution if resolution is not None else preset["height"]
     if target_h is None:
@@ -545,6 +553,11 @@ async def _render_single_segment(
         src_end = _snap(src_end, src_fps)
     duration = src_end - src_start
     speed_rate = clip.speed.rate if clip.speed else 1.0
+    if speed_rate <= 0:
+        # An LLM can emit a non-positive speed.rate (e.g. misreading "freeze
+        # frame"). setpts=PTS/0 would error and _atempo_chain would loop
+        # forever. Treat as no speed change, matching edit_compiler's clamp.
+        speed_rate = 1.0
     scale_flags = str(preset.get("scale_flags", "bilinear"))
 
     vf_parts = [
@@ -593,6 +606,10 @@ async def _render_single_segment(
 
 def _atempo_chain(rate: float) -> List[str]:
     """Build atempo filter chain for a given speed rate (each atempo limited to 0.5-2.0)."""
+    # Defensive: the loops below never terminate for a non-positive rate.
+    # Callers clamp speed_rate to 1.0, but guard here too in case of new callers.
+    if rate <= 0:
+        return []
     filters = []
     remaining = rate
     while remaining > 2.0:

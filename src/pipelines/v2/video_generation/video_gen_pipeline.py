@@ -153,6 +153,12 @@ def generate_video_veo(
         elapsed = time.time() - start_time
         if elapsed > 300:
             token = _get_gcp_access_token()
+            if not token:
+                # Refresh failed — sending "Bearer None" just yields 401s until
+                # timeout. Skip this poll; the next iteration retries the refresh
+                # (recovers from transient failures).
+                logger.warning("[VIDEOGEN] Token refresh failed; retrying next poll")
+                continue
             headers["Authorization"] = f"Bearer {token}"
 
         try:

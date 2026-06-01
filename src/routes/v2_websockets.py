@@ -639,9 +639,9 @@ def register_websocket_routes(app: FastAPI):
             else:
                 clip_data["shot_transforms"] = None
 
-            # Save updated edit decision
-            with open(ed_path, "w") as f:
-                _json.dump(ed_data, f, indent=2)
+            # Save updated edit decision atomically (tmp + os.replace) so a
+            # crash mid-write can't corrupt the project's source-of-truth JSON.
+            _atomic_write_json(ed_path, ed_data)
 
             # Recompile FCPXML
             try:

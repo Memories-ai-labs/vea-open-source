@@ -503,9 +503,15 @@ def _run_saliency_sync(
         start_sec = float(_parse_time(start_str))
         dur_sec = float(_parse_time(dur_str))
 
+        # Probe the TRUE source dimensions. Passing tl_w/tl_h into the
+        # src_w/src_h slots (as this call previously did) collapses the saliency
+        # transform to an identity no-op — defeating the crop entirely.
+        src_w, src_h = _probe_dimensions(src_file)
+
         results = _run_multishot_saliency(
             src_file, start_sec, start_sec + dur_sec,
-            tl_w, tl_h, aspect_ratio,
+            src_w, src_h, aspect_ratio,
+            tl_w=tl_w, tl_h=tl_h,
         )
         if results:
             return results[0][2]  # First shot's transform
@@ -514,6 +520,24 @@ def _run_saliency_sync(
     except Exception as e:
         logger.debug(f"[CROP] Saliency unavailable, using center: {e}")
         return _default_transform(tl_w, tl_h, aspect_ratio)
+
+
+def _probe_dimensions(source_path: str) -> Tuple[int, int]:
+    """Best-effort (width, height) of a source video, for the batch crop path.
+
+    Falls back to 1920x1080 if probing fails (cv2 is already a cropping dep).
+    """
+    try:
+        import cv2
+        cap = cv2.VideoCapture(source_path)
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        if w > 0 and h > 0:
+            return w, h
+    except Exception as e:  # pragma: no cover - probe is best-effort
+        logger.debug(f"[CROP] dimension probe failed for {source_path}: {e}")
+    return 1920, 1080
 
 
 def _find_source_for_clip(clip_name: str) -> Optional[str]:

@@ -421,7 +421,12 @@ def compile_edit_decision(
         effective_duration = min(seg.duration, spine_end_sec - seg.timeline_offset)
 
         nar_dur = _fraction_from_seconds(effective_duration, fps_hint=fps)
-        nar_tl_dur, _ = _quantize_duration_to_timeline(nar_dur, fps)
+        nar_tl_dur, nar_tl_frames = _quantize_duration_to_timeline(nar_dur, fps)
+        if nar_tl_frames <= 0:
+            # Narration landing within a sub-frame of the spine end quantizes to
+            # zero frames; emitting it would produce a malformed duration="0/1s"
+            # asset-clip. Skip it, matching the spine/overlay blocks.
+            continue
         nar_start = _fraction_from_seconds(seg.start, fps_hint=fps)
         # Connected clip offset is in parent's SOURCE media timeline
         parent_source_start = _get_clip_source_start(parent_clip)

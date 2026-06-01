@@ -14,10 +14,31 @@ import pytest
 from src.pipelines.v2.preview import ffmpeg_renderer as R
 from src.pipelines.v2.preview.ffmpeg_renderer import (
     QUALITY_PRESETS,
+    _atempo_chain,
     _build_transform_filter,
     render_ffmpeg_preview,
 )
 from src.pipelines.v2.schemas import TransformSettings
+
+
+class TestAtempoChain:
+    def test_chain_factors_multiply_back_to_rate(self):
+        # ffmpeg caps each atempo at [0.5, 2.0]; the chain's product must equal
+        # the requested rate, and every stage must stay within ffmpeg's range.
+        for rate in (1.5, 4.0, 0.25, 3.0, 0.5, 2.0):
+            factors = [float(f.split("=")[1]) for f in _atempo_chain(rate)]
+            product = 1.0
+            for f in factors:
+                assert 0.5 <= f <= 2.0
+                product *= f
+            assert abs(product - rate) < 1e-3
+
+    def test_nonpositive_rate_returns_empty_without_hanging(self):
+        # Regression: rate <= 0 used to spin the while-loops forever, blocking
+        # the event loop and freezing the backend. Must return [] immediately.
+        assert _atempo_chain(0) == []
+        assert _atempo_chain(0.0) == []
+        assert _atempo_chain(-0.5) == []
 
 
 # ─── Quality presets ──────────────────────────────────────────────────────
