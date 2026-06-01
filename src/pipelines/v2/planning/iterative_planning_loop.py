@@ -166,6 +166,16 @@ class IterativePlanningLoop:
             f"[PLAN] Starting planning loop from iteration {start_iteration} "
             f"(max {self.max_iterations}) for project '{self.project_name}'"
         )
+        if start_iteration >= self.max_iterations:
+            # Resuming a storyboard that already reached/exceeded max_iterations
+            # (e.g. re-running /plan with a lower max). range() would be empty
+            # and the loop silently no-ops; warn so the caller knows no new
+            # planning happened and the last good storyboard is being returned.
+            logger.warning(
+                f"[PLAN] start_iteration ({start_iteration}) >= max_iterations "
+                f"({self.max_iterations}); no new iterations will run. Returning "
+                f"the existing storyboard. Raise max_iterations to continue planning."
+            )
 
         for iteration in range(start_iteration, self.max_iterations):
             # --- Check for pause/inject ---

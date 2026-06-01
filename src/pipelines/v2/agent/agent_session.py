@@ -680,6 +680,13 @@ class AgentSession:
             "text": text,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
+        # Persist to chat history too, like every other agent_message emit —
+        # otherwise this final message vanishes from history on reload/reconnect.
+        self._chat_log.append(ChatMessage(
+            role="model",
+            text=text,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        ))
 
     # ── Auto-render ─────────────────────────────────────────────────────
 

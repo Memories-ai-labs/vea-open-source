@@ -19,8 +19,11 @@ Flags:
                              project's footage/ before running
     --reuse-index            skip indexing if session.json exists
     --log-format {text,jsonl} how progress is rendered on stdout
-    --max-rounds N           cap the agent's tool-call rounds (default: 40)
     --timeout S              hard wall-clock limit in seconds
+
+The agent's tool-call round cap is mode-driven (collaborative 40 / autonomous
+120, see pipelines/v2/agent/modes.py); the CLI runs in autonomous mode and does
+not expose a flag to override it.
 
 The last line of stdout is always a single JSON object with the final state:
 
