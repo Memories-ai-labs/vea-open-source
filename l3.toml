@@ -1,0 +1,25 @@
+# l3.toml — how to exercise VEA against an in-progress lvmm-core.
+# Pure data: lvmm-core reads routines from here and runs them as subprocesses.
+# Driver: `lvmm l3 check vea`  /  `lvmm l3 run vea`
+
+[meta]
+name = "vea"
+needs_core = ">=0.1,<0.2"        # compat floor; the driver fails fast on mismatch
+
+# `check` is reserved + required: fast config-sanity (imports resolve against
+# the wired core). The driver also asserts lvmm_core.__file__ centrally, so this
+# routine just needs to prove VEA's own imports load.
+[routines.check]
+description = "VEA imports resolve against the wired lvmm-core."
+cmd = ["python -c \"import src.services\""]
+needs_tools = ["ffmpeg"]
+
+# The default full run: VEA's self-contained one-shot smoke. It self-fetches
+# Tears of Steel and runs the agent end-to-end, so the driver passes no footage.
+[routines.quick-edit]
+description = "Run VEA's real one-shot smoke (fetches footage → agent → edit)."
+cmd = ["python -m pytest tests/v2/test_smoke_vea_oneshot.py -q"]
+needs_env = ["RUN_REAL_SMOKE", "OPENROUTER_API_KEY"]   # GEMINI_API_KEY also accepted by the smoke
+needs_tools = ["ffmpeg"]
+timeout = 1200
+default = true
