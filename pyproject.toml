@@ -87,7 +87,12 @@ dependencies = [
     # changes. The tool_prereqs module surfaces this if it's ever missing.
     "scenedetect>=0.6.0",
     "torch>=2.0.0",
-    "pydavinci>=0.3.0",
+    # NOTE: DaVinci Resolve rendering uses the native `DaVinciResolveScript`
+    # module that ships with Resolve (added to PYTHONPATH at runtime by
+    # lib/utils/resolve_setup.py) — NOT the `pydavinci` pip package. A stray
+    # `pydavinci>=0.3.0` dep was declared here but imported nowhere, and that
+    # version doesn't exist on PyPI (only <=0.2.3), which made `uv lock`/`uv sync`
+    # unsatisfiable. Removed 2026-06-11.
     # lvmm-core supplies the L0-L2 video-understanding stack (indexing
     # pipeline, vector search, MaviAgent for RAG chat). Replaces the
     # previous memories.ai cloud API.
