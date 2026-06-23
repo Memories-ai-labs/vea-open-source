@@ -431,16 +431,24 @@ class LightweightComprehension:
 # silently no-ops and leaves the video indexed, so DO NOT revert these.)
 _INDEXED_COLLECTIONS = ("summary", "keyframe", "video_transcript", "transcript")
 
+# Relational-only tables lvmm-core writes per video that have NO vector
+# collection / ``_meta`` sidecar (so they're cleared in the relational pass
+# only, never the vector pass). ``keyclip`` carries the FINCH segment grid
+# written by StoreVisualStage; lvmm-core added it in the indexer update that
+# also taught db_cleanup.clear_video about it. Keep this in sync with
+# StoreVisualStage in lvmm-core ``pipelines/indexing/video_indexing.py``.
+_INDEXED_RELATIONAL_ONLY = ("keyclip",)
+
 
 async def purge_video_index(lvmm_ctx, video_id: str) -> None:
     """Remove ALL of a video's indexed data from lvmm-core's local stores.
 
     Clears both the relational rows (``summary`` / ``keyframe`` /
-    ``video_transcript`` / ``transcript``) AND the sqlite-vec vectors for
-    ``video_id``. Vectors are enumerated from each ``<collection>_meta``
-    sidecar (which carries a ``video_id`` column) and deleted by id — the
-    adapter's ``delete(collection, id)`` drops both the ``vec_<collection>``
-    row and the ``<collection>_meta`` row.
+    ``video_transcript`` / ``transcript`` / ``keyclip``) AND the sqlite-vec
+    vectors for ``video_id``. Vectors are enumerated from each
+    ``<collection>_meta`` sidecar (which carries a ``video_id`` column) and
+    deleted by id — the adapter's ``delete(collection, id)`` drops both the
+    ``vec_<collection>`` row and the ``<collection>_meta`` row.
 
     Best-effort: missing tables/rows are ignored so a partially-indexed
     video still cleans up. Used by both per-file re-index (delete-then-
@@ -468,8 +476,9 @@ async def purge_video_index(lvmm_ctx, video_id: str) -> None:
                 except Exception:
                     pass
 
-    # 2. Relational rows.
-    for tbl in _INDEXED_COLLECTIONS:
+    # 2. Relational rows (vector-backed collections + relational-only tables
+    #    like ``keyclip`` that have no vectors to enumerate above).
+    for tbl in (*_INDEXED_COLLECTIONS, *_INDEXED_RELATIONAL_ONLY):
         try:
             await db.delete(tbl, {"video_id": video_id})
         except Exception:

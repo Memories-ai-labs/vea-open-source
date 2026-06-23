@@ -87,6 +87,12 @@ dependencies = [
     # changes. The tool_prereqs module surfaces this if it's ever missing.
     "scenedetect>=0.6.0",
     "torch>=2.0.0",
+    # OpenAI SDK — VEA's own main_llm shim (lib/llm/OpenRouterManager.py) talks
+    # to OpenRouter through the OpenAI-compatible client. This used to arrive
+    # transitively via lvmm-core, but lvmm-core moved `openai` to an optional
+    # `[openai]` extra, so VEA must declare it directly (it's a first-class VEA
+    # dependency regardless of lvmm-core). Matches lvmm-core's own >=1.0 pin.
+    "openai>=1.0",
     # NOTE: DaVinci Resolve rendering uses the native `DaVinciResolveScript`
     # module that ships with Resolve (added to PYTHONPATH at runtime by
     # lib/utils/resolve_setup.py) — NOT the `pydavinci` pip package. A stray
@@ -100,7 +106,20 @@ dependencies = [
     # Pinned as a path dep — assumes lvmm-core is checked out as a sibling
     # directory next to vea-open-source (../lvmm-core). Adjust to a git
     # URL or PyPI version once lvmm-core is published.
-    "lvmm-core",
+    #
+    # Extras: lvmm-core keeps its CORE deps minimal (pydantic/numpy/pyyaml)
+    # and gates the local video-understanding stack behind extras. VEA needs
+    # the full local-editing subset — declare it explicitly so `uv sync`
+    # installs it instead of silently dropping transitive deps:
+    #   local          → sqlite-vec + aiosqlite (local DB + vector store)
+    #   media          → av (media decode)
+    #   ml             → scipy/scikit-learn/pynndescent (FINCH segmentation)
+    #   mobileclip-local → mobileclip (Apple, git) + openvino + torchvision
+    #                      (frame embeddings — the indexer's embed_frames stage)
+    #   gemini         → google-genai (VLM captions during indexing)
+    # `openai` is declared directly above because VEA's own OpenRouterManager
+    # imports it; it's also lvmm-core's [openai] extra.
+    "lvmm-core[local,media,ml,mobileclip-local,gemini]",
 ]
 
 [tool.uv.sources]
