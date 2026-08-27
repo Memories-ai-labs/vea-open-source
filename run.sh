@@ -4,7 +4,7 @@
 #
 # This script handles everything needed to run the VEA service:
 # 1. Checks/installs dependencies if needed
-# 2. Sets up ngrok for webhook callbacks
+# 2. Optionally opens an ngrok tunnel (--ngrok; legacy V1 webhooks only)
 # 3. Starts the FastAPI server
 #
 # Usage:
@@ -23,6 +23,9 @@ NC='\033[0m'
 
 PORT=8000
 SETUP_ONLY=false
+# ngrok only ever existed to receive the V1 caption webhook, and V1 is not on
+# this branch. Off unless someone explicitly asks for a tunnel.
+WITH_NGROK=false
 
 # Parse arguments
 for arg in "$@"; do
@@ -33,12 +36,16 @@ for arg in "$@"; do
         --port=*)
             PORT="${arg#*=}"
             ;;
+        --ngrok)
+            WITH_NGROK=true
+            ;;
         --help|-h)
             echo "Usage: ./run.sh [OPTIONS]"
             echo ""
             echo "Options:"
             echo "  --setup-only   Only run setup, don't start the server"
             echo "  --port=PORT    Use a different port (default: 8000)"
+            echo "  --ngrok        Also open an ngrok tunnel (legacy V1 webhooks; not needed for V2)"
             echo "  --help, -h     Show this help message"
             exit 0
             ;;
@@ -131,7 +138,7 @@ run_setup() {
             echo -e "${YELLOW}================================================${NC}"
             echo ""
             echo -e "Required keys:"
-            echo -e "  - MEMORIES_API_KEY (from https://memories.ai)"
+            echo -e "  - MEMORIES_API_KEY (only for VIDEO_BACKEND=datalake; from https://memories.ai)"
             echo -e "  - GOOGLE_CLOUD_PROJECT (your GCP project ID)"
             echo ""
             echo -e "Then run this script again."
@@ -305,7 +312,9 @@ start_server() {
     echo -e "${GREEN}================================================${NC}"
     echo -e "${GREEN}  Server starting on http://localhost:${PORT}${NC}"
     echo -e "${GREEN}================================================${NC}"
-    echo -e "  ngrok inspector: http://localhost:4040"
+    if [ "$WITH_NGROK" = true ]; then
+        echo -e "  ngrok inspector: http://localhost:4040"
+    fi
     echo -e "  API docs: http://localhost:${PORT}/docs"
     echo ""
     echo -e "  Press Ctrl+C to stop"
@@ -346,6 +355,8 @@ if [ "$SETUP_ONLY" = true ]; then
     exit 0
 fi
 
-setup_ngrok
+if [ "$WITH_NGROK" = true ]; then
+    setup_ngrok
+fi
 verify_config
 start_server

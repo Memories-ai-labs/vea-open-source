@@ -54,7 +54,7 @@ Edit `config.json` and fill in the `api_keys` section:
 | `GOOGLE_CLOUD_PROJECT` | One of these two | Your GCP project ID (Vertex AI enabled) |
 | `GOOGLE_CLOUD_LOCATION` | No | Defaults to `us-central1` (Vertex only) |
 | `ELEVENLABS_API_KEY` | No | https://elevenlabs.io -- needed for narration |
-| `MEMORIES_API_KEY` | No | Legacy V1-only Memories.ai flows |
+| `MEMORIES_API_KEY` | No | Only for `VIDEO_BACKEND=datalake` (hosted Video Datalake retrieval) |
 
 VEA uses **two** LLM slots — a `main_llm` for the agent loop and a `video_llm` for the one tool that needs native video (`refine_clip_timestamps`). Configure both in `config.json`:
 
@@ -95,8 +95,6 @@ The `dev.sh` script handles setup validation, dashboard builds, and starting the
 # Start with Vite dev server for frontend hot-reload
 ./dev.sh up --frontend-dev
 
-# Start with ngrok (needed for v1 webhook-based indexing only)
-./dev.sh up --with-ngrok
 
 # Health check
 ./dev.sh doctor
@@ -236,7 +234,7 @@ The backend prints structured log lines prefixed with tags:
 
 - `[AGENT]` -- Agent session lifecycle
 - `[AGENT WS]` -- WebSocket connection events
-- `[MEMORIES]` -- Legacy V1 Memories.ai API calls
+- `[DATALAKE]` -- Video Datalake search / ask calls (`VIDEO_BACKEND=datalake` only)
 - `[COMPREHENSION]` -- Indexing pipeline
 - `[COMPILER]` -- FCPXML compilation
 - `[MUSIC]` -- Lyria 3 music generation (via OpenRouter)
