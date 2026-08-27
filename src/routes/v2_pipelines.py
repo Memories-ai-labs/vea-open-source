@@ -26,6 +26,7 @@ from src import config as _config
 from src.pipelines.v2.workspace import WorkspaceManager
 from src.pipelines.v2.comprehension.lightweight_comprehension import LightweightComprehension
 from src.pipelines.v2.planning.iterative_planning_loop import IterativePlanningLoop
+from src.llm_structured import StructuredLLM
 from src.pipelines.v2.fcpxml.fcpxml_agent import generate_fcpxml
 from src import services
 
@@ -58,7 +59,7 @@ def _safe_child(directory: Path, name: str) -> Path:
 async def v2_index(request: V2IndexRequest):
     """
     V2: Lightweight video comprehension.
-    Indexes footage locally through lvmm-core (or reuses cached video_no),
+    Ingests footage into the project's datalake collection (or reuses it),
     then gets a broad gist. Much faster than v1 /index -- no scene-by-scene analysis.
 
     source_dir is optional. If omitted, footage is read from the workspace's
@@ -83,24 +84,16 @@ async def v2_index(request: V2IndexRequest):
 
         logger.info(f"[V2 INDEX] project={request.project_name} source={source_dir} fresh={request.start_fresh}")
 
-        if not services.mavi_agent or not services.lvmm_ctx:
+        if not services.mavi_agent or not services.retrieval_ctx:
             raise HTTPException(
                 status_code=503,
-                detail="lvmm-core not initialised. Check server startup logs.",
+                detail="Retrieval backend not initialised. Check server startup logs.",
             )
-
-        # LightweightComprehension drives lvmm-core's indexing pipeline, whose
-        # stages read ctx.storage / text_embedding / vector_db — none of which
-        # a datalake context has. Refuse with the actual next step instead of
-        # failing deep inside a stage.
-        if services.video_backend() == "datalake":
-            raise HTTPException(status_code=409, detail=services.INDEXING_UNSUPPORTED_DETAIL)
 
         pipeline = LightweightComprehension(
             project_name=request.project_name,
             source_dir=source_dir,
-            lvmm_ctx=services.lvmm_ctx,
-            mavi_agent=services.mavi_agent,
+            client=services.datalake_client,
             workspace=workspace,
         )
         session = await pipeline.run(start_fresh=request.start_fresh)
@@ -112,7 +105,7 @@ async def v2_index(request: V2IndexRequest):
             status=session.status,
         )
     except HTTPException:
-        # Already-shaped HTTP errors (e.g. 503 lvmm-core unavailable) — let
+        # Already-shaped HTTP errors (e.g. 503 backend unavailable) — let
         # them propagate with their own status, don't re-wrap as 500.
         raise
     except Exception as e:
@@ -131,14 +124,14 @@ async def v2_plan(request: V2PlanRequest):
 
     Returns immediately with {"status": "started"} or {"status": "already_running"}.
     """
-    if not services.mavi_agent or not services.querier or not services.lvmm_ctx:
+    if not services.mavi_agent or not services.querier:
         raise HTTPException(
             status_code=503,
-            detail="lvmm-core not initialised. Check server startup logs.",
+            detail="Retrieval backend not initialised. Check server startup logs.",
         )
-    lvmm_llm = getattr(services.lvmm_ctx, "llm", None)
-    if not lvmm_llm:
-        raise HTTPException(status_code=500, detail="lvmm-core LLM not configured.")
+    if not services.main_llm:
+        raise HTTPException(status_code=500, detail="No main LLM configured.")
+    planning_llm = StructuredLLM(services.main_llm, context="planning")
 
     project_name = request.project_name
 
@@ -174,7 +167,7 @@ async def v2_plan(request: V2PlanRequest):
         workspace=workspace,
         querier=services.querier,
         mavi_agent=services.mavi_agent,
-        gemini=lvmm_llm,
+        gemini=planning_llm,
         video_nos=video_nos,
         video_entries=session.videos,
         max_iterations=request.max_iterations,

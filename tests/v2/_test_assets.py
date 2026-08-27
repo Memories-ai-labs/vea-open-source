@@ -2,14 +2,14 @@
 
 Auto-downloads + ffmpeg-derives source videos needed by
 ``test_smoke_scenarios.py``. Everything is cached under
-``~/lvmm-data/test_videos/`` (alongside lvmm-core's own test fixtures)
+``~/vea-test-assets/test_videos/``
 and reused across runs — first run pays the download/derive cost,
 subsequent runs are instant.
 
 Public surface:
 
 * :func:`ensure_tears_of_steel_720p` — already-present anchor (the
-  baseline asset lvmm-core's smoke uses too).
+  baseline asset).
 * :func:`ensure_big_buck_bunny` — fetched from Blender's CDN on first
   call. ~10-minute animation, distinct content type from ToS so
   scenario 5 isn't ToS-overfit.
@@ -17,11 +17,11 @@ Public surface:
 * :func:`ensure_vertical_version` — re-encodes to 9:16 (480×854).
 * :func:`ensure_slice` — extracts a [start, start+duration] window.
 
-Derived files live in ``~/lvmm-data/test_videos/derived/`` so the raw
+Derived files live in ``~/vea-test-assets/test_videos/derived/`` so the raw
 sources stay pristine and a ``rm -rf derived/`` cleanly forces
 regeneration.
 
-ffmpeg is required and assumed on PATH (lvmm-core's smoke already
+ffmpeg is required and assumed on PATH (the render tests already
 asserts this).
 """
 from __future__ import annotations
@@ -34,9 +34,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Shared with lvmm-core's smoke — both repos use the same dir so we don't
+# Cache dir shared across repos so we don't
 # duplicate 70 MB of Tears of Steel between two locations.
-TEST_VIDEOS_DIR = Path("~/lvmm-data/test_videos").expanduser()
+TEST_VIDEOS_DIR = Path("~/vea-test-assets/test_videos").expanduser()
 DERIVED_DIR = TEST_VIDEOS_DIR / "derived"
 
 
@@ -90,7 +90,7 @@ def _download(url: str, target: Path, min_bytes: int) -> Path:
     # spurious 403s without making us look malicious.
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "Mozilla/5.0 (lvmm-core test-asset fetcher)"},
+        headers={"User-Agent": "Mozilla/5.0 (vea test-asset fetcher)"},
     )
     try:
         with urllib.request.urlopen(req) as r, open(tmp, "wb") as f:
@@ -138,7 +138,7 @@ def _run_ffmpeg(cmd: list[str], output: Path) -> Path:
 
 
 def ensure_tears_of_steel_720p() -> Path:
-    """The 12-minute ToS 720p file. Already on disk via lvmm-core's smoke."""
+    """The 12-minute ToS 720p file, from the shared cache."""
     return _download(TEARS_OF_STEEL_720P_URL, TEARS_OF_STEEL_720P, TEARS_OF_STEEL_720P_MIN_BYTES)
 
 

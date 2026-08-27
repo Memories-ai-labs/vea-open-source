@@ -4,7 +4,7 @@ Orientation for AI coding assistants (Codex, Claude Code, etc.) working in this 
 
 ## What this project is
 
-VEA is a video editing automation service. The current product is a **conversational editing agent** that runs in a React dashboard. A user drops video files into a workspace, the system indexes them (locally via lvmm-core, or into the hosted Memories.ai Video Datalake with `VIDEO_BACKEND=datalake`), and an LLM-driven agent collaborates with the user in chat to plan, refine, and compile a Final Cut Pro XML edit. Drafts auto-render via FFmpeg; high-quality finals can render via DaVinci Resolve.
+VEA is a video editing automation service. The current product is a **conversational editing agent** that runs in a React dashboard. A user drops video files into a workspace, the system indexes them into the hosted Memories.ai Video Datalake, and an LLM-driven agent collaborates with the user in chat to plan, refine, and compile a Final Cut Pro XML edit. Drafts auto-render via FFmpeg; high-quality finals can render via DaVinci Resolve.
 
 The legacy V1 pipeline (videoComprehension → flexibleResponse → ...) and its Memories.ai cloud client are **not on this branch** — `src/pipelines/` holds only `common/` and `v2/`. The paper's original codebase lives on the `legacy/v1-main` branch; references to "V1" below are historical unless they name that branch.
 

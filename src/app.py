@@ -28,23 +28,23 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# --- Lifespan: bring lvmm-core up on startup, down on shutdown ---
+# --- Lifespan: bring retrieval up on startup, down on shutdown ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """FastAPI lifespan hook — init lvmm-core context + tear it down cleanly.
+    """FastAPI lifespan hook — bring retrieval up, tear it down cleanly.
 
-    lvmm-core's ``build_local_context`` is async, so we can't do it at
-    module import time. The lifespan handler is the standard FastAPI
-    place for async startup/shutdown.
+    Building the datalake context is async, so it can't happen at module
+    import time. The lifespan handler is the standard FastAPI place for
+    async startup/shutdown.
     """
     try:
-        await services.init_lvmm()
+        await services.init_retrieval()
     except Exception:
-        # init_lvmm logs the error itself; let the app start anyway so
+        # init_retrieval logs the error itself; let the app start anyway so
         # routes can return a clean 503 instead of the server failing to
-        # boot. Routes that need lvmm-core check ``services.mavi_agent``
+        # boot. Routes that need retrieval check ``services.mavi_agent``
         # before using it.
-        logger.exception("lvmm-core initialization failed at startup")
+        logger.exception("retrieval backend initialization failed at startup")
 
     # Tool-level dependency check — surfaces silently-degraded tools at
     # startup instead of mid-edit. ``select_music`` losing beat detection
@@ -57,9 +57,9 @@ async def lifespan(app: FastAPI):
     yield
 
     try:
-        await services.close_lvmm()
+        await services.close_retrieval()
     except Exception:
-        logger.exception("lvmm-core shutdown failed")
+        logger.exception("retrieval backend shutdown failed")
 
 
 # --- Initialize FastAPI app ---

@@ -14,10 +14,10 @@
 
   "api_keys": {
     "MEMORIES_API_KEY": "your-memories-ai-api-key",
-    "_memories_comment": "Required only when VIDEO_BACKEND=datalake — the Memories.ai Video Datalake key (sk-mai-... / sk-mavi-...). Left unset, video understanding runs locally through lvmm-core.",
+    "_memories_comment": "REQUIRED. The Memories.ai Video Datalake key (sk-mai-...) — video understanding runs on the datalake. Get one at https://memories.ai",
 
     "OPENROUTER_API_KEY": "your-openrouter-api-key",
-    "_openrouter_comment": "Get your API key from https://openrouter.ai (LLM agent + lvmm-core local RAG + music generation)",
+    "_openrouter_comment": "Get your API key from https://openrouter.ai (agent LLM + grounded answers + music generation)",
 
     "ELEVENLABS_API_KEY": "your-elevenlabs-api-key",
     "_elevenlabs_comment": "Get your API key from https://elevenlabs.io/ (narration TTS + clip refinement STT)",

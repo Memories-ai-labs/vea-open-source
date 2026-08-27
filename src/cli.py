@@ -207,24 +207,21 @@ async def _ensure_indexed(
     If ``reuse`` and ``session.json`` is already present, we trust the cached
     session. Otherwise (or if ``reuse=False``), run indexing from scratch.
     """
-    # lvmm-core has to be initialised before indexing. The CLI runs outside
+    # Retrieval has to be initialised before indexing. The CLI runs outside
     # FastAPI's lifespan hook so we trigger it here on first need.
     # Even when --reuse-index skips indexing, the agent still needs these
     # handles for ask_memories/search_footage during the edit turn.
-    await services.init_lvmm()
-    if not services.mavi_agent or not services.lvmm_ctx:
+    await services.init_retrieval()
+    if not services.mavi_agent or not services.retrieval_ctx:
         raise RuntimeError(
-            "lvmm-core failed to initialise. Check OPENROUTER_API_KEY / "
-            "GEMINI_API_KEY in .env and the server logs."
+            "Retrieval backend failed to initialise. Check MEMORIES_API_KEY / "
+            "config.json api_keys and the server logs."
         )
 
     if reuse and workspace.exists():
         await emitter("index_skipped", {"reason": "session.json exists and --reuse-index is set"})
         return
 
-    # The datalake backend has no local indexer; ingest runs out of band.
-    if services.video_backend() == "datalake":
-        raise RuntimeError(services.INDEXING_UNSUPPORTED_DETAIL)
 
     # Tool-level dependency check — same as app.py lifespan does for the
     # dashboard. Catches missing scenedetect/librosa/etc. before the
@@ -235,8 +232,7 @@ async def _ensure_indexed(
     pipeline = LightweightComprehension(
         project_name=workspace.project_name,
         source_dir=str(workspace.get_footage_dir()),
-        lvmm_ctx=services.lvmm_ctx,
-        mavi_agent=services.mavi_agent,
+        client=services.datalake_client,
         workspace=workspace,
     )
 
@@ -309,13 +305,15 @@ async def _run(args: argparse.Namespace) -> int:
 
         # Build the agent session in autonomous mode — CLI runs are non-interactive
         # by definition (no WebSocket back-channel for the agent to message).
-        # lvmm-core handles came up during _ensure_indexed; if they're still None
+        # Retrieval handles came up during _ensure_indexed; if they're still None
         # something went sideways and the build below will surface a clear error.
+        # Retrieval is scoped to this project's collection + its id map.
+        scoped_querier, scoped_agent = services.project_handles(session_data)
         agent = AgentSession(
             project_name=args.project,
             workspace=workspace,
-            mavi_agent=services.mavi_agent,
-            querier=services.querier,
+            mavi_agent=scoped_agent,
+            querier=scoped_querier,
             gemini_manager=services.main_llm,
             video_llm=services.video_llm,
             video_entries=session_data.videos,
@@ -370,7 +368,7 @@ async def _run(args: argparse.Namespace) -> int:
         _print_result(result)
         return 0 if paths["fcpxml"] else 7
     finally:
-        await services.close_lvmm()
+        await services.close_retrieval()
 
 
 def _print_result(payload: Dict[str, Any]) -> None:

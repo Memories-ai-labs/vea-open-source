@@ -1,5 +1,46 @@
 # Changelog
 
+## 2.1.0
+
+Removes the local indexing backend. Video understanding is now one HTTP
+dependency: the **Memories.ai Video Datalake**.
+
+### Why
+
+The local backend was a path dependency on a private sibling repository, so
+`uv sync` could never work outside Memories.ai — the public repo was not
+installable at all. It also pulled ~860 lines of transitive lock entries
+(torch, OpenVINO, MobileCLIP, scipy, sklearn, sqlite-vec) for a stack nobody
+outside could run.
+
+### Changes
+
+* `VIDEO_BACKEND` is gone; there is one backend and `MEMORIES_API_KEY` is now
+  required.
+* Indexing works through the API again — `POST /v2/index`, the dashboard's
+  **Index footage** button, and the CLI all ingest into the project's
+  collection. The 2.0 release refused those paths on the datalake backend.
+* **One collection per project**, named `vea-{project}` and recorded on
+  `SessionData.datalake_collection_id`. Each `VideoEntry` carries its
+  `datalake_video_id`; `video_no` stays the filename the agent writes into
+  `source_file`.
+* Retrieval is **scoped per project** via `services.project_handles(session)`,
+  so one project's search never reaches another's footage. `DATALAKE_MAP` and
+  the sidecar file it pointed at are no longer needed.
+* `POST /v2/projects/{p}/clear/memories` now deletes the project's videos from
+  its collection. This is real deletion of billed indexing — re-indexing pays
+  again.
+* Gists come from the datalake's own per-video summary (one $0.001 read)
+  instead of an extra LLM round trip.
+* `/v2/plan` wraps `main_llm` in `StructuredLLM` instead of borrowing the
+  retrieval backend's LLM adapter.
+
+### Swapping the backend
+
+The contract is still two methods — `ask(question, video_id=...)` and
+`search(query, video_ids=, top_k=, collections=)`. Implement them, return them
+from `init_retrieval()`, and everything downstream is unchanged.
+
 ## 2.0.0
 
 VEA 2.0 is the agent release. Editing is now a conversation with a tool-using
@@ -28,14 +69,9 @@ backend rather than a hard dependency on one service.
 The agent reaches its understanding layer through exactly two contracts, so
 the backend behind them is a choice:
 
-| `VIDEO_BACKEND` | Retrieval | Indexing |
-|---|---|---|
-| unset (default) | local **lvmm-core** — SQLite + sqlite-vec, MobileCLIP embeddings, no infrastructure | `POST /v2/index`, on your machine |
-| `datalake` | hosted **Memories.ai Video Datalake** — captions, transcription, summaries | `python -m scripts.datalake_ingest --project NAME` |
-
-Everything downstream — agent loop, tools, compiler, renderers — is identical
-on both paths. Indexing does not cross over: on the datalake backend the
-local-index endpoints refuse with the command to run instead.
+Two backends shipped in 2.0 behind `VIDEO_BACKEND`: a local index and the
+hosted **Memories.ai Video Datalake**. 2.1.0 removed the local one — see
+below.
 
 ### Removed
 

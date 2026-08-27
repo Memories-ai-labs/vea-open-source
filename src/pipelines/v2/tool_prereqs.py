@@ -27,7 +27,7 @@ every missing dep in one place. Wire the checker into:
 
 What's NOT in here
 ------------------
-- lvmm-core's own prereqs (``services.init_lvmm()`` handles those).
+- the retrieval backend's own prereqs (``services.init_retrieval()`` covers those).
 - External binaries (``ffmpeg``) — main's ``logging_setup`` /
   ``ffmpeg_renderer`` already shutils.which() at first use.
 - Env vars / API keys — those are handled at the LLM-init layer.

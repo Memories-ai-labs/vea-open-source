@@ -4,25 +4,36 @@ Orientation for AI coding assistants (Codex, Claude Code, etc.) working in this 
 
 ## What this project is
 
-VEA is a video editing automation service. The current product is a **conversational editing agent** that runs in a React dashboard. A user drops video files into a workspace, the system indexes them **locally via lvmm-core** (frame embeddings via MobileCLIP-PyTorch in-process, visual captions via Gemini VLM, vector search via sqlite-vec) or, with `VIDEO_BACKEND=datalake`, into the hosted **Memories.ai Video Datalake** (`src/datalake.py` + `scripts/datalake_ingest.py`), and an LLM-driven agent collaborates with the user in chat to plan, refine, and compile a Final Cut Pro XML edit. Drafts auto-render via FFmpeg; high-quality finals can render via DaVinci Resolve.
+VEA is a video editing automation service. The current product is a **conversational editing agent** that runs in a React dashboard. A user drops video files into a workspace, the system indexes them into the hosted **Memories.ai Video Datalake** (`src/datalake.py`), and an LLM-driven agent collaborates with the user in chat to plan, refine, and compile a Final Cut Pro XML edit. Drafts auto-render via FFmpeg; high-quality finals can render via DaVinci Resolve.
 
 The legacy V1 pipeline (videoComprehension → flexibleResponse → ...) and its Memories.ai cloud client are **not on this branch** — `src/pipelines/` holds only `common/` and `v2/`. The paper's original codebase lives on the `legacy/v1-main` branch; references to "V1" below are historical unless they name that branch.
 
-### Dependency on lvmm-core
+### Video understanding
 
-V2's video understanding (indexing, retrieval, RAG chat) is delegated to the sibling repo `lvmm-core`. VEA assumes lvmm-core is checked out as a sibling directory next to `vea-open-source/`. The path dep is wired in `pyproject.toml` under `[tool.uv.sources]` and rebuilt via `uv sync`.
+Understanding is one HTTP dependency: the **Memories.ai Video Datalake**
+(`src/datalake.py`). Nothing is indexed locally — no model weights, no vector
+DB, no sibling checkout.
 
-Three module-level handles in `src/services.py` carry the lvmm-core surface that the rest of VEA uses:
+Three module-level handles in `src/services.py` carry it:
 
 | Handle | What it is | Used by |
 |---|---|---|
-| `services.lvmm_ctx` | lvmm-core `PipelineContext` (DB, vector_db, adapters) | indexing + housekeeping |
-| `services.querier` | `luci_memory.Querier` for vector clip search | planning loop + `search_footage` tool |
-| `services.mavi_agent` | `MaviAgent` for RAG chat (rewrite → search → rerank → answer) | Phase 1 gist + `ask_memories` tool |
+| `services.retrieval_ctx` | datalake context; its one live method is `ctx.database.query("transcript", ...)` | sentence-boundary snapping |
+| `services.querier` | `DatalakeQuerier` — semantic moment search | planning loop + `search_footage` tool |
+| `services.mavi_agent` | `DatalakeAgent` — rewrite → search (reranked) → answer | Phase 1 gists + `ask_memories` tool |
 
-They're populated by an async `init_lvmm()` factory wired into FastAPI's lifespan startup hook (`src/app.py`). The CLI (`src/cli.py`) calls `init_lvmm()` itself since it runs outside FastAPI's lifespan.
+They're populated by an async `init_retrieval()` factory wired into FastAPI's
+lifespan startup hook (`src/app.py`); the CLI calls it itself. Those three are
+**unscoped**. Per-project handles — bound to that project's collection and its
+filename → `vid_...` map — come from `services.project_handles(session)`, which
+is what `AgentSession` is given. One collection per project, named `vea-{project}`,
+recorded on `SessionData.datalake_collection_id`; each `VideoEntry` carries its
+`datalake_video_id` while `video_no` stays the filename the agent writes into
+`source_file`.
 
-With `VIDEO_BACKEND=datalake`, `init_lvmm()` returns early with the same three handles served by `src/datalake.py` against the hosted Video Datalake — `DatalakeQuerier.search` and `DatalakeAgent.ask` implement the two contracts above, and `lvmm_ctx` becomes a shim whose only live method is `ctx.database.query("transcript", ...)`. lvmm-core is not imported on that path. Footage is ingested out of band by `scripts/datalake_ingest.py`, which writes `data/workspaces/{project}/datalake.json` (collection id + filename → `vid_...` map); `video_no` stays a filename on both backends.
+Swapping in something else means implementing two methods —
+`ask(question, video_id=...)` and `search(query, video_ids=, top_k=, collections=)`
+— and returning them from `init_retrieval()`.
 
 ## Key directories
 
@@ -86,11 +97,7 @@ tests/v2/                           # pytest suite (230+ tests, offline)
 ## Setup commands
 
 ```bash
-# Sibling-checkout layout — lvmm-core must live next to vea-open-source.
-git clone git@github.com:Memories-ai-labs/lvmm-core.git  # if you don't have it
-
 # Install everything (Python deps via uv, dashboard deps + build).
-# `uv sync` picks up lvmm-core as a path dep automatically via [tool.uv.sources].
 uv sync
 cd dashboard && npm install && npm run build && cd ..
 
@@ -109,7 +116,7 @@ The dashboard is served at **http://localhost:8000/app**. API docs at **http://l
 
 System dependency: `ffmpeg` must be installed (`brew install ffmpeg` or distro equivalent).
 
-First-run note: lvmm-core's MobileCLIP-PyTorch adapter auto-downloads Apple's `mobileclip_s1.pt` checkpoint (~325 MB) to `~/lvmm-data/models/` on the first indexing call. Subsequent runs are instant.
+First-run note: indexing uploads footage to the datalake and is billed per video-minute; the API accepts about five in-flight ingests, so `LightweightComprehension` gates uploads behind a semaphore.
 
 ## LLM providers (main_llm vs video_llm)
 
@@ -144,8 +151,8 @@ Declared in `src/pipelines/v2/agent/tool_definitions.py`, executed by `ToolExecu
 
 | Tool | Purpose |
 |------|---------|
-| `ask_memories` | lvmm-core `MaviAgent.ask` — RAG chat over the indexed footage (Q&A) |
-| `search_footage` | lvmm-core `Searcher.search` over TRANSCRIPT + VIDEO_TRANSCRIPT collections — returns clips with optional dialogue context |
+| `ask_memories` | `DatalakeAgent.ask` — rewrite → reranked search + summary → grounded answer |
+| `search_footage` | `DatalakeQuerier.search` over caption + transcription targets — returns clips with optional dialogue context |
 | `refine_clip_timestamps` | ffmpeg extract → PySceneDetect boundaries + ElevenLabs STT word grid → video LLM two-pass (reasoning + structured) for in/out points. Auto-retries with wider window if speech is truncated. |
 | `update_scratchpad` | Write to `comprehension` / `creative_direction` / `planning` / `fcpxml` |
 | `generate_fcpxml` | Validate clips against ffprobe durations and narration word-grid, compile EditDecision → FCPXML (with `workspace_root` for absolute audio paths), kick off draft render as a background task. |
@@ -227,7 +234,7 @@ Tagged prefixes make backend logs easy to grep:
 * `[AGENT WS]` — WebSocket lifecycle
 * `[COMPREHENSION]` — V2 indexing (Phase 1)
 * `[PLAN]` — iterative planning loop (Phase 2)
-* `lvmm_core.*` — every line from the lvmm-core sub-tree (indexing pipeline, Searcher, MaviAgent). Carries auto-injected `[pipeline=… stage=… run_id=…]` context tags when run through lvmm-core's structured-logging setup.
+* `[DATALAKE]` / `[DATALAKE COST]` — every datalake search / ask, with the running per-call spend
 * `[COMPILER]` — FCPXML compiler
 * `[LOUDNESS]` — LUFS measurement
 * `[RENDER]` — draft/final rendering

@@ -1,6 +1,6 @@
 """Real-network end-to-end smoke for vea-oneshot.
 
-What this verifies: the WHOLE stack works against a real video — lvmm-core
+What this verifies: the WHOLE stack works against a real video — the datalake
 indexing + Searcher + MaviAgent + Gemini/OpenRouter LLM + ffmpeg renderer
 + FCPXML compilation + DaVinci-or-ffmpeg render — driven through the same
 ``vea-oneshot`` entry point an end user runs.
@@ -8,7 +8,7 @@ indexing + Searcher + MaviAgent + Gemini/OpenRouter LLM + ffmpeg renderer
 Gated on ``RUN_REAL_SMOKE=1`` (the rest of ``pytest tests/v2`` skips this).
 First run downloads Tears of Steel + Apple's MobileCLIP weights via the
 helpers in ``_test_assets.py`` (~400 MB total cached under
-``~/lvmm-data/``); subsequent runs are instant. Expect ~5 min wall time
+``~/vea-test-assets/``); subsequent runs are instant. Expect ~5 min wall time
 on Apple Silicon CPU.
 
 Run with::

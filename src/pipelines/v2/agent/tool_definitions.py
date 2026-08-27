@@ -65,7 +65,7 @@ TOOL_DECLARATIONS = Tool(
             name="ask_memories",
             description=(
                 "Ask a natural-language question about the indexed video footage. "
-                "The local lvmm-core index has analyzed the footage and can answer questions about "
+                "The footage has been indexed and can answer questions about "
                 "content, people, dialogue, visuals, timing, and structure. "
                 "Returns a text answer."
             ),

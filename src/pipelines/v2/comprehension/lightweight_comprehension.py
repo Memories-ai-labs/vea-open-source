@@ -1,23 +1,24 @@
 """
 Lightweight comprehension pipeline — Phase 1 of v2 agentic editing.
 
-Indexes a workspace's videos LOCALLY via lvmm-core's master_indexing
-pipeline and asks lvmm-core's MaviAgent for a per-video gist. No upload
-to memories.ai, no polling for "ready" status — indexing is synchronous
-and runs in-process.
+Ingests a workspace's footage into the project's Video Datalake collection
+and reads back a per-video summary as its gist:
 
-Deliberately avoids heavy scene-by-scene analysis. All detailed
-understanding happens on-demand during the iterative planning loop.
+  1. ``DatalakeIngestor.ingest([...])``   → one ``vid_...`` per file, uploads
+     gated behind a semaphore because the API's in-flight ingest window is
+     about five videos wide.
+  2. ``client.summary(video_id)``         → the gist (the datalake produces it
+     during indexing; no extra LLM call from VEA).
 
-PORT NOTE (2026-05-19): Migrated from memories.ai-hosted indexing. Where
-this module used to call ``MemoriesAiManager.upload_video_url`` +
-``wait_for_ready`` + ``chat(GIST_PROMPT)`` per video, it now runs:
-  1. ``build_indexing_pipeline("classic").execute({"video_path": ...})``
-     → fills SQLite **and** vector_db (StoreVisualStage handles both).
-  2. ``mavi_agent.ask(GIST_PROMPT, video_id=...)``      → produces gist
+Deliberately avoids heavy scene-by-scene analysis. All detailed understanding
+happens on demand during the agent conversation, through ``ask_memories`` and
+``search_footage``.
 
-Sequential per video for now; concurrent indexing is a follow-up (see
-the workspace-level notes file).
+The collection is named after the project and its id is recorded on the
+session, so a project's retrieval is scoped to exactly its own footage.
+``video_no`` stays the FILENAME — the agent writes it into ``source_file`` and
+the FCPXML compiler resolves it against ``footage/`` — while the datalake's
+own id rides on ``VideoEntry.datalake_video_id``.
 """
 from __future__ import annotations
 import asyncio
@@ -28,10 +29,10 @@ from typing import Awaitable, Callable, List, Optional
 
 ProgressCallback = Callable[[float, str], Awaitable[None]]
 
-from lvmm_core.utils.logging import metric
+from src.datalake import DatalakeClient, DatalakeIngestor
+from src.metrics import metric
 from src.pipelines.v2.schemas import SessionData, VideoEntry
 from src.pipelines.v2.workspace import WorkspaceManager
-from src.pipelines.v2.planning.planning_prompts import GIST_PROMPT
 from src.config import VIDEO_EXTS
 
 logger = logging.getLogger(__name__)
@@ -39,12 +40,12 @@ logger = logging.getLogger(__name__)
 
 class LightweightComprehension:
     """
-    Phase 1: Index a workspace's videos locally (via lvmm-core) and
-    extract a broad gist per video.
+    Phase 1: ingest a workspace's videos into its datalake collection and
+    keep a broad gist per video.
 
-    Session cache: if the workspace already has a session and all videos
-    in it are still present in the local DB, skip re-indexing and return
-    the cached session immediately.
+    Session cache: if the workspace already has a session and every video in
+    it is still ``ready`` in the collection, skip re-ingesting and return the
+    cached session immediately.
 
     Parameters
     ----------
@@ -52,10 +53,9 @@ class LightweightComprehension:
         Logical name for the project (workspace name).
     source_dir:
         Directory holding the input video files.
-    lvmm_ctx:
-        lvmm-core PipelineContext (carries adapters + DB + storage).
-    mavi_agent:
-        lvmm-core MaviAgent used to generate per-video gists.
+    client:
+        Datalake client. Its bound collection is used when the session has
+        none yet; otherwise the session's collection wins.
     workspace:
         WorkspaceManager that owns session.json + other workspace artefacts.
     """
@@ -64,38 +64,28 @@ class LightweightComprehension:
         self,
         project_name: str,
         source_dir: str,
-        lvmm_ctx,                       # lvmm_core.pipelines.base.PipelineContext
-        mavi_agent,                     # lvmm_core.agents.mavi_agent.MaviAgent
+        client: DatalakeClient,
         workspace: WorkspaceManager,
         *,
         run_id: Optional[str] = None,
-        pipeline_hooks: Optional[list] = None,
+        concurrency: int = 4,
     ):
         """
         Parameters
         ----------
         run_id:
-            Optional UUID-like identifier propagated to every
-            ``Pipeline.execute()`` call we drive in Phase 1. Threads into
-            lvmm-core's structured-logging ContextVars so every log line
-            emitted by lvmm-core (pipeline stage starts/ends, MaviAgent
-            query rewrites, etc.) carries this run_id. Lets us correlate
-            "which run produced this log line" after the fact.
-        pipeline_hooks:
-            Optional list of ``lvmm_core._internal.hooks.PipelineHooks``
-            passed straight through to ``Pipeline.execute(hooks=...)``.
-            Common pair: ``[ConsoleHooks(), JSONFileHooks(path=...)]`` —
-            the JSONL sink writes one structured record per L1 stage
-            start/end/error, sitting alongside VEA's own L3 interactions
-            JSONL for full top-to-bottom observability.
+            Optional identifier tagged into this phase's log lines so a run
+            can be correlated after the fact.
+        concurrency:
+            In-flight ingests. The API's window is about five wide and answers
+            429 beyond it, so 4 is the safe default.
         """
         self.project_name = project_name
         self.source_dir = Path(source_dir)
-        self.lvmm_ctx = lvmm_ctx
-        self.mavi_agent = mavi_agent
+        self.client = client
         self.workspace = workspace
         self.run_id = run_id
-        self.pipeline_hooks = pipeline_hooks or []
+        self.concurrency = concurrency
 
     async def run(
         self,
@@ -154,35 +144,24 @@ class LightweightComprehension:
         # --- Create workspace ---
         self.workspace.create()
 
-        # --- Index videos sequentially via lvmm-core ---
-        # NOTE: sequential for the first cut. Concurrent indexing is a follow-up;
-        # SQLite write contention will need the _Sequenced* stage-wrapper pattern
-        # from master_indexing (see workspace local-notes for tracking).
-        logger.info("[COMPREHENSION] Indexing videos locally via lvmm-core...")
-        await _report(15, f"Indexing {len(video_files)} video(s) locally...")
+        # --- Ingest into the project's datalake collection ---
+        collection_id = await self._ensure_collection()
+        logger.info(f"[COMPREHENSION] Ingesting {len(video_files)} videos into {collection_id}...")
+        await _report(15, f"Uploading {len(video_files)} video(s) to the datalake...")
 
-        video_entries: List[VideoEntry] = []
-        for idx, vf in enumerate(video_files):
-            pct = 15 + (40 * (idx / max(len(video_files), 1)))
-            await _report(pct, f"Indexing {idx+1}/{len(video_files)}: {vf.name}")
-            try:
-                entry = await self._index_one(vf)
-                video_entries.append(entry)
-            except Exception as e:
-                logger.error(f"[COMPREHENSION] Indexing failed for {vf.name}: {e}")
-                # Continue with the rest — partial success is better than total failure
-
+        video_entries: List[VideoEntry] = await self._ingest(video_files, collection_id, _report)
         if not video_entries:
-            raise RuntimeError("All video indexing failed")
+            raise RuntimeError("All video ingestion failed")
 
         logger.info(f"[COMPREHENSION] Indexed {len(video_entries)}/{len(video_files)} videos")
         await _report(60, "Indexing complete, generating content gist...")
 
         # --- Save initial session (no gist yet) ---
         session = self.workspace.init_session(videos=video_entries)
+        session.datalake_collection_id = collection_id
 
-        # --- Get per-video gist via MaviAgent (one call per video, sequential) ---
-        logger.info("[COMPREHENSION] Requesting per-video gist via lvmm-core MaviAgent...")
+        # --- Per-video gist: the datalake's own summary, one read per video ---
+        logger.info("[COMPREHENSION] Reading per-video summaries from the datalake...")
 
         for idx, entry in enumerate(video_entries):
             pct = 60 + (35 * (idx / max(len(video_entries), 1)))
@@ -208,6 +187,7 @@ class LightweightComprehension:
         # local port. Kept on the schema for back-compat (existing session.json
         # files in the wild may still have the field).
         session.memories_session_id = None
+        session.datalake_collection_id = collection_id
         session.status = "indexed"
         self.workspace.save_session(session)
 
@@ -223,9 +203,11 @@ class LightweightComprehension:
         filenames: List[str],
         report: Callable[[float, str], Awaitable[None]],
     ) -> SessionData:
-        """Re-index a specific subset of files. Deletes existing rows for those
-        videos from the local DB first so master_indexing re-runs cleanly, then
-        merges the new VideoEntry objects back into the existing session."""
+        """Re-ingest a specific subset of files.
+
+        Deletes each target's previous video from the collection first so the
+        re-ingest starts clean, then merges the new VideoEntry objects back
+        into the existing session."""
         try:
             session = self.workspace.load_session()
         except Exception:
@@ -244,8 +226,8 @@ class LightweightComprehension:
             old = existing_by_name.get(vf.name)
             if old and old.video_no:
                 try:
-                    await self._delete_video(old.video_no)
-                    logger.info(f"[COMPREHENSION] Deleted old local index for {vf.name} ({old.video_no})")
+                    await self._delete_video(old.datalake_video_id or old.video_no)
+                    logger.info(f"[COMPREHENSION] Removed previous ingest of {vf.name} ({old.datalake_video_id})")
                 except Exception as e:
                     logger.warning(f"[COMPREHENSION] Could not delete old index for {vf.name}: {e}")
 
@@ -291,119 +273,132 @@ class LightweightComprehension:
         return session
 
     # ------------------------------------------------------------------
-    # Per-video index + gist (the lvmm-core swap-in)
+    # Per-video ingest + gist
     # ------------------------------------------------------------------
 
-    async def _index_one(self, video_path: Path) -> VideoEntry:
-        """Index a single video locally and return a VideoEntry.
+    async def _ensure_collection(self) -> str:
+        """Resolve this project's collection, creating it on first index.
 
-        Runs the lvmm-core ``classic`` indexing DAG, which includes
-        ``StoreVisualStage`` — that stage writes both the SQLite rows
-        (videos / video_transcripts / segments / summary) and the
-        sqlite-vec collections (vec_video_transcript / vec_keyframe /
-        vec_transcript / summary). One pipeline.execute() does it all.
+        Precedence: the session's recorded collection, then the client's bound
+        one, then a collection named after the project. Collections are free to
+        create and list, and one per project keeps every search scoped to that
+        project's own footage without a filter.
         """
-        # PORT NOTE (2026-05-19): use the visual-only indexing pipeline
-        # (build_indexing_pipeline) instead of build_master_indexing_pipeline.
-        # Master adds portrait + multimodal_asr which need ctx.face_detector
-        # and ctx.asr. VEA's services.py builds ctx with face/asr/diar="none"
-        # — so master fails. Visual-only is sufficient for what VEA needs
-        # downstream (the planning loop searches video_transcripts text).
-        # Adding audio + face indexing is a follow-up if/when VEA wants to
-        # search dialogue or filter by person.
-        from lvmm_core.pipelines.indexing.video_indexing import build_indexing_pipeline
+        try:
+            if self.workspace.exists():
+                recorded = getattr(self.workspace.load_session(), "datalake_collection_id", "")
+                if recorded:
+                    self.client.collection_id = recorded
+                    return recorded
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[COMPREHENSION] Could not read session collection: {e}")
 
+        if self.client.collection_id:
+            return self.client.collection_id
+
+        name = f"vea-{self.project_name}"
+        collection_id = await self.client.ensure_collection(name)
+        self.client.collection_id = collection_id
+        logger.info(f"[COMPREHENSION] Collection '{name}' -> {collection_id}")
+        return collection_id
+
+    async def _ingest(
+        self,
+        video_files: List[Path],
+        collection_id: str,
+        report: Callable[[float, str], Awaitable[None]],
+    ) -> List[VideoEntry]:
+        """Upload + wait for every file; one VideoEntry per success.
+
+        ``video_no`` is the filename (what the agent puts in ``source_file``);
+        the datalake id rides alongside on ``datalake_video_id``.
+        """
         now = datetime.now(timezone.utc).isoformat()
-        pipeline = build_indexing_pipeline("classic")
-        # Thread run_id + hooks into the L1 pipeline. The run_id binds
-        # lvmm-core's logging ContextVars for the duration of execute(),
-        # so every visual_transcriber / embedding / store_visual stage's
-        # log line carries the same run_id tag as our L3 events. The
-        # hooks (typically ConsoleHooks + JSONFileHooks) capture each
-        # stage's start / end / cost / errors as structured JSONL records.
-        result = await pipeline.execute(
-            {"video_path": str(video_path), "user_id": "vea_local"},
-            self.lvmm_ctx,
-            run_id=self.run_id,
-            sample_id=video_path.name,
-            hooks=self.pipeline_hooks,
-        )
+        total = len(video_files)
 
-        # DeriveVideoIDStage produces the video_id; downstream stages all
-        # reference it. It lands in the result dict.
-        video_id = (
-            result.get("video_id")
-            or result.get("derived_video_id")
-            or video_path.stem  # fallback — should never fire in practice
-        )
+        async def on_progress(done: int, count: int, name: str, vid: str) -> None:
+            await report(15 + 45 * (done / max(count, 1)), f"Indexed {done}/{count}: {name}")
 
-        # Best-effort duration from the result; ffprobe fallback if missing.
-        duration = result.get("duration_seconds") or result.get("video_duration")
-        if duration is None:
-            duration = await asyncio.to_thread(_probe_duration, video_path)
+        ingestor = DatalakeIngestor(self.client, concurrency=self.concurrency)
+        try:
+            ids = await ingestor.ingest(
+                [str(v.resolve()) for v in video_files],
+                collection_id=collection_id,
+                on_progress=on_progress,
+            )
+        except Exception as e:
+            logger.error(f"[COMPREHENSION] Ingest failed: {e}")
+            raise
 
-        logger.info(
-            f"[COMPREHENSION] Indexed {video_path.name} → video_id={video_id} "
-            f"({duration:.1f}s)" if duration else
-            f"[COMPREHENSION] Indexed {video_path.name} → video_id={video_id}"
-        )
-        # Aggregatable per-video index metric. Tagged with video_id so we can
-        # diff "video X took N seconds and indexed M transcript chunks" across
-        # runs without parsing log strings.
-        if duration:
-            metric("vea.comprehension.video_duration_seconds", duration, video_id=video_id)
+        entries: List[VideoEntry] = []
+        for vf, vid in zip(video_files, ids):
+            if not vid:
+                logger.error(f"[COMPREHENSION] No video id for {vf.name} — skipped")
+                continue
+            duration = await asyncio.to_thread(_probe_duration, vf)
+            if duration:
+                metric("vea.comprehension.video_duration_seconds", duration, video_id=vid)
+            entries.append(VideoEntry(
+                video_no=vf.name,
+                video_name=vf.name,
+                source_path=str(vf.resolve()),
+                duration_seconds=duration,
+                indexed_at=now,
+                datalake_video_id=vid,
+            ))
+            logger.info(f"[COMPREHENSION] Ingested {vf.name} -> {vid}")
+        return entries
 
-        return VideoEntry(
-            video_no=video_id,  # kept as video_no for back-compat with existing session.json files
-            video_name=video_path.name,
-            source_path=str(video_path.resolve()),
-            duration_seconds=duration,
-            indexed_at=now,
-        )
+    async def _index_one(self, video_path: Path) -> VideoEntry:
+        """Ingest a single file. Thin wrapper over :meth:`_ingest`."""
+        async def _noop(pct: float, msg: str) -> None:
+            return None
+
+        entries = await self._ingest([video_path], await self._ensure_collection(), _noop)
+        if not entries:
+            raise RuntimeError(f"Ingest produced no entry for {video_path.name}")
+        return entries[0]
 
     async def _gist_one(self, entry: VideoEntry) -> str:
-        """Ask MaviAgent for a per-video gist. Returns the answer text or ""."""
+        """The datalake's own summary for this video. Returns "" on failure.
+
+        Cheaper and more consistent than asking an LLM for a gist: the summary
+        is produced during indexing, so this is one $0.001 derived read.
+        """
+        vid = entry.datalake_video_id or entry.video_no
         try:
-            trace = await self.mavi_agent.ask(GIST_PROMPT, video_id=entry.video_no)
-            # Per-gist aggregatables. ``rewrite_reason`` and ``answer`` are
-            # logged at INFO by MaviAgent already; what's useful to aggregate
-            # is the cost (tokens) and the size of the resulting gist.
-            metric("vea.comprehension.gist_chars", len(trace.answer or ""), video_id=entry.video_no)
-            metric("vea.comprehension.gist_input_tokens", trace.total_input_tokens, video_id=entry.video_no)
-            metric("vea.comprehension.gist_output_tokens", trace.total_output_tokens, video_id=entry.video_no)
-            return trace.answer
+            gist = await self.client.summary(vid)
+            metric("vea.comprehension.gist_chars", len(gist or ""), video_id=vid)
+            return gist
         except Exception as e:
             logger.warning(f"[COMPREHENSION] Gist failed for {entry.video_name}: {e}")
             return ""
 
     async def _all_videos_still_indexed(self, videos: List[VideoEntry]) -> bool:
-        """Return True if every VideoEntry's video_id is still present in the local DB.
+        """True if every entry is still ``ready`` in the collection.
 
-        Checks the ``summary`` table — lvmm-core's classic IndexingPipeline
-        (StoreVisualStage) writes one summary row per indexed video. (Earlier
-        revisions used a ``videos`` table; the current schema is ``summary``.
-        Querying the wrong name made this always return False → re-index on
-        every call.)
+        A video someone deleted from the collection (or one that never finished
+        indexing) must force a re-ingest rather than leave the agent searching
+        for footage the datalake no longer holds.
         """
         try:
-            for v in videos:
-                rows = await self.lvmm_ctx.database.query(
-                    "summary", {"video_id": v.video_no}
-                )
-                if not rows:
-                    return False
-            return True
+            present = {
+                v.get("id") or v.get("video_id"): v.get("status")
+                for v in await self.client.list_videos()
+            }
         except Exception as e:
-            logger.warning(f"[COMPREHENSION] DB check failed: {e}")
+            logger.warning(f"[COMPREHENSION] Collection check failed: {e}")
             return False
 
-    async def _delete_video(self, video_id: str) -> None:
-        """Best-effort: drop all of a video's indexed data so re-indexing is clean.
+        for v in videos:
+            vid = v.datalake_video_id
+            if not vid or present.get(vid) != "ready":
+                return False
+        return True
 
-        Delegates to :func:`purge_video_index`, which clears both the
-        relational rows and the sqlite-vec vectors lvmm-core writes per video.
-        """
-        await purge_video_index(self.lvmm_ctx, video_id)
+    async def _delete_video(self, video_id: str) -> None:
+        """Remove a video from the collection so a re-index starts clean."""
+        await purge_video_index(self.client, video_id)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -420,70 +415,22 @@ class LightweightComprehension:
         return sorted(set(videos))
 
 
-# Collections (relational table name == vector collection name) that
-# lvmm-core's classic IndexingPipeline (StoreVisualStage) populates per
-# video. The collection name doubles as the sqlite-vec ``vec_<name>`` and
-# ``<name>_meta`` prefix. Keep this in sync with StoreVisualStage in
-# lvmm-core ``pipelines/indexing/video_indexing.py``.
-#
-# (Earlier lvmm-core revisions used plural/legacy names — videos / keyframes
-# / video_transcripts. The current schema is singular. Deleting the old names
-# silently no-ops and leaves the video indexed, so DO NOT revert these.)
-_INDEXED_COLLECTIONS = ("summary", "keyframe", "video_transcript", "transcript")
+async def purge_video_index(client, video_id: str) -> None:
+    """Delete a video from its datalake collection.
 
-# Relational-only tables lvmm-core writes per video that have NO vector
-# collection / ``_meta`` sidecar (so they're cleared in the relational pass
-# only, never the vector pass). ``keyclip`` carries the FINCH segment grid
-# written by StoreVisualStage; lvmm-core added it in the indexer update that
-# also taught db_cleanup.clear_video about it. Keep this in sync with
-# StoreVisualStage in lvmm-core ``pipelines/indexing/video_indexing.py``.
-_INDEXED_RELATIONAL_ONLY = ("keyclip",)
-
-
-async def purge_video_index(lvmm_ctx, video_id: str) -> None:
-    """Remove ALL of a video's indexed data from lvmm-core's local stores.
-
-    Clears both the relational rows (``summary`` / ``keyframe`` /
-    ``video_transcript`` / ``transcript`` / ``keyclip``) AND the sqlite-vec
-    vectors for ``video_id``. Vectors are enumerated from each
-    ``<collection>_meta`` sidecar (which carries a ``video_id`` column) and
-    deleted by id — the adapter's ``delete(collection, id)`` drops both the
-    ``vec_<collection>`` row and the ``<collection>_meta`` row.
-
-    Best-effort: missing tables/rows are ignored so a partially-indexed
-    video still cleans up. Used by both per-file re-index (delete-then-
-    reindex) and the dashboard's clear-memories endpoint.
+    Used by the per-file re-index path and by the dashboard's clear-memories
+    endpoint. This is a real deletion of indexed data — the frames, captions,
+    transcription and vectors that indexing was billed for go away, and a
+    re-index pays again. Storage stops accruing for that video.
     """
-    db = getattr(lvmm_ctx, "database", None)
-    vec = getattr(lvmm_ctx, "vector_db", None)
-    if db is None:
+    if client is None or not video_id:
         return
-
-    # 1. Vectors (+ their _meta sidecar rows): enumerate ids per collection
-    #    from the meta table, then delete each via the vector adapter.
-    if vec is not None:
-        for col in _INDEXED_COLLECTIONS:
-            try:
-                rows = await db.query(f"{col}_meta", {"video_id": video_id})
-            except Exception:
-                rows = []
-            for r in (rows or []):
-                vid = r.get("id")
-                if vid is None:
-                    continue
-                try:
-                    await vec.delete(col, str(vid))
-                except Exception:
-                    pass
-
-    # 2. Relational rows (vector-backed collections + relational-only tables
-    #    like ``keyclip`` that have no vectors to enumerate above).
-    for tbl in (*_INDEXED_COLLECTIONS, *_INDEXED_RELATIONAL_ONLY):
-        try:
-            await db.delete(tbl, {"video_id": video_id})
-        except Exception:
-            # Table may not exist, or schema may differ — ignore.
-            pass
+    try:
+        await client.delete_video(video_id)
+        logger.info(f"[COMPREHENSION] Deleted {video_id} from the collection")
+    except Exception as e:  # noqa: BLE001
+        # Already gone, or never ingested — nothing to clean up.
+        logger.warning(f"[COMPREHENSION] Could not delete {video_id}: {e}")
 
 
 def _probe_duration(video_path: Path) -> Optional[float]:

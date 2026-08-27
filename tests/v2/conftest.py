@@ -2,15 +2,13 @@
 
 The smoke tests (test_smoke_autonomous.py) need:
 
-* A real workspace seeded with a real video (Tears of Steel 720p from
-  ``~/lvmm-data/test_videos/`` — already on disk from lvmm-core's own
-  smoke test infrastructure; no fresh download).
+* A real workspace seeded with a real video (Tears of Steel 720p, cached
+  under ``~/vea-test-assets/test_videos/``; downloaded once).
 * Live log streaming so model outputs are visible during the run
   (the default pytest log capture buffers everything until the test
   finishes, defeating the purpose of "wire up logging").
 * A ``RUN_REAL_SMOKE=1`` gate so a casual ``pytest`` doesn't fire real
-  API calls — matches the pattern from lvmm-core's
-  ``tests/test_real_e2e_smoke.py``.
+  API calls.
 """
 from __future__ import annotations
 
@@ -34,13 +32,13 @@ sys.path.insert(0, str(_REPO))
 RUN_REAL_SMOKE = os.environ.get("RUN_REAL_SMOKE") == "1"
 SMOKE_SKIP_REASON = (
     "Real-network smoke gated on RUN_REAL_SMOKE=1. "
-    "Hits OpenRouter + lvmm-core master_indexing; costs tokens + minutes."
+    "Hits OpenRouter + the datalake; costs tokens, credits and minutes."
 )
 
 # Tears of Steel 720p — ~12 min open-movie test asset. Already on disk
-# from lvmm-core's smoke test (~/lvmm-data/test_videos/). We copy from
+# from the shared test-asset cache (~/vea-test-assets/test_videos/). We copy from
 # here into per-test workspace footage dirs.
-TEARS_OF_STEEL_720P = Path("~/lvmm-data/test_videos/tears_of_steel_720p.mp4").expanduser()
+TEARS_OF_STEEL_720P = Path("~/vea-test-assets/test_videos/tears_of_steel_720p.mp4").expanduser()
 
 
 # ---------------------------------------------------------------------------
@@ -68,13 +66,13 @@ def smoke_video_path() -> Path:
     """Path to the Tears of Steel 720p test video.
 
     Skips the whole smoke if the file isn't on disk. Doesn't auto-download
-    — by convention lvmm-core's smoke owns the download; if you haven't
+    — by convention this suite owns the download; if you haven't
     run it yet, do so once and the file lands in the shared location.
     """
     if not TEARS_OF_STEEL_720P.is_file():
         pytest.skip(
             f"Test video not found at {TEARS_OF_STEEL_720P}. "
-            f"Run lvmm-core's smoke once to auto-download, or fetch manually:\n"
+            f"Run this suite once to auto-download, or fetch manually:\n"
             f"  curl -L -o {TEARS_OF_STEEL_720P} https://download.blender.org/"
             f"durian/tears_of_steel/tears_of_steel_720p.mp4"
         )
@@ -109,18 +107,3 @@ def smoke_workspace(tmp_path, smoke_video_path, monkeypatch) -> Path:
     return workspaces_dir
 
 
-@pytest.fixture(autouse=True)
-def _propagate_lvmm_logs():
-    """Let lvmm-core's logs stream through pytest's log-cli capture.
-
-    PR #11 ships a structured-logging setup that disables propagation on
-    the ``lvmm_core`` logger so foreign handlers don't double-emit. That
-    same setting hides lvmm-core logs from pytest's caplog / log-cli
-    pipeline. For tests we want the opposite — enable propagation so
-    everything flows through pytest.
-    """
-    target = logging.getLogger("lvmm_core")
-    prev = target.propagate
-    target.propagate = True
-    yield
-    target.propagate = prev

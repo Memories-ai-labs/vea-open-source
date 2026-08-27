@@ -18,10 +18,10 @@ def client_and_workspaces(tmp_path, monkeypatch):
         patch("lib.oss.storage_factory.get_storage_client") as mock_storage,
         patch("lib.llm.GeminiGenaiManager.GeminiGenaiManager") as mock_gemini,
         patch("lib.llm.OpenRouterManager.OpenRouterManager") as mock_or,
-        # Stub the async lvmm-core init so app startup doesn't spin up a
-        # real PipelineContext just to test route behaviour.
-        patch("src.services.init_lvmm", new=AsyncMock(return_value=None)),
-        patch("src.services.close_lvmm", new=AsyncMock(return_value=None)),
+        # Stub the async retrieval init so app startup doesn't open a real
+        # datalake session just to test route behaviour.
+        patch("src.services.init_retrieval", new=AsyncMock(return_value=None)),
+        patch("src.services.close_retrieval", new=AsyncMock(return_value=None)),
         patch.dict("os.environ", {
             "GOOGLE_CLOUD_PROJECT": "p",
             "OPENROUTER_API_KEY": "or",

@@ -127,13 +127,13 @@ class ToolExecutor:
         footage_fps: Optional[Dict[str, float]] = None,
         source_fps: Optional[float] = None,
     ):
-        # Video-understanding handles from lvmm-core (replaces the old
+        # Video-understanding handles (replace the old
         # memories.ai cloud client). ``mavi_agent.ask(question, video_id=...)``
         # backs the ``ask_memories`` tool; ``querier.search(question, ...)``
         # backs the ``search_footage`` tool. Both are constructed in
-        # ``src.services.init_lvmm()`` and shared across the app.
+        # ``src.services.init_retrieval()`` and shared across the app.
         #
-        # API note: lvmm-core commit 330a34c renamed Searcher → Querier and
+        # API note: the search facade is ``Querier`` (was ``Searcher``) and
         # changed MaviAgent.ask to take a single ``video_id`` only (no list).
         # VEA adapts multi-video projects by calling MaviAgent once per
         # project video and merging the answers.
@@ -187,14 +187,14 @@ class ToolExecutor:
     # ── Individual tool implementations ───────────────────────────────────
 
     async def _ask_memories(self, args: Dict) -> Dict:
-        """Backed by lvmm-core's MaviAgent: query rewrite → parallel search → rerank → answer.
+        """Backed by the retrieval agent: query rewrite → search → rerank → answer.
 
         Returns the same shape the agent loop has always seen
         (``answer`` + ``reference_count``), so the rest of the tool
         protocol is unchanged.
 
         ``MaviAgent.ask`` only accepts a single ``video_id`` (no list) since
-        lvmm-core commit 330a34c. For multi-source projects, ask every indexed
+        one ``video_id``. For multi-source projects, ask every indexed
         project video and merge the answers so the tool still covers the full
         workspace.
         """
@@ -235,7 +235,7 @@ class ToolExecutor:
         }
 
     async def _search_footage(self, args: Dict) -> Dict:
-        """Backed by lvmm-core's Querier.
+        """Backed by the retrieval querier.
 
         Searches the ``video_transcript`` (Gemini visual captions) and
         ``transcript`` (Whisper audio dialogue, if ASR was enabled at
@@ -280,7 +280,7 @@ class ToolExecutor:
             score = float(hit.get("similarity") or 0)
 
             # Slice transcript to this clip's time range — same overlap logic
-            # as before, just sourced from the lvmm-core DB query.
+            # as before, just sourced from the transcript query.
             clip_transcript = []
             for seg in transcript_segments:
                 seg_text = seg.get("text", "").strip()
@@ -297,7 +297,7 @@ class ToolExecutor:
 
             clip_data: Dict[str, Any] = {
                 "video_no": video_no,
-                "video_name": video_no,  # lvmm-core hits don't carry display name; video_no IS the name
+                "video_name": video_no,  # hits don't carry a display name; video_no IS the name
                 "start_seconds": start,
                 "end_seconds": end,
                 "score": score,
@@ -311,14 +311,13 @@ class ToolExecutor:
     async def _get_transcript_segments(self) -> List[Dict]:
         """Fetch + cache audio-transcript segments for the first indexed video.
 
-        Reads from lvmm-core's ``transcript`` table (populated by Whisper
+        Reads the audio transcript for the first indexed video (the
         when ASR is enabled at indexing time). VEA currently wires
-        ``asr="none"`` in ``services.init_lvmm`` so this returns [] in
+        datalake returns [] for a video with no speech), so callers must
         practice — callers should treat empty as "no enrichment available"
         and not error.
 
-        (Table was named ``audio_transcripts`` in earlier lvmm-core
-        revisions; the current schema uses ``transcript``.)
+        treat empty as "no enrichment available" rather than an error.
         """
         if hasattr(self, '_cached_transcript'):
             return self._cached_transcript
@@ -326,7 +325,7 @@ class ToolExecutor:
         self._cached_transcript = []
         try:
             from src import services as _services
-            ctx = _services.lvmm_ctx
+            ctx = _services.retrieval_ctx
             if ctx is None or not self.video_nos:
                 return self._cached_transcript
             video_id = self.video_nos[0]

@@ -108,7 +108,7 @@ def register_websocket_routes(app: FastAPI):
 
         # Validate dependencies
         if not services.mavi_agent or not services.querier:
-            await websocket.send_json({"type": "error", "data": {"message": "lvmm-core not initialised. Check server startup logs."}})
+            await websocket.send_json({"type": "error", "data": {"message": "Retrieval backend not initialised. Check server startup logs."}})
             await websocket.close()
             return
         if not services.gemini_manager:
@@ -156,11 +156,12 @@ def register_websocket_routes(app: FastAPI):
         agent = services._agent_sessions.get(project_name)
         if agent is None and not needs_indexing:
             try:
+                scoped_querier, scoped_agent = services.project_handles(session_data)
                 agent = AgentSession(
                     project_name=project_name,
                     workspace=workspace,
-                    mavi_agent=services.mavi_agent,
-                    querier=services.querier,
+                    mavi_agent=scoped_agent,
+                    querier=scoped_querier,
                     gemini_manager=services.main_llm,
                     video_llm=services.video_llm,
                     video_entries=session_data.videos,
@@ -330,7 +331,7 @@ def register_websocket_routes(app: FastAPI):
                         # Trigger indexing for this project. Runs in the background and
                         # broadcasts index_progress events through the project's emitter list.
                         # Optional `files: [filename, ...]` re-indexes only those files
-                        # (purges existing lvmm-core rows/vectors first).
+                        # (deletes the previous ingest first).
                         only_files = msg.get("files") or None
                         if services._indexing_progress.get(project_name, {}).get("status") == "running":
                             await emit("index_progress", services._indexing_progress[project_name])
@@ -496,11 +497,11 @@ def register_websocket_routes(app: FastAPI):
             footage_files = workspace.scan_footage() if workspace.get_footage_dir().is_dir() else []
             total = len(only_files) if only_files else len(footage_files)
 
-            if not services.mavi_agent or not services.lvmm_ctx:
+            if not services.mavi_agent or not services.retrieval_ctx:
                 await _broadcast_index_progress(project_name, {
                     "status": "error",
                     "percent": 0,
-                    "message": "lvmm-core not initialised. Check server startup logs.",
+                    "message": "Retrieval backend not initialised. Check server startup logs.",
                 })
                 return
 
@@ -523,8 +524,7 @@ def register_websocket_routes(app: FastAPI):
             pipeline = LightweightComprehension(
                 project_name=project_name,
                 source_dir=str(workspace.get_footage_dir()),
-                lvmm_ctx=services.lvmm_ctx,
-                mavi_agent=services.mavi_agent,
+                client=services.datalake_client,
                 workspace=workspace,
             )
 

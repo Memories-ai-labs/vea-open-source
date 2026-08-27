@@ -1,21 +1,22 @@
 """Memories.ai Video Datalake backend for VEA's V2 retrieval handles.
 
-VEA V2 talks to its video-understanding layer through exactly two objects:
+VEA V2 reaches its video-understanding layer through exactly two objects:
 
     mavi_agent.ask(question, video_id=...)  -> trace with .answer
     querier.search(query, video_ids=, top_k=, collections=) -> list[dict]
 
-lvmm-core supplies those locally (SQLite + sqlite-vec + MobileCLIP). This
-module supplies the same two contracts against the hosted **Video Datalake**
-(``https://api.memories.ai/datalake/v1``) instead, so the agent loop, the
-tool executor, the FCPXML compiler and the renderer all run unmodified.
+This module implements both against the hosted **Video Datalake**
+(``https://api.memories.ai/datalake/v1``), plus the ingest side, so the agent
+loop, the tool executor, the FCPXML compiler and the renderer need no
+knowledge of where understanding comes from.
 
-Select it with ``VIDEO_BACKEND=datalake`` (see ``src/services.init_lvmm``).
+Anything else that satisfies those two signatures can be dropped in the same
+way — see ``src/services.init_retrieval``.
 
 Mapping
 -------
 =========================  ==================================================
-VEA / lvmm-core            Datalake
+What VEA asks for          Datalake
 =========================  ==================================================
 ``Querier.search``         ``POST /search`` (semantic, targets caption +
                            transcription, ``filter.video_ids`` scoping)
@@ -24,17 +25,17 @@ VEA / lvmm-core            Datalake
                            ``main_llm``
 ``ctx.database.query(      ``GET /videos/{id}/transcription``
 "transcript", ...)``
-``video_no``               filename; the datalake's ``vid_...`` ids live in
-                           the sidecar map written by scripts/datalake_ingest
+``video_no``               filename; the datalake's ``vid_...`` ids live on
+                           ``VideoEntry.datalake_video_id`` in session.json
 =========================  ==================================================
 
 Environment
 -----------
 =============================  ==============================================
 ``MEMORIES_API_KEY``           required
-``DATALAKE_MAP``               path to the ingest sidecar (carries the
-                               collection id and the filename -> vid_... map)
-``DATALAKE_COLLECTION_ID``     overrides the sidecar's collection id
+``DATALAKE_COLLECTION_ID``     default collection for unscoped clients; each
+                               project normally supplies its own from the
+                               session (see ``services.project_handles``)
 ``DATALAKE_RERANK``            ``0`` disables the cross-encoder pass in
                                ``ask`` (billed x3); default on
 ``DATALAKE_MAX_ATTEMPTS``      HTTP attempts per request (default 5)
@@ -56,7 +57,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_HOST = "https://api.memories.ai"
 API_PREFIX = "/datalake/v1"
 
-# lvmm-core collection names -> datalake search targets
+# VEA's collection names -> datalake search targets
 _TARGET_MAP = {
     "video_transcript": "caption",       # visual captions
     "transcript": "transcription",       # spoken audio
@@ -129,6 +130,7 @@ class DatalakeClient:
         collection_id: Optional[str] = None,
         host: str = DEFAULT_HOST,
         map_path: Optional[str] = None,
+        name_map: Optional[Dict[str, str]] = None,
         max_attempts: Optional[int] = None,
         session: Optional[aiohttp.ClientSession] = None,
     ) -> None:
@@ -136,9 +138,9 @@ class DatalakeClient:
         if not self.api_key:
             raise ValueError("MEMORIES_API_KEY required for the datalake backend")
 
-        # ``DATALAKE_MAP`` points at the sidecar scripts/datalake_ingest.py wrote:
-        # {"collection_id": ..., "videos": {filename: vid_...}}. It carries the
-        # collection id too, so one env var is usually enough.
+        # A sidecar file ({"collection_id": ..., "videos": {filename: vid_...}})
+        # is still accepted via ``map_path`` / ``DATALAKE_MAP`` for scripted
+        # runs; the normal path is ``name_map`` straight from the session.
         self.name_to_id: Dict[str, str] = {}
         self.id_to_name: Dict[str, str] = {}
         sidecar = map_path or os.environ.get("DATALAKE_MAP", "")
@@ -150,13 +152,15 @@ class DatalakeClient:
             self.id_to_name = {v: k for k, v in self.name_to_id.items()}
             mapped_collection = blob.get("collection_id") or ""
 
+        # A caller that already holds the project's session (filename -> vid_...)
+        # passes it directly; the sidecar file is the CLI/script path.
+        if name_map:
+            self.name_to_id.update(name_map)
+            self.id_to_name.update({v: k for k, v in name_map.items()})
+
         self.collection_id = (
             collection_id or os.environ.get("DATALAKE_COLLECTION_ID", "") or mapped_collection
         )
-        if not self.collection_id:
-            raise ValueError(
-                "collection id required: set DATALAKE_COLLECTION_ID or DATALAKE_MAP"
-            )
         self.host = host.rstrip("/")
         self.max_attempts = max_attempts or int(os.environ.get("DATALAKE_MAX_ATTEMPTS", "5"))
         self.cost = Cost()
@@ -180,9 +184,13 @@ class DatalakeClient:
 
     async def _sess(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
+            # Authorization only: a session-level Content-Type would override
+            # the multipart boundary on uploads (the API answers 400 "request
+            # body is missing or not valid JSON"). aiohttp sets the right type
+            # per request — json= for JSON, FormData for uploads.
             self._session = aiohttp.ClientSession(
-                headers={"Authorization": self.api_key, "Content-Type": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=180),
+                headers={"Authorization": self.api_key},
+                timeout=aiohttp.ClientTimeout(total=1800),
             )
         return self._session
 
@@ -257,6 +265,11 @@ class DatalakeClient:
         ``max_results`` defaults to *top_k* (one page). Hybrid mode does not
         paginate server-side, so raise *top_k* there instead.
         """
+        if not self.collection_id:
+            raise ValueError(
+                "no collection bound to this client — index the project first "
+                "(POST /v2/index) or pass collection_id"
+            )
         payload: Dict[str, Any] = {
             "collection_id": self.collection_id,
             "query": query,
@@ -294,6 +307,127 @@ class DatalakeClient:
             r["video_id"] = self.to_name(r.get("video_id", ""))
         return results[:want]
 
+    # ── collection + video management (free per pricing) ──────────────
+
+    async def create_collection(self, name: str) -> str:
+        body = await self._post("/collections", {"name": name})
+        return body.get("id") or (body.get("collection") or {}).get("id", "")
+
+    async def list_collections(self) -> List[Dict[str, Any]]:
+        body = await self._get("/collections")
+        return body.get("collections") or []
+
+    async def ensure_collection(self, name: str) -> str:
+        """Return the id of the collection called *name*, creating it if absent."""
+        for c in await self.list_collections():
+            if c.get("name") == name:
+                return c.get("id", "")
+        return await self.create_collection(name)
+
+    async def list_videos(self, collection_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        cid = collection_id or self.collection_id
+        out: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+        while True:
+            q = f"?collection_id={cid}&page_size=100" + (f"&cursor={cursor}" if cursor else "")
+            body = await self._get(f"/videos{q}")
+            out.extend(body.get("videos") or [])
+            cursor = body.get("next_cursor")
+            if not cursor:
+                return out
+
+    async def videos_by_title(self, collection_id: Optional[str] = None) -> Dict[str, str]:
+        """``{metadata.title: video_id}`` for everything already ingested."""
+        by_title: Dict[str, str] = {}
+        for v in await self.list_videos(collection_id):
+            title = (v.get("metadata") or {}).get("title") or ""
+            vid = v.get("id") or v.get("video_id") or ""
+            if title and vid:
+                by_title[title] = vid
+        return by_title
+
+    async def get_video(self, video_id: str) -> Dict[str, Any]:
+        video_id = self.name_to_id.get(video_id, video_id)
+        return await self._get(f"/videos/{video_id}")
+
+    async def delete_video(self, video_id: str) -> None:
+        video_id = self.name_to_id.get(video_id, video_id)
+        await self._request("DELETE", f"/videos/{video_id}")
+
+    async def upload_file(
+        self,
+        path: str,
+        collection_id: Optional[str] = None,
+        title: Optional[str] = None,
+        fps: float = 1.0,
+        tags: Optional[List[str]] = None,
+    ) -> str:
+        """Ingest one local file; returns its ``vid_...``.
+
+        Indexing is priced per video-minute. Concurrency matters: the API
+        accepts roughly five in-flight ingests and answers 429 after that, and
+        its ``retry_after`` hint does not describe that limit — callers should
+        gate uploads (see ``DatalakeIngestor``) rather than lean on retries.
+        ``idempotency_key`` makes a replay return the existing video unbilled.
+        """
+        import os.path as _osp
+
+        cid = collection_id or self.collection_id
+        name = title or _osp.basename(path)
+        meta = {
+            "collection_id": cid,
+            "fps": fps,
+            "metadata": {"title": name, "tags": tags or ["vea"]},
+            "idempotency_key": f"vea-{cid[-8:]}-{name}",
+        }
+        sess = await self._sess()
+        url = f"{self.host}{API_PREFIX}/videos"
+        last = ""
+
+        for attempt in range(self.max_attempts):
+            # FormData is single-use; rebuild it (and reopen the file) per try.
+            form = aiohttp.FormData()
+            form.add_field("json", json.dumps(meta), content_type="application/json")
+            with open(path, "rb") as fh:
+                form.add_field("file", fh, filename=name, content_type="video/mp4")
+                async with sess.post(url, data=form) as r:
+                    body = await r.json(content_type=None)
+                    if r.status == 429:
+                        hint = float((body.get("error") or {}).get("retry_after") or 1)
+                        last = f"429 (ingest window full, retry_after={hint})"
+                    elif r.status >= 400:
+                        raise RuntimeError(f"datalake upload {name} -> {r.status}: {body}")
+                    else:
+                        vid = body.get("video_id") or body.get("id") or ""
+                        self.name_to_id[name] = vid
+                        self.id_to_name[vid] = name
+                        return vid
+            wait = 2 + 5 * attempt
+            logger.warning(f"[DATALAKE] upload {name} {last} — retrying in {wait}s")
+            await asyncio.sleep(wait)
+
+        raise RuntimeError(f"datalake upload {name} failed after {self.max_attempts} attempts: {last}")
+
+    async def wait_ready(self, video_id: str, timeout_s: int = 1800, poll_s: int = 10) -> str:
+        """Block until a video reports ``ready``; raises on failure/timeout."""
+        waited = 0
+        last = ""
+        while waited < timeout_s:
+            body = await self.get_video(video_id)
+            status = body.get("status", "")
+            if status != last:
+                logger.info(f"[DATALAKE] {video_id} {status}")
+                last = status
+            if status == "ready":
+                return status
+            if status in ("failed", "cancelled"):
+                raise RuntimeError(f"{video_id} ended as {status}: {body.get('error')}")
+            await asyncio.sleep(poll_s)
+            waited += poll_s
+        raise TimeoutError(f"{video_id} not ready after {timeout_s}s")
+
+    # ── priced reads ──────────────────────────────────────────────────
+
     async def summary(self, video_id: str) -> str:
         video_id = self.name_to_id.get(video_id, video_id)
         body = await self._get(f"/videos/{video_id}/summary")
@@ -315,11 +449,59 @@ class DatalakeClient:
         return caps if isinstance(caps, list) else []
 
 
+class DatalakeIngestor:
+    """Ingest local files into a collection, then read back their summaries.
+
+    The API accepts about five in-flight ingests and answers 429 once that
+    window is full, so upload+wait pairs run behind a semaphore instead of
+    firing everything at once. Files already in the collection under the same
+    title are reused, so a re-run neither re-uploads nor re-bills.
+    """
+
+    def __init__(self, client: DatalakeClient, concurrency: int = 4) -> None:
+        self.client = client
+        self.sem = asyncio.Semaphore(concurrency)
+
+    async def ingest(
+        self,
+        paths: List[str],
+        collection_id: Optional[str] = None,
+        on_progress: Optional[Any] = None,
+    ) -> List[str]:
+        """Return one ``vid_...`` per input path, in the same order."""
+        cid = collection_id or self.client.collection_id
+        existing = await self.client.videos_by_title(cid)
+        if existing:
+            logger.info(f"[DATALAKE] {len(existing)} videos already in {cid}, reusing by title")
+
+        done = 0
+        total = len(paths)
+
+        async def one(path: str) -> str:
+            nonlocal done
+            import os.path as _osp
+            name = _osp.basename(path)
+            async with self.sem:
+                vid = existing.get(name)
+                if vid:
+                    self.client.name_to_id[name] = vid
+                    self.client.id_to_name[vid] = name
+                else:
+                    vid = await self.client.upload_file(path, cid)
+                await self.client.wait_ready(vid)
+            done += 1
+            if on_progress:
+                await on_progress(done, total, name, vid)
+            return vid
+
+        return list(await asyncio.gather(*[one(p) for p in paths]))
+
+
 # ---------------------------------------------------------------- querier
 
 
 class DatalakeQuerier:
-    """``lvmm_core...Querier`` work-alike backed by ``POST /search``."""
+    """Semantic moment search: ``POST /search`` in the hit shape VEA reads."""
 
     def __init__(self, client: DatalakeClient) -> None:
         self.client = client
@@ -419,9 +601,9 @@ async def _no_summary() -> str:
 class DatalakeAgent:
     """``MaviAgent`` work-alike: rewrite -> retrieve -> answer.
 
-    lvmm-core's MaviAgent runs rewrite -> search -> rerank -> answer. This keeps
-    the same four stages: the rewrite is one cheap LLM call, the rerank is the
-    datalake's own cross-encoder pass on the caption page.
+    Four stages: the rewrite is one cheap LLM call, retrieval is a reranked
+    caption search plus a transcription search, the summary read covers the
+    whole video, and the answer comes from VEA's own main_llm.
     """
 
     def __init__(
@@ -562,7 +744,7 @@ async def build_datalake_context(
     llm: LLMLike,
     video_ids: Optional[List[str]] = None,
 ) -> tuple[DatalakeContext, _Lifecycle, DatalakeQuerier, DatalakeAgent]:
-    """Return ``(ctx, lifecycle, querier, agent)`` for ``services.init_lvmm``."""
+    """Return ``(ctx, lifecycle, querier, agent)`` for ``services.init_retrieval``."""
     client = DatalakeClient()
     ctx = DatalakeContext(client=client, database=_DatabaseShim(client), llm=llm)
     querier = DatalakeQuerier(client)

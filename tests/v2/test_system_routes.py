@@ -19,10 +19,10 @@ def client():
         patch("lib.oss.storage_factory.get_storage_client") as mock_storage,
         patch("lib.llm.GeminiGenaiManager.GeminiGenaiManager") as mock_gemini,
         patch("lib.llm.OpenRouterManager.OpenRouterManager") as mock_or,
-        # Stub the async lvmm-core init so app startup doesn't spin it up
+        # Stub the async retrieval init so app startup doesn't spin it up
         # for a route-only test.
-        patch("src.services.init_lvmm", new=AsyncMock(return_value=None)),
-        patch("src.services.close_lvmm", new=AsyncMock(return_value=None)),
+        patch("src.services.init_retrieval", new=AsyncMock(return_value=None)),
+        patch("src.services.close_retrieval", new=AsyncMock(return_value=None)),
         patch.dict("os.environ", {
             "GOOGLE_CLOUD_PROJECT": "test-project",
             "OPENROUTER_API_KEY": "test-or-key",

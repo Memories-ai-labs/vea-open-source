@@ -13,7 +13,7 @@
   </p>
 
   <p>
-    <img src="https://img.shields.io/badge/Release-2.0-0E0E10.svg" alt="Release 2.0">
+    <img src="https://img.shields.io/badge/Release-2.1-0E0E10.svg" alt="Release 2.0">
     <a href="LICENSE">
       <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
     </a>
@@ -32,7 +32,7 @@
   </p>
 
   <p align="center">
-    <strong>VEA 2.0</strong> is the agent release: editing is a conversation with a tool-using agent instead of a fixed pipeline, and video understanding is a swappable backend — local <a href="https://github.com/Memories-ai-labs/lvmm-core">lvmm-core</a> or the hosted Memories.ai Video Datalake. See <a href="CHANGELOG.md">CHANGELOG.md</a>.
+    <strong>VEA 2.1</strong>: the agent release: editing is a conversation with a tool-using agent instead of a fixed pipeline, and video understanding is one HTTP dependency — the hosted <a href="https://memories.ai">Memories.ai</a> Video Datalake. See <a href="CHANGELOG.md">CHANGELOG.md</a>.
   </p>
 </div>
 
@@ -42,7 +42,7 @@
 
 You drop video files into a project folder, then chat with an agent that:
 
-* 🧠 **Understands** your footage via the local [lvmm-core](https://github.com/Memories-ai-labs/lvmm-core) index (visual transcripts, semantic search, and RAG chat).
+* 🧠 **Understands** your footage through the [Memories.ai](https://memories.ai) Video Datalake (visual captions, speech transcription, semantic moment search).
 * 🎬 **Plans and selects clips** based on your creative brief, refining cut points using LLM video analysis.
 * 🗣️ **Narrates** with [ElevenLabs](https://elevenlabs.io) text-to-speech (optional, on request).
 * 🎵 **Adds music** via Google Lyria 3 AI music generation with automatic loudness balancing (optional).
@@ -111,25 +111,18 @@ VEA uses **two** LLM slots and routes each to the best backend:
 
 Both can be swapped live — dashboard dropdown, `POST /video-edit/v2/system/model`, or `POST /video-edit/v2/system/video_model`.
 
-### Video-understanding backend
+### Video understanding
 
-`ask_memories` and `search_footage` are served by one of two interchangeable backends:
+`ask_memories` and `search_footage` are served by the **Memories.ai Video Datalake** (`MEMORIES_API_KEY`). Indexing a project uploads its footage into a collection named after the project, and the datalake produces the captions, speech transcription and per-video summaries the agent searches. Nothing is indexed on your machine — there are no model weights to download and no vector DB to run.
 
-| `VIDEO_BACKEND` | Retrieval | Indexing | Needs |
-|---|---|---|---|
-| unset (default) | local **lvmm-core** — SQLite + sqlite-vec, MobileCLIP embeddings | `POST /v2/index`, on your machine | `OPENROUTER_API_KEY`, ~325 MB MobileCLIP weights |
-| `datalake` | hosted **Memories.ai Video Datalake** (`/datalake/v1/search`, captions + transcription + summary) | `python -m scripts.datalake_ingest --project NAME` | `MEMORIES_API_KEY` |
+The whole surface VEA needs is two calls:
 
-The datalake path ingests footage into a collection, records the `vid_...` ids in
-`data/workspaces/{project}/datalake.json`, and is then selected per run:
-
-```bash
-python -m scripts.datalake_ingest --project my-project      # prints the collection id
-VIDEO_BACKEND=datalake DATALAKE_MAP=data/workspaces/my-project/datalake.json \
-  python -m src.cli --project my-project --reuse-index --brief "..."
+```python
+mavi_agent.ask(question, video_id=...)                       # -> grounded answer
+querier.search(query, video_ids=, top_k=, collections=)      # -> timestamped moments
 ```
 
-Everything downstream — agent loop, tools, FCPXML compiler, renderer — is identical on both paths; only `src/services.init_lvmm` differs.
+Anything that satisfies those two signatures can replace the datalake — see [`src/datalake.py`](src/datalake.py) for the reference implementation and `src/services.init_retrieval` for where it is wired.
 
 Datalake knobs (all optional):
 
@@ -186,7 +179,7 @@ Navigate to **http://localhost:8000/app**, click your project, and you'll land i
 
 ### 3. Index footage
 
-If the footage hasn't been indexed yet, the dashboard shows an **"Index footage"** banner with a button. Click it. The indexer analyzes each file locally through lvmm-core and generates a content gist. Progress streams live to the UI.
+If the footage hasn't been indexed yet, the dashboard shows an **"Index footage"** banner with a button. Click it. Each file is uploaded to the project's datalake collection and its summary comes back as a content gist. Progress streams live to the UI.
 
 > Indexing takes 1–5 minutes per video depending on length and upload speed. Once finished, every footage pill shows a green check.
 
@@ -309,7 +302,7 @@ The agent has 10 tools, all declared in `src/pipelines/v2/agent/tool_definitions
 
 | Tool | Purpose |
 |------|---------|
-| `ask_memories` | Natural-language Q&A against indexed footage (lvmm-core RAG chat) |
+| `ask_memories` | Natural-language Q&A against indexed footage (retrieval + grounded answer) |
 | `search_footage` | Semantic clip search returning timestamps + dialogue transcripts |
 | `refine_clip_timestamps` | Frame-accurate in/out point selection via Gemini video analysis |
 | `update_scratchpad` | Write to one of the 4 persistent scratchpads |
@@ -335,7 +328,7 @@ V2 (current, agent-driven) is at `/video-edit/v2`. The most useful endpoints:
 | `WS` | `/v2/agent/{project}/chat` | Agent chat WebSocket (used by dashboard) |
 | `GET` | `/v2/projects/{project}/renders/{filename}` | Stream rendered MP4 |
 | `POST` | `/v2/projects/{project}/clear/planning` | Clear chat + scratchpads + edit |
-| `POST` | `/v2/projects/{project}/clear/memories` | Clear local lvmm-core index rows/vectors for a project |
+| `POST` | `/v2/projects/{project}/clear/memories` | Delete a project's videos from its datalake collection |
 
 There is no V1 API on this branch — the original pipeline-style system from the paper (`/video-edit/v1`, index → flexible_respond) and its `MemoriesAiManager` cloud client were removed when V2 landed. That codebase is preserved on the [`legacy/v1-main`](https://github.com/Memories-ai-labs/vea-open-source/tree/legacy/v1-main) branch.
 
