@@ -14,7 +14,7 @@
 
   "api_keys": {
     "MEMORIES_API_KEY": "your-memories-ai-api-key",
-    "_memories_comment": "Optional; only needed for legacy V1 Memories.ai flows. V2 video understanding uses local lvmm-core.",
+    "_memories_comment": "Required only when VIDEO_BACKEND=datalake — the Memories.ai Video Datalake key (sk-mai-... / sk-mavi-...). Left unset, video understanding runs locally through lvmm-core.",
 
     "OPENROUTER_API_KEY": "your-openrouter-api-key",
     "_openrouter_comment": "Get your API key from https://openrouter.ai (LLM agent + lvmm-core local RAG + music generation)",

@@ -267,6 +267,18 @@ async def init_lvmm() -> None:
     if lvmm_ctx is not None:
         return
 
+    # VIDEO_BACKEND=datalake swaps the local lvmm-core stack for the hosted
+    # Memories.ai Video Datalake. Same two handles (mavi_agent / querier), so
+    # the agent loop, tools, FCPXML compiler and renderer are untouched.
+    # Indexing is not part of this path — videos are ingested into a datalake
+    # collection out of band (scripts/datalake_ingest.py) and the workspace
+    # session carries their ``vid_...`` ids as video_no.
+    if os.environ.get("VIDEO_BACKEND", "").lower() == "datalake":
+        from src.datalake import build_datalake_context
+        lvmm_ctx, lvmm_lifecycle, querier, mavi_agent = await build_datalake_context(main_llm)
+        logger.info("video backend: Memories.ai Video Datalake (lvmm-core not loaded)")
+        return
+
     try:
         from lvmm_core.services.local_dev import build_local_context
         from lvmm_core.core.retrieval.luci_memory.querier import Querier
