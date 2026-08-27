@@ -17,11 +17,11 @@ def client():
     with (
         patch("lib.oss.storage_factory.get_storage_client") as mock_storage,
         patch("lib.llm.GeminiGenaiManager.GeminiGenaiManager") as mock_gemini,
-        # Skip the real lvmm-core async init at app startup — tests just need
+        # Skip the real async retrieval init at app startup — tests just need
         # the singletons populated. The per-test fixtures below override these
         # with MagicMock instances for any test that exercises routes.
-        patch("src.services.init_lvmm", new=AsyncMock(return_value=None)),
-        patch("src.services.close_lvmm", new=AsyncMock(return_value=None)),
+        patch("src.services.init_retrieval", new=AsyncMock(return_value=None)),
+        patch("src.services.close_retrieval", new=AsyncMock(return_value=None)),
         patch.dict("os.environ", {
             "GOOGLE_CLOUD_PROJECT": "test-project",
         }),
@@ -61,10 +61,10 @@ def test_root_health(client):
 # V2 Index — requires Memories.ai mock
 # ---------------------------------------------------------------------------
 
-def test_v2_index_missing_lvmm(client, tmp_path, monkeypatch):
-    """Should return 503 if lvmm-core didn't initialise."""
+def test_v2_index_missing_retrieval_backend(client, tmp_path, monkeypatch):
+    """Should return 503 if the retrieval backend didn't initialise."""
     monkeypatch.setattr("src.services.mavi_agent", None)
-    monkeypatch.setattr("src.services.lvmm_ctx", None)
+    monkeypatch.setattr("src.services.retrieval_ctx", None)
     monkeypatch.setattr("src.config.WORKSPACES_DIR", tmp_path)
     resp = client.post("/video-edit/v2/index", json={
         "project_name": "p1",
@@ -72,7 +72,7 @@ def test_v2_index_missing_lvmm(client, tmp_path, monkeypatch):
         "start_fresh": False,
     })
     assert resp.status_code == 503
-    assert "lvmm-core" in resp.json()["detail"]
+    assert "Retrieval backend" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +83,7 @@ def test_v2_plan_project_not_found(client, tmp_path, monkeypatch):
     monkeypatch.setattr("src.config.WORKSPACES_DIR", tmp_path)
     monkeypatch.setattr("src.services.mavi_agent", MagicMock())
     monkeypatch.setattr("src.services.querier", MagicMock())
-    monkeypatch.setattr("src.services.lvmm_ctx", MagicMock())
+    monkeypatch.setattr("src.services.retrieval_ctx", MagicMock())
     monkeypatch.setattr("src.services.gemini_manager", MagicMock())
     resp = client.post("/video-edit/v2/plan", json={
         "project_name": "doesnotexist",
@@ -96,7 +96,7 @@ def test_v2_plan_starts_for_existing_project(client, project_workspace, monkeypa
     ws, tmp_path = project_workspace
     monkeypatch.setattr("src.services.mavi_agent", MagicMock())
     monkeypatch.setattr("src.services.querier", MagicMock())
-    monkeypatch.setattr("src.services.lvmm_ctx", MagicMock())
+    monkeypatch.setattr("src.services.retrieval_ctx", MagicMock())
     monkeypatch.setattr("src.services.gemini_manager", MagicMock())
 
     # Patch IterativePlanningLoop.run to return immediately
@@ -114,18 +114,19 @@ def test_v2_plan_starts_for_existing_project(client, project_workspace, monkeypa
     assert data["project_name"] == "test_proj"
 
 
-def test_v2_plan_uses_lvmm_illm_for_planning_loop(client, project_workspace, monkeypatch):
-    """The legacy /v2/plan loop expects lvmm-core's async ILLM contract."""
+def test_v2_plan_uses_structured_llm_over_main_llm(client, project_workspace, monkeypatch):
+    """The /v2/plan loop awaits ``generate_structured``, which VEA's sync LLM
+    managers don't have — so the route must wrap main_llm in StructuredLLM
+    rather than hand the raw manager over."""
     from src import services
+    from src.llm_structured import StructuredLLM
 
     services._planning_sessions.pop("test_proj", None)
-    lvmm_llm = object()
-    legacy_vea_llm = object()
+    main = MagicMock()
 
     monkeypatch.setattr("src.services.mavi_agent", MagicMock())
     monkeypatch.setattr("src.services.querier", MagicMock())
-    monkeypatch.setattr("src.services.lvmm_ctx", SimpleNamespace(llm=lvmm_llm))
-    monkeypatch.setattr("src.services.gemini_manager", legacy_vea_llm)
+    monkeypatch.setattr("src.services.main_llm", main)
 
     captured = {}
 
@@ -147,7 +148,8 @@ def test_v2_plan_uses_lvmm_illm_for_planning_loop(client, project_workspace, mon
     })
 
     assert resp.status_code == 200
-    assert captured["gemini"] is lvmm_llm
+    assert isinstance(captured["gemini"], StructuredLLM)
+    assert captured["gemini"].manager is main
 
 
 # ---------------------------------------------------------------------------

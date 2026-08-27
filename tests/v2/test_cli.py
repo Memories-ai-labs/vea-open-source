@@ -70,12 +70,12 @@ class TestParser:
 # ─── Service lifecycle ───────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_ensure_indexed_initializes_lvmm_before_reuse(monkeypatch):
-    """--reuse-index skips indexing, not lvmm setup needed by agent tools."""
+async def test_ensure_indexed_initializes_retrieval_before_reuse(monkeypatch):
+    """--reuse-index skips indexing, not the retrieval setup the agent tools need."""
     import src.cli as cli
 
-    async def fake_init_lvmm():
-        cli.services.lvmm_ctx = object()
+    async def fake_init_retrieval():
+        cli.services.retrieval_ctx = object()
         cli.services.mavi_agent = object()
 
     class CachedWorkspace:
@@ -84,11 +84,11 @@ async def test_ensure_indexed_initializes_lvmm_before_reuse(monkeypatch):
         def exists(self):
             return True
 
-    monkeypatch.setattr(cli.services, "lvmm_ctx", None)
+    monkeypatch.setattr(cli.services, "retrieval_ctx", None)
     monkeypatch.setattr(cli.services, "mavi_agent", None)
-    init_mock = AsyncMock(side_effect=fake_init_lvmm)
+    init_mock = AsyncMock(side_effect=fake_init_retrieval)
     emitter = AsyncMock()
-    monkeypatch.setattr(cli.services, "init_lvmm", init_mock)
+    monkeypatch.setattr(cli.services, "init_retrieval", init_mock)
 
     await _ensure_indexed(CachedWorkspace(), emitter, reuse=True)
 
@@ -100,8 +100,8 @@ async def test_ensure_indexed_initializes_lvmm_before_reuse(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_closes_lvmm_on_early_return(monkeypatch, tmp_path):
-    """The CLI must release lvmm-core resources before process exit."""
+async def test_run_closes_retrieval_on_early_return(monkeypatch, tmp_path):
+    """The CLI must release the retrieval backend resources before process exit."""
     import src.cli as cli
 
     class EmptyWorkspace:
@@ -118,7 +118,7 @@ async def test_run_closes_lvmm_on_early_return(monkeypatch, tmp_path):
     close_mock = AsyncMock()
     monkeypatch.setattr(cli, "WorkspaceManager", EmptyWorkspace)
     monkeypatch.setattr(cli, "_stage_footage", lambda workspace, footage_dir: 0)
-    monkeypatch.setattr(cli.services, "close_lvmm", close_mock)
+    monkeypatch.setattr(cli.services, "close_retrieval", close_mock)
 
     args = SimpleNamespace(
         project="empty",

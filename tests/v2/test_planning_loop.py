@@ -1,4 +1,4 @@
-"""Tests for IterativePlanningLoop — mocked lvmm-core retrieval and Gemini."""
+"""Tests for IterativePlanningLoop — mocked retrieval and LLM."""
 import asyncio
 import pytest
 from types import SimpleNamespace
@@ -51,7 +51,7 @@ def make_storyboard(n_shots=2, iteration=1) -> Storyboard:
 
 
 def make_search_hits():
-    """Simulate lvmm-core Querier hits.
+    """Simulate querier hits.
 
     Querier.search returns list[dict] (since commit 330a34c — the old Hit
     namespace was replaced with dicts). _parse_search_results expects keys
@@ -100,7 +100,7 @@ class FakeMaviAgent:
 
 
 class FakeQuerier:
-    """Replaces the old FakeSearcher after the lvmm-core Searcher→Querier rename.
+    """Replaces the old FakeSearcher after the Searcher→Querier rename.
 
     Mirrors the real ``luci_memory.Querier.search`` signature:
     ``search(question, user_id, video_ids, top_k, collections, time_range)``.

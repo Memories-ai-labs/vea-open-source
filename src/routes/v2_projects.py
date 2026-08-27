@@ -178,36 +178,25 @@ async def v2_clear_session(project_name: str):
 
 @router.post(f"{_config.V2_API_PREFIX}/projects/{{project_name}}/clear/memories")
 async def v2_clear_memories(project_name: str):
-    """Delete indexed video data from lvmm-core's local DB. Irreversible.
+    """Delete this project's videos from its datalake collection. Irreversible.
 
-    Was originally `Memories.ai cloud delete` — now reaches into the
-    lvmm-core SQLite DB and removes rows + vectors for each indexed video.
+    Deletes every one of the project's videos from its datalake collection.
+    This is a real deletion of indexed data: the captions, transcription and
+    vectors that indexing was billed for go away, and re-indexing pays again.
     Endpoint name kept for back-compat with the dashboard's existing button.
     """
-    if not services.lvmm_ctx:
+    if not services.retrieval_ctx:
         raise HTTPException(
             status_code=503,
-            detail="lvmm-core not initialised. Check server startup logs.",
-        )
-    # purge_video_index is best-effort by design (missing tables are ignored),
-    # so against a datalake context it would clear every video_no from the
-    # session while the collection kept its data — a silent lie. Refuse.
-    if services.video_backend() == "datalake":
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "This server runs VIDEO_BACKEND=datalake; the local index it would "
-                "clear does not exist. Delete videos from the collection with the "
-                "datalake API (DELETE /datalake/v1/videos/{id}) instead."
-            ),
+            detail="Retrieval backend not initialised. Check server startup logs.",
         )
     workspace = _workspace(project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")
 
-    # Per-video purge of lvmm-core's indexed data. Delegates to the shared
+    # Per-video purge. Delegates to the shared
     # ``purge_video_index`` helper so the table/collection names stay in one
-    # place and match lvmm-core's current schema (summary/keyframe/
+    # place — the same path the per-file re-index uses.
     # video_transcript/transcript) — both the relational rows AND the
     # sqlite-vec vectors are removed.
     from src.pipelines.v2.comprehension.lightweight_comprehension import purge_video_index
@@ -218,7 +207,8 @@ async def v2_clear_memories(project_name: str):
     for v in session.videos:
         if v.video_no:
             try:
-                await purge_video_index(services.lvmm_ctx, v.video_no)
+                await purge_video_index(services.datalake_client,
+                                        v.datalake_video_id or v.video_no)
                 deleted.append(v.video_name)
                 v.video_no = ""
             except Exception as e:

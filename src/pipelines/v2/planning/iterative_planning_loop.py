@@ -11,7 +11,7 @@ Architecture (unchanged from pre-port):
   - Streams progress events via asyncio.Queue for WebSocket dashboard
 
 PORT NOTE (2026-05-19): Backend swapped from memories.ai HTTP client to
-lvmm-core's local MaviAgent (chat) + Querier (search). Loop semantics
+the retrieval agent (chat) + querier (search). Loop semantics
 unchanged. Tool calls now hit the local SQLite index instead of crossing
 the network.
 """
@@ -24,18 +24,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from lvmm_core.interfaces.llm import ILLM
-from lvmm_core.interfaces.types import Message
-from lvmm_core.utils.logging import metric
+from src.llm_structured import Message, StructuredLLM
+from src.metrics import metric
 
 
 def _messages_from_prompts(prompts: list[str]) -> list[Message]:
-    """Adapt VEA's ``[system_str, user_str]`` pairs to lvmm-core's Message list.
+    """Adapt VEA's ``[system_str, user_str]`` pairs to a Message list.
 
     Convention: first prompt is treated as system, every subsequent prompt as user.
-    Mirrors what the missing ``lvmm_core.utils.llm.messages_from_prompts`` used to
-    do — kept inline here so we don't depend on a symbol that lvmm-core's current
-    surface doesn't export.
+    Kept inline so the loop owns its own prompt-to-message adaptation.
     """
     if not prompts:
         return []
@@ -98,10 +95,10 @@ class IterativePlanningLoop:
             project_name="my_project",
             user_prompt="Create a 2-min highlight reel of the keynote",
             workspace=workspace_manager,
-            querier=querier,            # lvmm-core luci_memory.Querier
-            mavi_agent=mavi_agent,      # lvmm-core MaviAgent
+            querier=querier,            # DatalakeQuerier
+            mavi_agent=mavi_agent,      # DatalakeAgent
             gemini=gemini_manager,
-            video_nos=[...],            # lvmm-core video_ids to query
+            video_nos=[...],            # video ids to query
             video_entries=[...],        # Full VideoEntry objects (for source paths)
             event_queue=queue,          # Optional — live updates to dashboard
             pause_event=event,          # Optional — caller sets to pause loop
@@ -114,9 +111,9 @@ class IterativePlanningLoop:
         project_name: str,
         user_prompt: str,
         workspace: WorkspaceManager,
-        querier,                        # lvmm_core.core.retrieval.luci_memory.Querier
-        mavi_agent,                     # lvmm_core.agents.mavi_agent.MaviAgent
-        gemini: ILLM,
+        querier,                        # src.datalake.DatalakeQuerier
+        mavi_agent,                     # src.datalake.DatalakeAgent
+        gemini: StructuredLLM,
         video_nos: List[str],
         video_entries: List[VideoEntry],
         max_iterations: int = 5,
@@ -308,9 +305,9 @@ class IterativePlanningLoop:
         prompt_contents = [DECIDE_TOOL_CALLS_SYSTEM, user_content]
 
         try:
-            # PORT NOTE: was self.gemini.LLM_request wrapped in run_in_executor
-            # (sync VEA manager). Now using lvmm-core ILLM.generate_structured
-            # directly — natively async, returns (parsed, usage) tuple.
+            # ``gemini`` is a StructuredLLM wrapper around VEA's sync manager:
+            # natively awaitable, returns (parsed, usage). Usage is zeroed
+            # because the manager does not report token counts.
             result, usage = await self.gemini.generate_structured(
                 _messages_from_prompts(prompt_contents),
                 ToolCallPlan,
@@ -378,7 +375,7 @@ class IterativePlanningLoop:
     async def _run_chat(self, question: str, purpose: str, iteration: int) -> tuple[str, Any]:
         """Ask MaviAgent and return ("chat", context_text).
 
-        lvmm-core's current MaviAgent only accepts one ``video_id`` per
+        The retrieval agent accepts one ``video_id`` per
         call. For multi-source projects, ask once per project video and
         merge the answers so the planning context still covers the whole
         workspace without using the removed ``video_ids`` API.
@@ -429,7 +426,7 @@ class IterativePlanningLoop:
     ) -> tuple[str, List[RetrievedClip]]:
         """Run a Querier vector search and return ("clips", List[RetrievedClip]).
 
-        PORT NOTE: memories.ai's BY_CLIP mode mapped onto lvmm-core's
+        PORT NOTE: the old BY_CLIP mode mapped onto the querier's
         VIDEO_TRANSCRIPT + TRANSCRIPT collections — both carry time-windowed
         text content (visual captions and spoken dialogue respectively), which
         is what the storyboard planning prompt expects to compose with.
@@ -464,11 +461,11 @@ class IterativePlanningLoop:
     def _parse_search_results(
         self, hits: List[Any], query: str, purpose: str
     ) -> List[RetrievedClip]:
-        """Convert lvmm-core Querier hits into RetrievedClip records.
+        """Convert querier hits into RetrievedClip records.
 
         ``hits`` is a list of dicts (one per result) with keys ``video_id``,
         ``start_time``, ``end_time``, ``transcript``/``text``, ``similarity``,
-        and ``collection``. (Before lvmm-core commit 330a34c these were
+        and ``collection``. (In an earlier revision these were
         ``Hit`` objects with the same fields as attributes — the dict form
         is the new contract.)
         """

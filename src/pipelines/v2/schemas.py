@@ -19,6 +19,9 @@ class VideoEntry:
     duration_seconds: Optional[float] = None
     gist: str = ""  # multi-paragraph editorial overview for this specific video
     indexed_at: Optional[str] = None  # ISO 8601 UTC timestamp of when this video was indexed
+    # The datalake's own id for this file. ``video_no`` stays the filename (the
+    # agent writes it into ``source_file``); this is what the API is addressed by.
+    datalake_video_id: str = ""
 
 @dataclass
 class PlanningState:
@@ -35,6 +38,8 @@ class SessionData:
     videos: List[VideoEntry] = field(default_factory=list)
     gist: str = ""
     memories_session_id: Optional[str] = None
+    # Collection holding this project's footage; one per project.
+    datalake_collection_id: str = ""
     planning: PlanningState = field(default_factory=PlanningState)
     version: str = "2.0"
 
@@ -50,6 +55,7 @@ class SessionData:
             duration_seconds=v.get("duration_seconds"),
             gist=v.get("gist", ""),
             indexed_at=v.get("indexed_at"),
+            datalake_video_id=v.get("datalake_video_id", ""),
         ) for v in d.get("videos", [])]
         planning_raw = d.get("planning", {})
         planning = PlanningState(
@@ -65,6 +71,7 @@ class SessionData:
             videos=videos,
             gist=d.get("gist", ""),
             memories_session_id=d.get("memories_session_id"),
+            datalake_collection_id=d.get("datalake_collection_id", ""),
             planning=planning,
             version=d.get("version", "2.0"),
         )

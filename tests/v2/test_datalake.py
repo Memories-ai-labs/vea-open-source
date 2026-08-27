@@ -1,8 +1,8 @@
 """Tests for the Video Datalake retrieval backend (``src/datalake.py``).
 
-The backend's whole job is to be indistinguishable from lvmm-core's
-``Querier`` / ``MaviAgent`` to everything downstream, so these lock in the
-places where a refactor would silently break the swap:
+The backend's whole job is to satisfy the two retrieval contracts everything
+downstream depends on, so these lock in the places where a refactor would
+silently break them:
 
 - **Field mapping.** The datalake says ``start`` / ``end`` / ``score``; VEA
   reads ``start_time`` / ``end_time`` / ``similarity``. A rename on either
@@ -137,9 +137,12 @@ class TestSidecarMap:
         assert c.to_ids(["mystery.mp4"]) == ["mystery.mp4"]
         assert c.to_name("vid_unmapped") == "vid_unmapped"
 
-    def test_no_collection_id_anywhere_is_a_construction_error(self):
-        with pytest.raises(ValueError, match="collection id required"):
-            dl.DatalakeClient(api_key="k", session=FakeSession([]))
+    async def test_searching_without_a_collection_is_a_use_time_error(self):
+        # Construction stays permissive so ensure_collection() can run before a
+        # collection exists; searching without one must say so plainly.
+        c = dl.DatalakeClient(api_key="k", session=FakeSession([]))
+        with pytest.raises(ValueError, match="no collection bound"):
+            await c.search("q", targets=["caption"])
 
     def test_missing_api_key_is_a_construction_error(self, monkeypatch):
         monkeypatch.delenv("MEMORIES_API_KEY", raising=False)
@@ -164,7 +167,7 @@ class TestSidecarMap:
 # ─── querier contract ────────────────────────────────────────────────────────
 
 class TestQuerierContract:
-    def test_lvmm_collection_names_map_to_datalake_targets(self):
+    def test_vea_collection_names_map_to_datalake_targets(self):
         assert dl.DatalakeQuerier.targets_for(["video_transcript", "transcript"]) == [
             "caption", "transcription"
         ]
@@ -309,7 +312,7 @@ class TestCost:
 # ─── transcript shim ─────────────────────────────────────────────────────────
 
 class TestDatabaseShim:
-    async def test_transcript_rows_use_lvmm_column_names(self):
+    async def test_transcript_rows_use_the_column_names_callers_read(self):
         c = client([(200, {"segments": [{"text": "using a screwdriver",
                                         "start": 4.0, "end": 6.5}]})])
         rows = await dl._DatabaseShim(c).query("transcript", {"video_id": "clip_a.mp4"})
@@ -379,79 +382,87 @@ class TestDatalakeAgent:
         assert dl.DatalakeAgent(client([]), FakeLLM()).rerank is False
 
 
-# ─── backend selection + indexing guards ─────────────────────────────────────
+# ─── project-scoped handles ──────────────────────────────────────────────────
 
-class TestBackendGuards:
-    """``VIDEO_BACKEND=datalake`` serves retrieval only.
+class TestProjectHandles:
+    """Retrieval is per project.
 
-    Indexing (and index-purging) must refuse with the actual next step. Left
-    unguarded, ``/v2/index`` drives lvmm-core's pipeline against a context
-    with no ``storage`` / ``text_embedding`` / ``vector_db`` and dies deep
-    inside a stage, and ``clear/memories`` — best-effort by design — quietly
-    strips every ``video_no`` from the session while the collection keeps its
-    data.
+    Each project owns a collection and its own filename -> ``vid_...`` map, so
+    handing the agent process-wide handles would search another project's
+    footage. ``services.project_handles(session)`` binds both from the session.
     """
 
-    def test_video_backend_reports_the_selected_backend(self, monkeypatch):
+    def test_handles_are_bound_to_the_session_collection_and_map(self, monkeypatch):
+        monkeypatch.setenv("MEMORIES_API_KEY", "sk-mai-test")
+        from types import SimpleNamespace
+
         from src import services
 
-        monkeypatch.delenv("VIDEO_BACKEND", raising=False)
-        assert services.video_backend() == "lvmm"
+        session = SimpleNamespace(
+            datalake_collection_id="col_project",
+            videos=[
+                SimpleNamespace(video_name="a.mp4", datalake_video_id="vid_a"),
+                SimpleNamespace(video_name="b.mp4", datalake_video_id="vid_b"),
+            ],
+        )
+        querier, agent = services.project_handles(session)
 
-        monkeypatch.setenv("VIDEO_BACKEND", "DataLake")   # case-insensitive
-        assert services.video_backend() == "datalake"
+        assert querier.client.collection_id == "col_project"
+        assert querier.client.to_ids(["a.mp4"]) == ["vid_a"]
+        assert querier.client.to_name("vid_b") == "b.mp4"
+        # ask_memories with no explicit video scopes to this project's videos
+        assert set(agent.video_ids) == {"a.mp4", "b.mp4"}
 
-        monkeypatch.setenv("VIDEO_BACKEND", "something-else")
-        assert services.video_backend() == "lvmm"
+    def test_a_session_without_datalake_fields_falls_back(self, monkeypatch):
+        from types import SimpleNamespace
 
-    def test_index_route_refuses_on_the_datalake_backend(self, monkeypatch, tmp_path):
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from src import services
 
-        from fastapi.testclient import TestClient
+        sentinel_q, sentinel_a = object(), object()
+        monkeypatch.setattr(services, "querier", sentinel_q, raising=False)
+        monkeypatch.setattr(services, "mavi_agent", sentinel_a, raising=False)
 
-        with (
-            patch("lib.oss.storage_factory.get_storage_client", return_value=MagicMock()),
-            patch("src.services.init_lvmm", new=AsyncMock(return_value=None)),
-            patch("src.services.close_lvmm", new=AsyncMock(return_value=None)),
-            patch.dict("os.environ", {"VIDEO_BACKEND": "datalake", "OPENROUTER_API_KEY": "or"}),
-        ):
-            from src import services
-            from src.app import app
+        # A project indexed before these fields existed must still open.
+        session = SimpleNamespace(datalake_collection_id="", videos=[])
+        assert services.project_handles(session) == (sentinel_q, sentinel_a)
 
-            monkeypatch.setattr("src.routes.v2_pipelines._config.WORKSPACES_DIR", tmp_path)
-            monkeypatch.setattr("src.routes._route_utils._config.WORKSPACES_DIR", tmp_path)
-            footage = tmp_path / "proj" / "footage"
-            footage.mkdir(parents=True)
-            (footage / "a.mp4").write_bytes(b"not really a video")
-            monkeypatch.setattr(services, "mavi_agent", MagicMock(), raising=False)
-            monkeypatch.setattr(services, "lvmm_ctx", MagicMock(), raising=False)
 
-            with TestClient(app, raise_server_exceptions=False) as c:
-                resp = c.post("/video-edit/v2/index", json={"project_name": "proj"})
+# ─── purge ───────────────────────────────────────────────────────────────────
 
-            assert resp.status_code == 409
-            assert "scripts.datalake_ingest" in resp.json()["detail"]
+class TestPurge:
+    async def test_purge_deletes_the_video_from_the_collection(self):
+        from src.pipelines.v2.comprehension.lightweight_comprehension import purge_video_index
 
-    def test_clear_memories_refuses_on_the_datalake_backend(self, monkeypatch, tmp_path):
-        from unittest.mock import AsyncMock, MagicMock, patch
+        c = client([(200, {})])
+        await purge_video_index(c, "vid_abc")
+        method, url, _ = c._session.calls[0]
+        assert method == "DELETE"
+        assert url.endswith("/videos/vid_abc")
 
-        from fastapi.testclient import TestClient
+    async def test_purge_swallows_a_missing_video(self):
+        # Called on re-index and on clear/memories; a video already gone is not
+        # an error worth failing the request over.
+        from src.pipelines.v2.comprehension.lightweight_comprehension import purge_video_index
 
-        with (
-            patch("lib.oss.storage_factory.get_storage_client", return_value=MagicMock()),
-            patch("src.services.init_lvmm", new=AsyncMock(return_value=None)),
-            patch("src.services.close_lvmm", new=AsyncMock(return_value=None)),
-            patch.dict("os.environ", {"VIDEO_BACKEND": "datalake", "OPENROUTER_API_KEY": "or"}),
-        ):
-            from src import services
-            from src.app import app
+        c = client([(404, {"error": {"message": "not found"}})])
+        await purge_video_index(c, "vid_gone")
 
-            monkeypatch.setattr("src.routes.v2_projects._config.WORKSPACES_DIR", tmp_path)
-            monkeypatch.setattr("src.routes._route_utils._config.WORKSPACES_DIR", tmp_path)
-            monkeypatch.setattr(services, "lvmm_ctx", MagicMock(), raising=False)
+    async def test_purge_ignores_a_missing_client_or_id(self):
+        from src.pipelines.v2.comprehension.lightweight_comprehension import purge_video_index
 
-            with TestClient(app, raise_server_exceptions=False) as c:
-                resp = c.post("/video-edit/v2/projects/proj/clear/memories")
+        await purge_video_index(None, "vid_abc")
+        await purge_video_index(client([]), "")
 
-            assert resp.status_code == 409
-            assert "DELETE /datalake/v1/videos" in resp.json()["detail"]
+
+class TestSessionHeaders:
+    async def test_session_does_not_pin_a_content_type(self):
+        """A session-level ``Content-Type: application/json`` overrides the
+        multipart boundary on uploads, and the API answers 400 "request body is
+        missing or not valid JSON". Only Authorization belongs on the session."""
+        c = dl.DatalakeClient(api_key="sk-mai-test", collection_id="col_test")
+        sess = await c._sess()
+        try:
+            assert "Authorization" in sess.headers
+            assert "Content-Type" not in sess.headers
+        finally:
+            await sess.close()

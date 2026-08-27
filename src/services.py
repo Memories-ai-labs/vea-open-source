@@ -4,26 +4,22 @@ Shared state and service initialization.
 
 All route modules import shared state from here to avoid circular imports.
 
-VIDEO UNDERSTANDING (2026-05): Migrated from memories.ai cloud API to
-lvmm-core's local stack. Three module-level handles replace what used
-to be ``memories_manager``:
+VIDEO UNDERSTANDING: served by the hosted Memories.ai Video Datalake over
+HTTP (``src/datalake.py``). Three module-level handles carry it:
 
-  * ``lvmm_ctx``       — lvmm-core PipelineContext (adapters + DB + storage)
-  * ``querier``        — luci_memory.Querier for vector clip search
-                         (renamed upstream from Searcher in lvmm-core
-                         commit 330a34c — kept this alias name in VEA so
-                         call sites read naturally)
-  * ``mavi_agent``     — MaviAgent for RAG-style chat (rewrite → search →
-                         rerank → answer)
+  * ``retrieval_ctx``       — datalake context; its one live method is
+                         ``ctx.database.query("transcript", ...)``
+  * ``querier``        — ``DatalakeQuerier``: semantic moment search
+  * ``mavi_agent``     — ``DatalakeAgent``: rewrite → search → rerank → answer
 
-These are lazy-initialised through :func:`init_lvmm` because lvmm-core's
-``build_local_context`` is async. AgentSession + the agent tools take
-these handles via constructor; routes get them from this module.
+They are lazy-initialised through :func:`init_retrieval` (name kept for the
+FastAPI lifespan hook and the CLI). Those three are unscoped; per-project
+handles bound to a project's collection come from :func:`project_handles`,
+which is what AgentSession is given.
 
-LLM clients (``main_llm`` + ``video_llm``) are unchanged — VEA's
-``OpenRouterManager`` + ``GeminiGenaiManager`` stay as-is. They serve a
-different purpose than lvmm-core's ILLM adapters (which back the
-MaviAgent's internal LLM calls).
+LLM clients (``main_llm`` + ``video_llm``) are VEA's own
+``OpenRouterManager`` / ``GeminiGenaiManager`` and are unrelated to the
+retrieval backend.
 """
 
 import logging
@@ -216,141 +212,102 @@ _indexing_progress: Dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
-# lvmm-core wiring — local indexing, retrieval, and RAG chat
+# Retrieval wiring — hosted Video Datalake
 # ---------------------------------------------------------------------------
 #
-# Replaces the previous memories.ai HTTP client. Three module-level
-# singletons:
-#   - lvmm_ctx        : lvmm-core PipelineContext (carries LLM, embedding,
-#                       storage, database, vector_db adapter instances).
-#   - querier         : core/retrieval/luci_memory/Querier — vector clip
-#                       search facade. Independent of any LLM. Used by the
-#                       planning loop and AgentSession's search_footage tool.
-#                       (Was named ``Searcher`` until lvmm-core commit
-#                       330a34c renamed it; ctor now also takes ``database``.)
-#   - mavi_agent      : agents/MaviAgent — fixed-pipeline RAG agent.
-#                       query-rewrite → parallel search → rerank → answer.
-#                       Used by Phase 1 gist + AgentSession's ask_memories tool.
-#                       (Ctor now takes ``querier=`` not ``searcher=``;
-#                       ``ask`` no longer accepts a video_ids list — only a
-#                       single ``video_id``. VEA calls it once per project
-#                       video when it needs multi-video coverage — see
-#                       ``ToolExecutor._ask_memories`` and the planning loop.)
+# Three module-level singletons, all served by ``src/datalake.py``:
+#   - retrieval_ctx        : datalake context. Only ``ctx.database.query(
+#                       "transcript", ...)`` is live on it (audio transcript
+#                       for sentence-boundary snapping).
+#   - querier         : ``DatalakeQuerier`` — semantic moment search, no LLM.
+#                       Used by the planning loop and the ``search_footage``
+#                       tool.
+#   - mavi_agent      : ``DatalakeAgent`` — rewrite → search (reranked) →
+#                       answer, over VEA's own main_llm. Used by Phase 1
+#                       gists and the ``ask_memories`` tool. ``ask`` takes a
+#                       single ``video_id``; VEA calls it once per project
+#                       video when it needs multi-video coverage.
 #
-# Lazy-initialised via ``init_lvmm()`` (called from app.py's lifespan
-# startup hook) because lvmm-core's ``build_local_context`` is async.
-# Routes + AgentSession + the agent ToolExecutor take these handles by
-# importing them from this module.
+# These three are unscoped. Per-project handles — bound to that project's
+# collection and its filename -> ``vid_...`` map — come from
+# ``project_handles(session)``, which is what AgentSession is given.
+#
+# Lazy-initialised via ``init_retrieval()`` (called from app.py's lifespan
+# startup hook) because building the datalake context is async.
 
-def video_backend() -> str:
-    """Which video-understanding backend this process is wired to.
-
-    ``"lvmm"`` (default) owns indexing locally; ``"datalake"`` only serves
-    retrieval — footage is ingested out of band by scripts/datalake_ingest.py,
-    so anything that indexes or purges an index must refuse rather than run
-    lvmm-core stages against a datalake context that has no storage,
-    embeddings or vector DB.
-    """
-    return "datalake" if os.environ.get("VIDEO_BACKEND", "").lower() == "datalake" else "lvmm"
-
-
-INDEXING_UNSUPPORTED_DETAIL = (
-    "This server runs VIDEO_BACKEND=datalake, which serves retrieval only. "
-    "Ingest footage with `python -m scripts.datalake_ingest --project "
-    "<name>` (it uploads to the collection and writes session.json), then "
-    "run the agent with --reuse-index."
-)
-
-
-lvmm_ctx = None  # type: ignore[assignment]
-lvmm_lifecycle = None  # type: ignore[assignment]
+# Retrieval handles. ``retrieval_ctx`` is kept as the name every call site already
+# uses; on this backend it is the datalake context (its one live method is
+# ``ctx.database.query("transcript", ...)``).
+retrieval_ctx = None  # type: ignore[assignment]
+datalake_client = None  # type: ignore[assignment]
+retrieval_lifecycle = None  # type: ignore[assignment]
 querier = None  # type: ignore[assignment]
 mavi_agent = None  # type: ignore[assignment]
 
 
-async def init_lvmm() -> None:
-    """Construct lvmm-core context + Querier + MaviAgent (idempotent).
+async def init_retrieval() -> None:
+    """Construct the datalake client + the process-wide retrieval handles.
 
-    Reads ``OPENROUTER_API_KEY`` / ``GEMINI_API_KEY`` from env (already
-    populated by ``src.config`` at startup). MobileCLIP defaults to the
-    local PyTorch adapter — no VPN, no Ray dependency. The weight file
-    (~325 MB) auto-downloads to ``~/lvmm-data/models/mobileclip_s1.pt``
-    on first call.
+    Idempotent. ``querier`` / ``mavi_agent`` here are unscoped — they answer
+    against whatever collection the client is bound to. Per-project handles
+    (bound to that project's collection and its filename -> vid_... map) come
+    from :func:`project_handles`, which is what AgentSession is given.
 
-    Also configures lvmm-core's structured logging (idempotent). After
-    this runs, every log line emitted from the ``lvmm_core.*`` logger
-    tree carries auto-injected ``[pipeline=… stage=… run_id=…]`` context
-    tags when inside a ``Pipeline.execute()`` call. Complements VEA's
-    per-project ``logging_setup.py`` bundle.
+    The name is kept for call-site compatibility with the FastAPI lifespan
+    hook and the CLI.
     """
-    global lvmm_ctx, lvmm_lifecycle, querier, mavi_agent
-    if lvmm_ctx is not None:
+    global retrieval_ctx, retrieval_lifecycle, querier, mavi_agent, datalake_client
+    if retrieval_ctx is not None:
         return
 
-    # VIDEO_BACKEND=datalake swaps the local lvmm-core stack for the hosted
-    # Memories.ai Video Datalake. Same two handles (mavi_agent / querier), so
-    # the agent loop, tools, FCPXML compiler and renderer are untouched.
-    # Indexing is not part of this path — videos are ingested into a datalake
-    # collection out of band (scripts/datalake_ingest.py) and the workspace
-    # session carries their ``vid_...`` ids as video_no.
-    if video_backend() == "datalake":
-        from src.datalake import build_datalake_context
-        lvmm_ctx, lvmm_lifecycle, querier, mavi_agent = await build_datalake_context(main_llm)
-        logger.info("video backend: Memories.ai Video Datalake (lvmm-core not loaded)")
-        return
+    from src.datalake import build_datalake_context
 
-    try:
-        from lvmm_core.services.local_dev import build_local_context
-        from lvmm_core.core.retrieval.luci_memory.querier import Querier
-        from lvmm_core.agents.mavi_agent import MaviAgent
-        from lvmm_core.utils.logging import setup_logging
-    except ImportError:
-        logger.error(
-            "lvmm-core not installed. From the vea-open-source repo root run: "
-            "pip install -e ../lvmm-core  (or whatever the relative path is). "
-            "See pyproject.toml."
-        )
-        raise
+    retrieval_ctx, retrieval_lifecycle, querier, mavi_agent = await build_datalake_context(main_llm)
+    datalake_client = retrieval_ctx.client
+    logger.info("video backend: Memories.ai Video Datalake")
 
-    _log_level = getattr(logging, os.environ.get("LVMM_LOG_LEVEL", "INFO").upper(), logging.INFO)
-    setup_logging(level=_log_level)
 
-    # provider auto-pick: prefer OpenRouter (VEA's standard env from
-    # config.json), fall back to direct Gemini API if only GEMINI_API_KEY
-    # is set. Note: this is the LLM that MaviAgent uses INTERNALLY for
-    # query rewrite + reranking — separate from VEA's main_llm / video_llm.
-    _lvmm_provider = "openrouter" if _openrouter_key else "gemini"
-    lvmm_ctx, lvmm_lifecycle = await build_local_context(
-        provider=_lvmm_provider,
-        embedding="mobileclip-pytorch",
-        face="none",   # VEA doesn't use lvmm-core's face pipeline
-        asr="none",    # nor its ASR pipeline
-        diarization="none",
-    )
-    querier = Querier(
-        lvmm_ctx.vector_db,
-        lvmm_ctx.text_embedding,
-        lvmm_ctx.database,
-    )
-    mavi_agent = MaviAgent(llm=lvmm_ctx.llm, querier=querier)
+def project_handles(session) -> tuple:
+    """Return ``(querier, agent)`` scoped to one project's session.
+
+    Retrieval is per project: the collection recorded on the session, and the
+    filename -> ``vid_...`` map its entries carry. Falls back to the unscoped
+    handles when a session has neither (a project indexed before those fields
+    existed).
+    """
+    from src.datalake import DatalakeAgent, DatalakeClient, DatalakeQuerier
+
+    collection_id = getattr(session, "datalake_collection_id", "") or ""
+    name_map = {
+        v.video_name: v.datalake_video_id
+        for v in getattr(session, "videos", [])
+        if getattr(v, "datalake_video_id", "")
+    }
+    if not collection_id and not name_map:
+        return querier, mavi_agent
+
+    client = DatalakeClient(collection_id=collection_id, name_map=name_map)
+    scoped_querier = DatalakeQuerier(client)
+    scoped_agent = DatalakeAgent(client, main_llm, video_ids=list(name_map.keys()))
     logger.info(
-        f"lvmm-core initialised (provider={_lvmm_provider}, "
-        "embedding=mobileclip-pytorch, SQLite local DB)"
+        f"[DATALAKE] project handles bound (collection={collection_id or 'unset'}, "
+        f"{len(name_map)} videos)"
     )
+    return scoped_querier, scoped_agent
 
 
-async def close_lvmm() -> None:
-    """Tear down the lvmm-core lifecycle (closes DB connection).
+async def close_retrieval() -> None:
+    """Tear down the retrieval lifecycle (closes the datalake HTTP session).
 
     Safe to call from FastAPI's shutdown hook or any async exit path.
     """
-    global lvmm_ctx, lvmm_lifecycle, querier, mavi_agent
-    if lvmm_lifecycle is not None:
+    global retrieval_ctx, retrieval_lifecycle, querier, mavi_agent
+    if retrieval_lifecycle is not None:
         try:
-            await lvmm_lifecycle.close()
+            await retrieval_lifecycle.close()
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"lvmm-core shutdown raised: {e}")
-        lvmm_ctx = None
-        lvmm_lifecycle = None
+            logger.warning(f"retrieval backend shutdown raised: {e}")
+        retrieval_ctx = None
+        retrieval_lifecycle = None
         querier = None
         mavi_agent = None

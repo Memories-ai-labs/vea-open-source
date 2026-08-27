@@ -105,11 +105,11 @@ class AgentSession:
     ):
         self.project_name = project_name
         self.workspace = workspace
-        # Video-understanding handles from lvmm-core. ``mavi_agent.ask(...)``
+        # Video-understanding handles. ``mavi_agent.ask(...)``
         # replaces the old ``memories_manager.chat(...)``; ``querier.search(...)``
         # replaces ``memories_manager.search_by_clip(...)``. Both come from
-        # ``src.services`` after ``init_lvmm()`` has run. (Querier was named
-        # Searcher until lvmm-core commit 330a34c renamed it.)
+        # ``src.services`` after ``init_retrieval()`` has run, scoped to the
+        # project by ``services.project_handles``.
         self.mavi_agent = mavi_agent
         self.querier = querier
         # ``mode`` selects the agent's temperament (collaborative = deferential

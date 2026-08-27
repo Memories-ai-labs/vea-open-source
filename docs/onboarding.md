@@ -151,7 +151,7 @@ You should see your project in the project browser. Click on it to open the work
 
 ### 4. Index footage
 
-If the footage hasn't been indexed yet, the dashboard shows an **"Index footage"** banner with a button — click it. (You can also re-index at any time from the **Manage** dropdown.) Indexing analyzes the video files locally through lvmm-core and generates a content gist; progress streams live to the banner.
+If the footage hasn't been indexed yet, the dashboard shows an **"Index footage"** banner with a button — click it. (You can also re-index at any time from the **Manage** dropdown.) Indexing uploads each file to the project's datalake collection and brings back its summary as a content gist; progress streams live to the banner.
 
 Alternatively, use the API:
 
@@ -222,7 +222,7 @@ Use the **Manage** dropdown in the dashboard:
 
 - **Clear gists**: Removes gist text but keeps video_no mappings
 - **Clear planning + chat**: Removes scratchpads, chat history, storyboard, clips, FCPXML -- keeps indexing
-- **Delete local index**: Removes local lvmm-core rows/vectors for the indexed videos (requires re-indexing)
+- **Delete index**: Deletes the project's videos from its datalake collection (requires re-indexing, and re-indexing is billed again)
 
 ---
 
@@ -265,11 +265,11 @@ If the dashboard shows "Offline":
 - Rate limit errors -- reduce concurrent requests, the agent loop already has built-in retry
 - Empty responses -- check safety settings (all set to `BLOCK_NONE` but may still occasionally block)
 
-### lvmm-core indexing issues
+### Indexing issues
 
-- Startup says "lvmm-core not initialised" -- restart the backend and inspect startup logs for the lvmm-core traceback
+- Startup says "Retrieval backend not initialised" -- check MEMORIES_API_KEY and inspect the startup traceback
 - Slow indexing -- large files spend most time in frame embedding and visual transcription
-- Missing search results -- use **Delete local index** and re-index the project so SQLite rows and vectors match current lvmm-core schemas
+- Missing search results -- confirm every video reports `ready` in the collection; re-index anything that does not
 
 ### FCPXML not generating
 
@@ -302,7 +302,7 @@ If the dashboard shows "Offline":
 - `src/schema.py` -- API request/response models (Pydantic)
 
 ### Video understanding
-- `src/services.py` -- lvmm-core context, Querier, and MaviAgent singletons
+- `src/services.py` -- datalake context, querier, and agent singletons (+ `project_handles`)
 - `src/pipelines/v2/comprehension/lightweight_comprehension.py` -- V2 indexing
 
 ### FCPXML
@@ -334,7 +334,7 @@ If the dashboard shows "Offline":
 
 1. **One agent session per project.** If you open the same project in two tabs, only the most recent tab receives events. The first tab will appear frozen.
 
-2. **Indexing is idempotent.** Re-indexing reuses existing local lvmm-core rows if the video name matches. Use "Delete local index" in Manage to force a clean re-index.
+2. **Indexing is idempotent.** Re-indexing reuses videos already in the collection when the title matches, so it is not re-billed. Use "Delete index" in Manage to force a clean re-index.
 
 3. **Scratchpad size limit.** Each scratchpad is capped at 6000 characters. Long editing sessions can hit this. The agent should consolidate with `replace` rather than accumulating with `append`.
 
