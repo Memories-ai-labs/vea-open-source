@@ -13,6 +13,7 @@
   </p>
 
   <p>
+    <img src="https://img.shields.io/badge/Release-2.0-0E0E10.svg" alt="Release 2.0">
     <a href="LICENSE">
       <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
     </a>
@@ -28,6 +29,10 @@
 
   <p align="center">
     <strong>VEA</strong> is an AI-powered video editing service that turns raw footage into polished short-form content through a natural-language conversation with an editing agent.
+  </p>
+
+  <p align="center">
+    <strong>VEA 2.0</strong> is the agent release: editing is a conversation with a tool-using agent instead of a fixed pipeline, and video understanding is a swappable backend — local <a href="https://github.com/Memories-ai-labs/lvmm-core">lvmm-core</a> or the hosted Memories.ai Video Datalake. See <a href="CHANGELOG.md">CHANGELOG.md</a>.
   </p>
 </div>
 
