@@ -73,5 +73,6 @@ e2e_test_result.png
 # OS
 .DS_Store
 
-# lvmm-core run artefacts (created next to the cwd on every pipeline run)
+# Retrieval-backend run artefacts (created next to the cwd)
 .lvmm-runs/
+.vea-runs/

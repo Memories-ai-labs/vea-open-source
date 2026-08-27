@@ -923,8 +923,8 @@ export function AgentChat({
                 {manageLoading === 'planning' ? 'Clearing...' : 'Clear planning + chat'}
               </DropdownBtn>
               <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
-              <DropdownBtn color="var(--accent-red)" disabled={manageLoading === 'memories'} onClick={async () => { if (!confirm(`Delete local lvmm-core index for "${project.project_name}"?`)) return; setManageLoading('memories'); try { const r = await clearMemories(project.project_name); setManageMsg(`Deleted ${r.deleted.length} indexed video(s).`); toast(`Deleted ${r.deleted.length} video(s) from local index`, 'success'); await refresh(); } catch (e: any) { setManageMsg(`Error: ${e.message}`); toast(`Failed to clear local index: ${e.message}`, 'error'); } finally { setManageLoading(null); } }}>
-                {manageLoading === 'memories' ? 'Deleting...' : 'Delete local index'}
+              <DropdownBtn color="var(--accent-red)" disabled={manageLoading === 'memories'} onClick={async () => { if (!confirm(`Delete "${project.project_name}" videos from its datalake collection? Re-indexing is billed again.`)) return; setManageLoading('memories'); try { const r = await clearMemories(project.project_name); setManageMsg(`Deleted ${r.deleted.length} indexed video(s).`); toast(`Deleted ${r.deleted.length} video(s) from local index`, 'success'); await refresh(); } catch (e: any) { setManageMsg(`Error: ${e.message}`); toast(`Failed to clear local index: ${e.message}`, 'error'); } finally { setManageLoading(null); } }}>
+                {manageLoading === 'memories' ? 'Deleting...' : 'Delete index'}
               </DropdownBtn>
             </div>,
             document.body
