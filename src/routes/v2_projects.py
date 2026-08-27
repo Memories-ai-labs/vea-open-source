@@ -189,6 +189,18 @@ async def v2_clear_memories(project_name: str):
             status_code=503,
             detail="lvmm-core not initialised. Check server startup logs.",
         )
+    # purge_video_index is best-effort by design (missing tables are ignored),
+    # so against a datalake context it would clear every video_no from the
+    # session while the collection kept its data — a silent lie. Refuse.
+    if services.video_backend() == "datalake":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This server runs VIDEO_BACKEND=datalake; the local index it would "
+                "clear does not exist. Delete videos from the collection with the "
+                "datalake API (DELETE /datalake/v1/videos/{id}) instead."
+            ),
+        )
     workspace = _workspace(project_name)
     if not workspace.exists():
         raise HTTPException(status_code=404, detail=f"Project '{project_name}' not found.")

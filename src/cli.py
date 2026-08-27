@@ -222,6 +222,10 @@ async def _ensure_indexed(
         await emitter("index_skipped", {"reason": "session.json exists and --reuse-index is set"})
         return
 
+    # The datalake backend has no local indexer; ingest runs out of band.
+    if services.video_backend() == "datalake":
+        raise RuntimeError(services.INDEXING_UNSUPPORTED_DETAIL)
+
     # Tool-level dependency check — same as app.py lifespan does for the
     # dashboard. Catches missing scenedetect/librosa/etc. before the
     # agent loop discovers them mid-run.

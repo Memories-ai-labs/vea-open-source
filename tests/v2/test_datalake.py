@@ -377,3 +377,81 @@ class TestDatalakeAgent:
     def test_rerank_can_be_disabled_by_env(self, monkeypatch):
         monkeypatch.setenv("DATALAKE_RERANK", "0")
         assert dl.DatalakeAgent(client([]), FakeLLM()).rerank is False
+
+
+# ─── backend selection + indexing guards ─────────────────────────────────────
+
+class TestBackendGuards:
+    """``VIDEO_BACKEND=datalake`` serves retrieval only.
+
+    Indexing (and index-purging) must refuse with the actual next step. Left
+    unguarded, ``/v2/index`` drives lvmm-core's pipeline against a context
+    with no ``storage`` / ``text_embedding`` / ``vector_db`` and dies deep
+    inside a stage, and ``clear/memories`` — best-effort by design — quietly
+    strips every ``video_no`` from the session while the collection keeps its
+    data.
+    """
+
+    def test_video_backend_reports_the_selected_backend(self, monkeypatch):
+        from src import services
+
+        monkeypatch.delenv("VIDEO_BACKEND", raising=False)
+        assert services.video_backend() == "lvmm"
+
+        monkeypatch.setenv("VIDEO_BACKEND", "DataLake")   # case-insensitive
+        assert services.video_backend() == "datalake"
+
+        monkeypatch.setenv("VIDEO_BACKEND", "something-else")
+        assert services.video_backend() == "lvmm"
+
+    def test_index_route_refuses_on_the_datalake_backend(self, monkeypatch, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from fastapi.testclient import TestClient
+
+        with (
+            patch("lib.oss.storage_factory.get_storage_client", return_value=MagicMock()),
+            patch("src.services.init_lvmm", new=AsyncMock(return_value=None)),
+            patch("src.services.close_lvmm", new=AsyncMock(return_value=None)),
+            patch.dict("os.environ", {"VIDEO_BACKEND": "datalake", "OPENROUTER_API_KEY": "or"}),
+        ):
+            from src import services
+            from src.app import app
+
+            monkeypatch.setattr("src.routes.v2_pipelines._config.WORKSPACES_DIR", tmp_path)
+            monkeypatch.setattr("src.routes._route_utils._config.WORKSPACES_DIR", tmp_path)
+            footage = tmp_path / "proj" / "footage"
+            footage.mkdir(parents=True)
+            (footage / "a.mp4").write_bytes(b"not really a video")
+            monkeypatch.setattr(services, "mavi_agent", MagicMock(), raising=False)
+            monkeypatch.setattr(services, "lvmm_ctx", MagicMock(), raising=False)
+
+            with TestClient(app, raise_server_exceptions=False) as c:
+                resp = c.post("/video-edit/v2/index", json={"project_name": "proj"})
+
+            assert resp.status_code == 409
+            assert "scripts.datalake_ingest" in resp.json()["detail"]
+
+    def test_clear_memories_refuses_on_the_datalake_backend(self, monkeypatch, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from fastapi.testclient import TestClient
+
+        with (
+            patch("lib.oss.storage_factory.get_storage_client", return_value=MagicMock()),
+            patch("src.services.init_lvmm", new=AsyncMock(return_value=None)),
+            patch("src.services.close_lvmm", new=AsyncMock(return_value=None)),
+            patch.dict("os.environ", {"VIDEO_BACKEND": "datalake", "OPENROUTER_API_KEY": "or"}),
+        ):
+            from src import services
+            from src.app import app
+
+            monkeypatch.setattr("src.routes.v2_projects._config.WORKSPACES_DIR", tmp_path)
+            monkeypatch.setattr("src.routes._route_utils._config.WORKSPACES_DIR", tmp_path)
+            monkeypatch.setattr(services, "lvmm_ctx", MagicMock(), raising=False)
+
+            with TestClient(app, raise_server_exceptions=False) as c:
+                resp = c.post("/video-edit/v2/projects/proj/clear/memories")
+
+            assert resp.status_code == 409
+            assert "DELETE /datalake/v1/videos" in resp.json()["detail"]

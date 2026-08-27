@@ -89,6 +89,13 @@ async def v2_index(request: V2IndexRequest):
                 detail="lvmm-core not initialised. Check server startup logs.",
             )
 
+        # LightweightComprehension drives lvmm-core's indexing pipeline, whose
+        # stages read ctx.storage / text_embedding / vector_db — none of which
+        # a datalake context has. Refuse with the actual next step instead of
+        # failing deep inside a stage.
+        if services.video_backend() == "datalake":
+            raise HTTPException(status_code=409, detail=services.INDEXING_UNSUPPORTED_DETAIL)
+
         pipeline = LightweightComprehension(
             project_name=request.project_name,
             source_dir=source_dir,
