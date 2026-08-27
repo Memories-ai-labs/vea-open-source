@@ -371,7 +371,7 @@ check_config_keys() {
   local key val placeholder
   local -a keys=("OPENROUTER_API_KEY" "ELEVENLABS_API_KEY" "MEMORIES_API_KEY")
   local -a placeholders=("" "your-elevenlabs-api-key" "your-memories-ai-api-key")
-  local -a labels=("OpenRouter (LLM + lvmm-core local video understanding)" "ElevenLabs (TTS + STT)" "Memories.ai (legacy V1 only)")
+  local -a labels=("OpenRouter (LLM + lvmm-core local video understanding)" "ElevenLabs (TTS + STT)" "Memories.ai Video Datalake (VIDEO_BACKEND=datalake only)")
   local -a required=("true" "true" "false")
 
   for i in "${!keys[@]}"; do
@@ -486,7 +486,7 @@ prompt_for_config() {
 
   prompt_for_config_key \
     "MEMORIES_API_KEY" \
-    "Memories.ai API key (optional — legacy V1 only):" \
+    "Memories.ai API key (optional — only for VIDEO_BACKEND=datalake):" \
     "your-memories-ai-api-key" \
     "false" \
     "true"

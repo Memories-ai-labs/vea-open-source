@@ -242,6 +242,26 @@ _indexing_progress: Dict[str, dict] = {}
 # Routes + AgentSession + the agent ToolExecutor take these handles by
 # importing them from this module.
 
+def video_backend() -> str:
+    """Which video-understanding backend this process is wired to.
+
+    ``"lvmm"`` (default) owns indexing locally; ``"datalake"`` only serves
+    retrieval — footage is ingested out of band by scripts/datalake_ingest.py,
+    so anything that indexes or purges an index must refuse rather than run
+    lvmm-core stages against a datalake context that has no storage,
+    embeddings or vector DB.
+    """
+    return "datalake" if os.environ.get("VIDEO_BACKEND", "").lower() == "datalake" else "lvmm"
+
+
+INDEXING_UNSUPPORTED_DETAIL = (
+    "This server runs VIDEO_BACKEND=datalake, which serves retrieval only. "
+    "Ingest footage with `python -m scripts.datalake_ingest --project "
+    "<name>` (it uploads to the collection and writes session.json), then "
+    "run the agent with --reuse-index."
+)
+
+
 lvmm_ctx = None  # type: ignore[assignment]
 lvmm_lifecycle = None  # type: ignore[assignment]
 querier = None  # type: ignore[assignment]
@@ -265,6 +285,18 @@ async def init_lvmm() -> None:
     """
     global lvmm_ctx, lvmm_lifecycle, querier, mavi_agent
     if lvmm_ctx is not None:
+        return
+
+    # VIDEO_BACKEND=datalake swaps the local lvmm-core stack for the hosted
+    # Memories.ai Video Datalake. Same two handles (mavi_agent / querier), so
+    # the agent loop, tools, FCPXML compiler and renderer are untouched.
+    # Indexing is not part of this path — videos are ingested into a datalake
+    # collection out of band (scripts/datalake_ingest.py) and the workspace
+    # session carries their ``vid_...`` ids as video_no.
+    if video_backend() == "datalake":
+        from src.datalake import build_datalake_context
+        lvmm_ctx, lvmm_lifecycle, querier, mavi_agent = await build_datalake_context(main_llm)
+        logger.info("video backend: Memories.ai Video Datalake (lvmm-core not loaded)")
         return
 
     try:

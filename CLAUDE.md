@@ -4,9 +4,9 @@ Orientation for AI coding assistants (Codex, Claude Code, etc.) working in this 
 
 ## What this project is
 
-VEA is a video editing automation service. The current product is a **conversational editing agent** that runs in a React dashboard. A user drops video files into a workspace, the system indexes them **locally via lvmm-core** (frame embeddings via MobileCLIP-PyTorch in-process, visual captions via Gemini VLM, vector search via sqlite-vec), and an LLM-driven agent collaborates with the user in chat to plan, refine, and compile a Final Cut Pro XML edit. Drafts auto-render via FFmpeg; high-quality finals can render via DaVinci Resolve.
+VEA is a video editing automation service. The current product is a **conversational editing agent** that runs in a React dashboard. A user drops video files into a workspace, the system indexes them **locally via lvmm-core** (frame embeddings via MobileCLIP-PyTorch in-process, visual captions via Gemini VLM, vector search via sqlite-vec) or, with `VIDEO_BACKEND=datalake`, into the hosted **Memories.ai Video Datalake** (`src/datalake.py` + `scripts/datalake_ingest.py`), and an LLM-driven agent collaborates with the user in chat to plan, refine, and compile a Final Cut Pro XML edit. Drafts auto-render via FFmpeg; high-quality finals can render via DaVinci Resolve.
 
-There is also a legacy V1 pipeline (videoComprehension → flexibleResponse → ...) at `src/pipelines/` that is kept for reproducibility of the paper. **Most active development happens in V2.** Don't conflate the two.
+The legacy V1 pipeline (videoComprehension → flexibleResponse → ...) and its Memories.ai cloud client are **not on this branch** — `src/pipelines/` holds only `common/` and `v2/`. The paper's original codebase lives on the `legacy/v1-main` branch; references to "V1" below are historical unless they name that branch.
 
 ### Dependency on lvmm-core
 
@@ -17,17 +17,20 @@ Three module-level handles in `src/services.py` carry the lvmm-core surface that
 | Handle | What it is | Used by |
 |---|---|---|
 | `services.lvmm_ctx` | lvmm-core `PipelineContext` (DB, vector_db, adapters) | indexing + housekeeping |
-| `services.searcher` | `luci_memory.Searcher` for vector clip search | planning loop + `search_footage` tool |
+| `services.querier` | `luci_memory.Querier` for vector clip search | planning loop + `search_footage` tool |
 | `services.mavi_agent` | `MaviAgent` for RAG chat (rewrite → search → rerank → answer) | Phase 1 gist + `ask_memories` tool |
 
 They're populated by an async `init_lvmm()` factory wired into FastAPI's lifespan startup hook (`src/app.py`). The CLI (`src/cli.py`) calls `init_lvmm()` itself since it runs outside FastAPI's lifespan.
+
+With `VIDEO_BACKEND=datalake`, `init_lvmm()` returns early with the same three handles served by `src/datalake.py` against the hosted Video Datalake — `DatalakeQuerier.search` and `DatalakeAgent.ask` implement the two contracts above, and `lvmm_ctx` becomes a shim whose only live method is `ctx.database.query("transcript", ...)`. lvmm-core is not imported on that path. Footage is ingested out of band by `scripts/datalake_ingest.py`, which writes `data/workspaces/{project}/datalake.json` (collection id + filename → `vid_...` map); `video_no` stays a filename on both backends.
 
 ## Key directories
 
 ```
 src/
 ├── app.py                          # FastAPI entrypoint (port 8000)
-├── services.py                     # Shared singletons (main_llm, video_llm, lvmm-core handles, agent sessions)
+├── services.py                     # Shared singletons (main_llm, video_llm, retrieval handles, agent sessions)
+├── datalake.py                     # Video Datalake retrieval backend (VIDEO_BACKEND=datalake)
 ├── cli.py                          # One-shot CLI (vea-oneshot) for non-interactive runs
 ├── routes/                         # FastAPI routers
 │   ├── _route_utils.py             # Path-safety helpers (workspace resolution)
@@ -57,7 +60,6 @@ src/
 │   │   ├── workspace.py            # WorkspaceManager (file I/O for projects)
 │   │   └── schemas.py              # SessionData, EditDecision, ClipDecision, etc.
 │   ├── common/                     # Shared (V1+V2): TimelineConstructor, dynamic crop
-│   └── flexibleResponse/, videoComprehension/, ...   # V1 legacy pipelines
 ├── schema.py                       # FastAPI request/response models
 └── config.py                       # Config loading, paths, env var population
 lib/
@@ -75,6 +77,8 @@ dashboard/                          # React + Vite + TypeScript frontend
     └── components/                 # AgentChat, NLETimeline, AudioInspector, ...
 data/
 └── workspaces/{project}/           # Per-project storage (footage, edits, renders)
+scripts/
+└── datalake_ingest.py              # upload footage to a datalake collection + write session.json
 docs/                               # architecture.md, onboarding.md
 tests/v2/                           # pytest suite (230+ tests, offline)
 ```
@@ -249,7 +253,7 @@ When adding new LLM call sites or subprocess invocations, wire them to the bundl
 ### Don't
 
 * Don't add try/except around tool executor logic to "make it more robust" — failures should surface to the LLM as `error` fields so it can recover or message the user.
-* Don't hardcode `gs://` paths or assume GCS. V2 is local-storage only. The legacy V1 pipelines have GCS code; leave it alone unless touching V1 explicitly.
+* Don't hardcode `gs://` paths or assume GCS. V2 is local-storage only (`lib/oss/` still carries a GCS adapter from the V1 era; nothing in V2 calls it).
 * Don't add new sections to the agent system prompt without checking if the existing one already covers it. The prompt has been carefully deduplicated.
 * Don't reach into `_agent_sessions` or `_indexing_emitters` from random places — these are private to `services.py` / `v2_websockets.py`.
 
@@ -357,8 +361,8 @@ Backcompat: the old `autonomous: bool` kwarg on `AgentSession` and
 ## Things not to be confused by
 
 * **Two README files in `dashboard/`** — the one at `dashboard/README.md` is a Vite template stub, the real docs are at the repo root.
-* **`run.sh` vs `dev.sh`** — `run.sh` is the legacy V1 launcher (sets up ngrok for the V1 webhook indexer). For V2 work, always use `dev.sh`.
-* **`vinet_v2/` directory** — V1 dynamic cropping uses ViNet saliency. V2 doesn't use ViNet; the agent uses LLM-based saliency analysis instead. You can ignore this directory unless touching V1.
+* **`run.sh` vs `dev.sh`** — `run.sh` is the V1-era launcher; its ngrok step existed for the removed V1 webhook indexer and is now opt-in (`--ngrok`). For V2 work, always use `dev.sh`.
+* **`vinet_v2/` directory** — empty leftover from V1 dynamic cropping (ViNet saliency). V2 uses LLM-based saliency analysis instead; nothing reads this directory.
 * **`config/apiKeys.json`** — does not exist in V2. Keys live in `config.json` under `api_keys`.
 * **`gs://` GCS paths** in v1 code — irrelevant to V2. Don't propagate them.
 * **`docs/architecture-v2.md` and `docs/implementation-plan.md`** — historical planning docs. The authoritative architecture doc is `docs/architecture.md`.

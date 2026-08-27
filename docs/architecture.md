@@ -586,7 +586,7 @@ Every agent session writes a structured debug bundle to `{workspace}/logs/`. The
     "workspaces_dir": "data/workspaces"
   },
   "api_keys": {
-    "MEMORIES_API_KEY": "... (optional; legacy V1 only)",
+    "MEMORIES_API_KEY": "... (optional; only for VIDEO_BACKEND=datalake)",
     "GOOGLE_CLOUD_PROJECT": "...",
     "GOOGLE_CLOUD_LOCATION": "us-central1",
     "ELEVENLABS_API_KEY": "...",
@@ -609,7 +609,7 @@ All keys in `api_keys` are loaded into environment variables at startup by `src/
 
 ### API Prefixes
 
-- V1: `/video-edit/v1`
+- V1: removed on this branch (see the `legacy/v1-main` branch)
 - V2: `/video-edit/v2`
 - Dashboard: `/app` (serves `dashboard/dist/`)
 

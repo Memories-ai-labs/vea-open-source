@@ -13,6 +13,7 @@
   </p>
 
   <p>
+    <img src="https://img.shields.io/badge/Release-2.0-0E0E10.svg" alt="Release 2.0">
     <a href="LICENSE">
       <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
     </a>
@@ -28,6 +29,10 @@
 
   <p align="center">
     <strong>VEA</strong> is an AI-powered video editing service that turns raw footage into polished short-form content through a natural-language conversation with an editing agent.
+  </p>
+
+  <p align="center">
+    <strong>VEA 2.0</strong> is the agent release: editing is a conversation with a tool-using agent instead of a fixed pipeline, and video understanding is a swappable backend — local <a href="https://github.com/Memories-ai-labs/lvmm-core">lvmm-core</a> or the hosted Memories.ai Video Datalake. See <a href="CHANGELOG.md">CHANGELOG.md</a>.
   </p>
 </div>
 
@@ -97,7 +102,7 @@ Edit `config.json` and fill in the `api_keys` section:
 | `OPENROUTER_API_KEY` | **One of these two** | https://openrouter.ai |
 | `GOOGLE_CLOUD_PROJECT` | **One of these two** | A GCP project with Vertex AI enabled |
 | `ELEVENLABS_API_KEY` | Optional | https://elevenlabs.io — needed for narration |
-| `MEMORIES_API_KEY` | Optional | Legacy V1-only Memories.ai flows |
+| `MEMORIES_API_KEY` | Optional | https://memories.ai — only for `VIDEO_BACKEND=datalake` (see below) |
 
 VEA uses **two** LLM slots and routes each to the best backend:
 
@@ -105,6 +110,37 @@ VEA uses **two** LLM slots and routes each to the best backend:
 * **Video LLM** (native video input for `refine_clip_timestamps`) — controlled by `VIDEO_LLM_MODEL`. A bare name like `gemini-2.5-flash` routes via **Vertex AI Gemini** (needs `GOOGLE_CLOUD_PROJECT` + `gcloud auth application-default login`). A slash-prefixed ID like `google/gemini-3-flash-preview` routes via OpenRouter.
 
 Both can be swapped live — dashboard dropdown, `POST /video-edit/v2/system/model`, or `POST /video-edit/v2/system/video_model`.
+
+### Video-understanding backend
+
+`ask_memories` and `search_footage` are served by one of two interchangeable backends:
+
+| `VIDEO_BACKEND` | Retrieval | Indexing | Needs |
+|---|---|---|---|
+| unset (default) | local **lvmm-core** — SQLite + sqlite-vec, MobileCLIP embeddings | `POST /v2/index`, on your machine | `OPENROUTER_API_KEY`, ~325 MB MobileCLIP weights |
+| `datalake` | hosted **Memories.ai Video Datalake** (`/datalake/v1/search`, captions + transcription + summary) | `python -m scripts.datalake_ingest --project NAME` | `MEMORIES_API_KEY` |
+
+The datalake path ingests footage into a collection, records the `vid_...` ids in
+`data/workspaces/{project}/datalake.json`, and is then selected per run:
+
+```bash
+python -m scripts.datalake_ingest --project my-project      # prints the collection id
+VIDEO_BACKEND=datalake DATALAKE_MAP=data/workspaces/my-project/datalake.json \
+  python -m src.cli --project my-project --reuse-index --brief "..."
+```
+
+Everything downstream — agent loop, tools, FCPXML compiler, renderer — is identical on both paths; only `src/services.init_lvmm` differs.
+
+Datalake knobs (all optional):
+
+| Env | Default | Effect |
+|---|---|---|
+| `DATALAKE_COLLECTION_ID` | from the sidecar | override the collection to search |
+| `DATALAKE_RERANK` | on | `0` skips the cross-encoder pass in `ask_memories` (that pass is billed ×3) |
+| `DATALAKE_MAX_ATTEMPTS` | `5` | HTTP attempts per call; 429 honours `retry_after`, 5xx and transport errors back off, other 4xx fail fast |
+
+Every priced call is tallied and printed with each search and on shutdown:
+`[DATALAKE COST] searches=23 (reranked=4) derived_reads=6 ~$0.27`.
 
 ### 3. Start the backend
 
@@ -301,7 +337,7 @@ V2 (current, agent-driven) is at `/video-edit/v2`. The most useful endpoints:
 | `POST` | `/v2/projects/{project}/clear/planning` | Clear chat + scratchpads + edit |
 | `POST` | `/v2/projects/{project}/clear/memories` | Clear local lvmm-core index rows/vectors for a project |
 
-A legacy V1 pipeline-style API still lives at `/video-edit/v1` (index → flexible_respond). It's the original system from the paper and is kept for reproducibility, but the dashboard and agent flow only use V2. The original V1-only codebase is preserved on the [`legacy/v1-main`](https://github.com/Memories-ai-labs/vea-open-source/tree/legacy/v1-main) branch.
+There is no V1 API on this branch — the original pipeline-style system from the paper (`/video-edit/v1`, index → flexible_respond) and its `MemoriesAiManager` cloud client were removed when V2 landed. That codebase is preserved on the [`legacy/v1-main`](https://github.com/Memories-ai-labs/vea-open-source/tree/legacy/v1-main) branch.
 
 ---
 
